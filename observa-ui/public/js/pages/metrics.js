@@ -94,7 +94,7 @@ export function metricsPage(main, ctx) {
     const target = view === 'table' ? out : tableBox;
     target.append(h('div', { class: 'table-wrap', style: { maxHeight: view === 'table' ? '560px' : '320px' } }, h('table', { class: 'tbl' },
       h('thead', {}, h('tr', {}, h('th', {}, 'Time'), cols.map((s) => h('th', { class: 'num', title: s.label }, short(s.label))))),
-      h('tbody', {}, times.map((t) => h('tr', {}, h('td', { class: 'mono' }, view === 'table' ? dateTime(t * 1000) : timeHM(t * 1000)), maps.map((m) => h('td', { class: 'num' }, m.has(t) ? fmt(Number(m.get(t)), unit) : h('span', { class: 'dim' }, '—')))))))));
+      h('tbody', {}, times.map((t) => h('tr', {}, h('td', { class: 'mono ts' }, view === 'table' ? dateTime(t * 1000) : timeHM(t * 1000)), maps.map((m) => h('td', { class: 'num' }, m.has(t) ? fmt(Number(m.get(t)), unit) : h('span', { class: 'dim' }, '—')))))))));
     if (series.length > 8) target.append(h('div', { class: 'muted', style: { marginTop: '6px' } }, 'Table shows the first 8 series.'));
   }
 

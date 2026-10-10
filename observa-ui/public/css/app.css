@@ -1033,7 +1033,7 @@ kbd { font-family: var(--mono); font-size: 11.5px; background: var(--panel-3); b
   .table-wrap .tbl th, .table-wrap .tbl td { padding-left: 8px; padding-right: 8px; }
 }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
-@media (max-width: 600px) { .table-wrap .tbl th { white-space: normal; } .table-wrap .tbl td .mono, .table-wrap .tbl td.mono { overflow-wrap: anywhere; } }
+@media (max-width: 600px) { .table-wrap .tbl th { white-space: normal; } .table-wrap .tbl td .mono, .table-wrap .tbl td.mono:not(.ts) { overflow-wrap: anywhere; } }
 .panel-stale { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--warning); margin-bottom: 6px; }
 .icon-btn:disabled { opacity: 0.45; cursor: not-allowed; }
 @media (max-width: 600px) { .row-actions { flex-wrap: wrap; justify-content: flex-end; } }
@@ -1043,3 +1043,25 @@ kbd { font-family: var(--mono); font-size: 11.5px; background: var(--panel-3); b
   .table-wrap .tbl td .pill { white-space: nowrap; }
 }
 @media (max-width: 600px) { .table-wrap .tbl td .avatar.sm { display: none; } .table-wrap .tbl td .select-sm { max-width: 96px; } }
+/* ---------- post-gate cleanup: UX-010 phone tables ---------- */
+@media (max-width: 600px) {
+  /* long text wraps instead of widening the table */
+  .table-wrap .tbl td.msg { white-space: normal; max-width: none; overflow-wrap: anywhere; display: table-cell; }
+  /* role-dashboard tables mark their least important columns; hide them on phones as in narrow panels */
+  .col-minor { display: none; }
+}
+/* any table that still needs to scroll sideways (data-dense tables such as Metrics) shows edge shadows as the cue;
+   the shadows only appear where there is hidden content to scroll to */
+:root { --scroll-cue: rgba(148,163,184,0.55); }
+:root[data-theme="light"] { --scroll-cue: rgba(15,23,42,0.32); }
+.table-wrap, .panel .table-wrap {
+  background:
+    linear-gradient(to right, var(--panel) 30%, transparent) left / 24px 100% no-repeat local,
+    linear-gradient(to left, var(--panel) 30%, transparent) right / 24px 100% no-repeat local,
+    radial-gradient(farthest-side at 0 50%, var(--scroll-cue), transparent) left / 16px 100% no-repeat scroll,
+    radial-gradient(farthest-side at 100% 50%, var(--scroll-cue), transparent) right / 16px 100% no-repeat scroll,
+    var(--panel);
+}
+.tbl td.ts { white-space: nowrap; }
+@media (max-width: 600px) { .tbl td.ts { white-space: normal; } }
+@media (max-width: 600px) { .table-wrap .tbl td.wrap-any, .table-wrap .tbl td.wrap-any .pill { overflow-wrap: anywhere; white-space: normal; } }

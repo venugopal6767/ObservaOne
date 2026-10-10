@@ -2,14 +2,14 @@
 import { h, api, clear, icon, fmt, short, ago, sparkline, doughnut, timeChart, emptyState, errorBox, demoBadge } from '../ui.js';
 import { chartSlots } from './common.js';
 import { openLog } from './logs.js';
-import { attentionStrip, errorState, staleNotice } from '../personas/widgets.js';
+import { attentionStrip, errorState, staleNotice, statusPill } from '../personas/widgets.js';
 
 const SEV = { critical: ['Critical', 'sev-critical'], warning: ['Warning', 'sev-warning'], info: ['Info', 'sev-info'] };
-export const STATUS_PILL = { open: ['Open', 'st-open'], acknowledged: ['Acknowledged', 'st-ack'], investigating: ['Investigating', 'st-inv'], resolved: ['Resolved', 'st-res'] };
 const LEVEL_PILL = { ERROR: 'lv-error', WARN: 'lv-warn', INFO: 'lv-info', DEBUG: 'lv-debug' };
 
 export const sevPill = (s) => { const [l, c] = SEV[s] || [s, 'sev-info']; return h('span', { class: `pill ${c}` }, l); };
-export const statusPill = (s) => { const [l, c] = STATUS_PILL[s] || [s, 'st-open']; return h('span', { class: `pill ${c}` }, l); };
+// one status-label helper for the whole app (UX-012); re-exported so existing imports keep working
+export { statusPill };
 export const levelPill = (lv) => h('span', { class: `pill ${LEVEL_PILL[lv] || 'lv-debug'}` }, lv);
 
 export function overviewPage(main, ctx) {

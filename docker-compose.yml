@@ -80,7 +80,7 @@ services:
   # ---- ObservaOne: the main web UI (login, dashboards, logs, traces, alerts) ----
   observa:
     build: ./observa-ui
-    image: observa-ui:1.8.2
+    image: observa-ui:1.8.3
     environment:
       UI_BRAND: ${UI_BRAND:-ObservaOne}
       UI_ADMIN_USER: ${UI_ADMIN_USER:-admin}

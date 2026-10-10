@@ -336,6 +336,8 @@ export const statusPill = (s) => {
     failed: ['Failed', 'st-err'], rolled_back: ['Rolled back', 'st-slow'], degraded: ['Degraded', 'st-slow'],
     in_progress: ['In progress', 'st-inv'], running: ['Running', 'st-inv'], pending: ['Pending', 'st-res'], skipped: ['Skipped', 'st-res'],
     critical: ['Critical', 'sev-critical'], warning: ['Warning', 'sev-warning'],
+    // incident workflow (Incidents, Overview, Service detail)
+    open: ['Open', 'st-open'], acknowledged: ['Acknowledged', 'st-ack'], investigating: ['Investigating', 'st-inv'], resolved: ['Resolved', 'st-res'],
   };
   const [l, c] = map[s] || [s, 'st-res'];
   return h('span', { class: `pill ${c}` }, l);

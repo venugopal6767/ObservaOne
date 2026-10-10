@@ -117,7 +117,7 @@ export function alertingPage(main, ctx) {
         h('tbody', {}, rules.map((r) => {
           const [sl, sc] = SEV[r.severity] || [r.severity, 'pill-solid-muted'];
           return h('tr', {},
-            h('td', {}, h('b', { style: { fontWeight: 600 } }, r.name), h('div', { class: 'dim', style: { fontSize: '11.5px' } }, r.summary.replace(/\{\{.*?\}\}/g, '…'))),
+            h('td', { class: 'wrap-any' }, h('b', { style: { fontWeight: 600 } }, r.name), h('div', { class: 'dim', style: { fontSize: '11.5px' } }, r.summary.replace(/\{\{.*?\}\}/g, '…'))),
             h('td', { class: 'dim col-phone-hide' }, r.group),
             h('td', {}, h('span', { class: `pill ${sc}` }, sl)),
             h('td', {}, h('span', { class: `pill ${stateP[r.state] || 'pill-muted'}` }, r.state === 'inactive' ? 'OK' : `${r.state}${r.firing ? ` (${r.firing})` : ''}`), r.health === 'err' ? h('div', { class: 'c-red', style: { fontSize: '11px' } }, r.lastError) : null),

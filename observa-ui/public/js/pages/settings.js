@@ -230,14 +230,14 @@ export function settingsPage(main, ctx) {
         const f = filter.value.toLowerCase();
         clear(body).append(...d.routes.filter((r) => !f || `${r.method} ${r.path} ${r.permission} ${r.description}`.toLowerCase().includes(f)).map((r) => h('tr', {},
           h('td', {}, pill(r.method, { GET: 'green', POST: 'blue', PUT: 'orange', DELETE: 'red' }[r.method] || 'muted')),
-          h('td', { class: 'mono' }, r.path), h('td', { class: 'mono dim' }, r.permission), h('td', { class: 'muted' }, r.description))));
+          h('td', { class: 'mono' }, r.path), h('td', { class: 'mono dim col-phone-hide' }, r.permission), h('td', { class: 'muted' }, r.description))));
       };
       filter.addEventListener('input', draw);
       clear(out).append(
         h('div', { class: 'info-box' }, icon('key', 16), h('span', {}, d.auth)),
         h('div', { class: 'toolbar' }, filter, h('div', { class: 'grow' }), h('span', { class: 'muted' }, `${d.routes.length} endpoints`)),
         h('div', { class: 'table-wrap', style: { maxHeight: 'calc(100vh - 300px)' } }, h('table', { class: 'tbl' },
-          h('thead', {}, h('tr', {}, ['Method', 'Path', 'Permission', 'Description'].map((x) => h('th', {}, x)))), body)));
+          h('thead', {}, h('tr', {}, ['Method', 'Path', 'Permission', 'Description'].map((x, i) => h('th', { class: i === 2 ? 'col-phone-hide' : '' }, x)))), body)));
       draw();
     } catch (e) {
       clear(out).append(errorState(e.message, () => ctx.navigate(location.pathname + location.search, true), 'This section could not load'));

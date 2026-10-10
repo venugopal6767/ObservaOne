@@ -3,7 +3,7 @@ import { chromium, BASE, login, settle, SP } from './lib.mjs';
 const OUT = process.env.OUT || 'before';
 const ONLY = process.env.ONLY ? process.env.ONLY.split(',') : null;
 const b = await chromium.launch();
-const pages = [['home', '/views'], ['overview', '/overview'], ['services', '/services'], ['service', '/services/api-gateway'], ['infra', '/infrastructure'], ['incidents', '/incidents'], ['incident', '/incidents/43'], ['logs', '/logs'], ['traces', '/traces'], ['metrics', '/metrics'], ['dashboards', '/dashboards'], ['insights', '/insights'], ['k8s', '/views/kubernetes'], ['sre', '/views/sre'], ['agents', '/agents'], ['datasources', '/datasources'], ['alerting', '/alerting'], ['settings', '/settings?tab=users']].filter(([n]) => !ONLY || ONLY.includes(n));
+const pages = [['home', '/views'], ['overview', '/overview'], ['services', '/services'], ['service', '/services/api-gateway'], ['infra', '/infrastructure'], ['incidents', '/incidents'], ['incident', '/incidents/43'], ['logs', '/logs'], ['traces', '/traces'], ['metrics', '/metrics'], ['dashboards', '/dashboards'], ['insights', '/insights'], ['k8s', '/views/kubernetes'], ['sre', '/views/sre'], ['devops', '/views/devops/deployments'], ['appowner', '/views/appowner'], ['agents', '/agents'], ['datasources', '/datasources'], ['alerting', '/alerting'], ['settings', '/settings?tab=users']].filter(([n]) => !ONLY || ONLY.includes(n));
 // detail pages: the first service and incident this install has
 { const p0 = await login(b, 'admin', '', { width: 800, height: 600 });
   const j = (u) => p0.evaluate(async (x) => (await fetch(x, { headers: { 'X-Requested-With': 'observa' } })).json(), u);

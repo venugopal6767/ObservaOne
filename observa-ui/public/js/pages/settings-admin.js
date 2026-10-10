@@ -322,11 +322,11 @@ export async function auditTab(out) {
     const tone = (a) => (a.includes('failed') || a.includes('denied') || a.includes('locked') ? 'red' : a.startsWith('login') ? 'green' : 'blue');
     if (!rows.length) { clear(box).append(h('div', { class: 'table-wrap' }, h('div', { class: 'empty' }, 'No entries match.'))); return; }
     clear(box).append(h('div', { class: 'table-wrap', style: { maxHeight: 'calc(100vh - 290px)' } }, h('table', { class: 'tbl' },
-      h('thead', {}, h('tr', {}, ['Time', 'User', 'IP', 'Action', 'Details'].map((x) => h('th', {}, x)))),
+      h('thead', {}, h('tr', {}, ['Time', 'User', 'IP', 'Action', 'Details'].map((x, i) => h('th', { class: i === 2 ? 'col-phone-hide' : '' }, x)))),
       h('tbody', {}, rows.map((r) => {
         const { id, time, user, ip, action, ...rest } = r;
-        return h('tr', {}, h('td', { class: 'mono', style: { whiteSpace: 'nowrap' } }, dateTime(Date.parse(time))), h('td', {}, user), h('td', { class: 'mono dim' }, ip),
-          h('td', {}, pill(action, tone(action))), h('td', { class: 'mono dim msg', style: { fontSize: '11.5px' }, title: JSON.stringify(rest) }, Object.keys(rest).length ? JSON.stringify(rest) : ''));
+        return h('tr', {}, h('td', { class: 'mono ts' }, dateTime(Date.parse(time))), h('td', {}, user), h('td', { class: 'mono dim col-phone-hide' }, ip),
+          h('td', { class: 'wrap-any' }, pill(action, tone(action))), h('td', { class: 'mono dim msg', style: { fontSize: '11.5px' }, title: JSON.stringify(rest) }, Object.keys(rest).length ? JSON.stringify(rest) : ''));
       })))));
   } catch (e) {
     clear(box).append(errorState(e.message, () => ctx.navigate(location.pathname + location.search, true), 'The audit log could not load'));
