@@ -143,4 +143,25 @@ export const EXTRA_MIGRATIONS = [
       UPDATE datasource_settings SET mode = 'live', updated_at = now(), updated_by = 'migration-4' WHERE mode = 'demo';
     `,
   },
+  {
+    id: 5,
+    name: 'agents: enrollment, per-agent credentials, heartbeats',
+    // Additive only: existing agents and tokens keep working (they are "legacy" until re-installed).
+    sql: `
+      ALTER TABLE agent_tokens ADD COLUMN IF NOT EXISTS max_uses INT;              -- NULL = unlimited
+      ALTER TABLE agent_tokens ADD COLUMN IF NOT EXISTS uses INT NOT NULL DEFAULT 0;
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS credential_hash TEXT;            -- SHA-256 of the agent's own credential
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS machine_hash TEXT NOT NULL DEFAULT '';
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS enrolled_at TIMESTAMPTZ;
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS last_heartbeat TIMESTAMPTZ;      -- server time of receipt
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS heartbeats BIGINT NOT NULL DEFAULT 0;
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS boot_time TIMESTAMPTZ;
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS kernel TEXT NOT NULL DEFAULT '';
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS labels JSONB NOT NULL DEFAULT '{}'::jsonb;
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS diag JSONB NOT NULL DEFAULT '{}'::jsonb;
+      CREATE UNIQUE INDEX IF NOT EXISTS agents_credential_uq ON agents (credential_hash) WHERE credential_hash IS NOT NULL;
+      -- two enrolled agents never share a display name (it is the "host" label on their metrics)
+      CREATE UNIQUE INDEX IF NOT EXISTS agents_enrolled_host_uq ON agents (platform, lower(host)) WHERE credential_hash IS NOT NULL;
+    `,
+  },
 ];

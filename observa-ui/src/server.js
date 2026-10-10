@@ -9,6 +9,7 @@ import { pruneAudit } from './store.js';
 import { loadDatasourceSettings } from './datasources.js';
 import { api } from './api.js';
 import { verifyAgent } from './routes/agents.js';
+import { agentControlRouter } from './routes/agent-control.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..');
@@ -38,6 +39,8 @@ app.get('/healthz', async (req, res) => {
 });
 // Nginx asks this for every agent upload (auth_request). Nginx blocks /internal/ from outside.
 app.all('/internal/agent-verify', verifyAgent);
+// Agent enrollment + heartbeats: their own small body limit and credential checks, before the main API.
+app.use('/api', agentControlRouter);
 app.use('/api', api);
 
 // Third-party files served from node_modules (no internet needed at runtime)

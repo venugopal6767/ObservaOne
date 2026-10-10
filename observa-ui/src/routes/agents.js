@@ -10,9 +10,10 @@ import { sha256, randomToken } from '../secrets.js';
 import { requirePerm, httpError } from '../auth.js';
 import { promInstant } from '../datasources.js';
 import { cpuByHost, memByHost, diskFreeByHost } from '../queries.js';
+import { CREDENTIAL_RE, AGENT_LATEST, agentForCredential, forgetAgentCredential, describeAgent } from './agent-control.js';
 
 export const AGENT_VERSIONS = {
-  agent: '1.0.0',
+  agent: AGENT_LATEST,
   otelcol: '0.162.0',
   nodeExporter: '1.12.1',
   windowsExporter: '0.31.8',
@@ -47,7 +48,24 @@ async function tokenFor(token) {
 export async function verifyAgent(req, res) {
   try {
     const m = /^Bearer\s+(\S+)$/i.exec(req.get('authorization') || '');
-    if (!m || !TOKEN_RE.test(m[1])) return res.status(401).end();
+    if (!m) return res.status(401).end();
+
+    // Enrolled agent (Linux agent 1.1+): its own credential; identity comes from the database, never from headers.
+    if (CREDENTIAL_RE.test(m[1])) {
+      const a = await agentForCredential(m[1]);
+      if (!a) return res.status(401).end();
+      if (a.blocked) return res.status(403).end();
+      const s = seen.get(a.id);
+      if (!s || Date.now() - s.at >= SEEN_WRITE_EVERY) {
+        seen.set(a.id, { at: Date.now(), blocked: false });
+        if (seen.size > 20000) seen.clear();
+        await q('UPDATE agents SET last_seen = now() WHERE id = $1', [a.id]); // last DATA upload (heartbeats are separate)
+      }
+      return res.status(204).end();
+    }
+
+    // Older agents (Windows, Docker, Kubernetes, Linux 1.0): the shared enrollment token on every upload.
+    if (!TOKEN_RE.test(m[1])) return res.status(401).end();
     const t = await tokenFor(m[1]);
     if (!t) return res.status(401).end();
     const host = clean(req.get('x-agent-host'));
@@ -56,15 +74,22 @@ export async function verifyAgent(req, res) {
     const id = clean(req.get('x-agent-id'), 80) || `${platform}:${host}`;
     const s = seen.get(id);
     if (s && Date.now() - s.at < SEEN_WRITE_EVERY) return res.status(s.blocked ? 403 : 204).end();
+    // A shared token can never write as an ENROLLED agent: those prove who they are with their own credential.
     const row = await one(`
       INSERT INTO agents (id, host, platform, os, arch, version, env, role, cluster, ip, token_id)
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
       ON CONFLICT (id) DO UPDATE SET host = $2, platform = $3, os = $4, arch = $5, version = $6, env = $7, role = $8,
         cluster = $9, ip = $10, token_id = $11, last_seen = now()
+        WHERE agents.credential_hash IS NULL
       RETURNING blocked, (xmax = 0) AS inserted`,
     [id, host, platform, clean(req.get('x-agent-os')), clean(req.get('x-agent-arch'), 16), clean(req.get('x-agent-version'), 32),
       clean(req.get('x-agent-env'), 64), clean(req.get('x-agent-role'), 64), clean(req.get('x-agent-cluster'), 64),
       clean(req.get('x-real-ip') || req.ip, 64), t.id]);
+    if (!row) { // the id belongs to an enrolled agent: refuse (impersonation attempt or a stale header)
+      audit(null, 'agent.impersonation_refused', { username: 'agent', id, host });
+      seen.set(id, { at: Date.now(), blocked: true });
+      return res.status(403).end();
+    }
     await q('UPDATE agent_tokens SET last_used = now() WHERE id = $1', [t.id]);
     if (row.inserted) audit(null, 'agent.registered', { username: 'agent', id, host, platform });
     if (seen.size > 20000) seen.clear();
@@ -113,9 +138,33 @@ async function safeByHost(query) {
   }
 }
 
+const publicDiag = (d = {}) => ({
+  collectors: d.collectors || null, uploadFailures: d.uploadFailures ?? null, lastError: d.lastError || '', uptimeSeconds: d.uptimeSeconds ?? null,
+});
+
+function toAgent(a, now, m) {
+  const d = describeAgent(a, now);
+  const enrolled = !!a.credential_hash;
+  const lastData = a.last_seen && (!a.enrolled_at || new Date(a.last_seen) - new Date(a.enrolled_at) > 1000) ? a.last_seen : null;
+  const get = (map) => (map && map.get(a.host)) ?? null;
+  return {
+    id: a.id, host: a.host, platform: a.platform, os: a.os, arch: a.arch, version: a.version, env: a.env, role: a.role,
+    cluster: a.cluster, ip: a.ip, kernel: a.kernel || '', labels: a.labels || {}, token: a.token_name || null,
+    enrolled, enrolledAt: a.enrolled_at || null, firstSeen: a.first_seen,
+    lastHeartbeat: a.last_heartbeat || null, lastData, lastSeen: a.last_heartbeat || lastData || null,
+    bootTime: a.boot_time || null,
+    status: d.status, statusReason: d.reason, problems: d.problems, secondsAgo: d.ageSeconds,
+    outdated: !!a.version && a.version !== AGENT_VERSIONS.agent,
+    cpu: get(m.cpu), mem: get(m.mem), diskFree: get(m.disk),
+    sendFailures: get(m.fails), queue: get(m.queue),
+  };
+}
+
 const tokenRow = (t) => ({
   id: Number(t.id), name: t.name, prefix: t.prefix, env: t.env, createdBy: t.created_by, createdAt: t.created_at,
   lastUsed: t.last_used, expiresAt: t.expires_at, revoked: t.revoked, agents: Number(t.agents || 0),
+  maxUses: t.max_uses == null ? null : Number(t.max_uses), uses: Number(t.uses || 0),
+  usedUp: t.max_uses != null && Number(t.uses) >= Number(t.max_uses),
   expired: !!(t.expires_at && new Date(t.expires_at) < new Date()),
 });
 
@@ -130,26 +179,33 @@ agentsRouter.get('/agents', requirePerm('view'), wrap(async (req, res) => {
     safeByHost('sum by (host) (increase({__name__=~"otelcol_exporter_send_failed_(metric_points|log_records|spans)_total", agent="observaone"}[15m]))'),
     safeByHost('sum by (host) (otelcol_exporter_queue_size{agent="observaone"})'),
   ]);
-  const agents = rows.map((a) => {
-    const status = a.blocked ? 'blocked' : a.age <= config.agent.onlineSeconds ? 'online' : 'offline';
-    return {
-      id: a.id, host: a.host, platform: a.platform, os: a.os, arch: a.arch, version: a.version, env: a.env, role: a.role,
-      cluster: a.cluster, ip: a.ip, token: a.token_name || null, firstSeen: a.first_seen, lastSeen: a.last_seen,
-      secondsAgo: a.age, status, outdated: !!a.version && a.version !== AGENT_VERSIONS.agent,
-      cpu: cpu.get(a.host) ?? null, mem: mem.get(a.host) ?? null, diskFree: disk.get(a.host) ?? null,
-      sendFailures: fails.get(a.host) ?? 0, queue: queue.get(a.host) ?? 0,
-    };
-  });
-  const count = (s) => agents.filter((a) => a.status === s).length;
+  const now = Date.now();
+  const agents = rows.map((a) => toAgent(a, now, { cpu, mem, disk, fails, queue }));
+  const count = (st) => agents.filter((a) => a.status === st).length;
   res.json({
     agents,
     summary: {
-      total: agents.length, online: count('online'), offline: count('offline'), blocked: count('blocked'),
+      total: agents.length,
+      online: count('online') + count('attention'),      // sending heartbeats (attention = online with a problem)
+      attention: count('attention'),
+      notReporting: count('not_reporting'),
+      offline: count('offline'),
+      pending: count('pending'),
+      blocked: count('blocked'),
       outdated: agents.filter((a) => a.outdated).length,
       byPlatform: Object.fromEntries(PLATFORMS.map((p) => [p, agents.filter((a) => a.platform === p).length])),
     },
     latest: AGENT_VERSIONS.agent,
+    thresholds: { onlineSeconds: config.agent.onlineSeconds, offlineSeconds: config.agent.offlineSeconds, heartbeatSeconds: config.agent.heartbeatSeconds },
   });
+}));
+
+// One agent with its full diagnostics
+agentsRouter.get('/agents/:id', requirePerm('view'), wrap(async (req, res, next) => {
+  if (req.params.id === 'install-info') return next();
+  const a = await one(`SELECT a.*, t.name AS token_name FROM agents a LEFT JOIN agent_tokens t ON t.id = a.token_id WHERE a.id = $1`, [req.params.id]);
+  if (!a) throw httpError(404, 'Agent not found.', { state: 'not_found' });
+  res.json({ agent: { ...toAgent(a, Date.now(), {}), diag: publicDiag(a.diag) } });
 }));
 
 agentsRouter.get('/agents/install-info', requirePerm('view'), wrap(async (req, res) => {
@@ -160,6 +216,7 @@ agentsRouter.post('/agents/:id/block', requirePerm('integrations.manage'), wrap(
   const r = await one('UPDATE agents SET blocked = TRUE WHERE id = $1 RETURNING host', [req.params.id]);
   if (!r) throw httpError(404, 'Agent not found.');
   seen.delete(req.params.id);
+  forgetAgentCredential(req.params.id);
   audit(req, 'agent.block', { id: req.params.id, host: r.host });
   res.json({ ok: true });
 }));
@@ -168,6 +225,7 @@ agentsRouter.post('/agents/:id/unblock', requirePerm('integrations.manage'), wra
   const r = await one('UPDATE agents SET blocked = FALSE WHERE id = $1 RETURNING host', [req.params.id]);
   if (!r) throw httpError(404, 'Agent not found.');
   seen.delete(req.params.id);
+  forgetAgentCredential(req.params.id);
   audit(req, 'agent.unblock', { id: req.params.id, host: r.host });
   res.json({ ok: true });
 }));
@@ -177,6 +235,7 @@ agentsRouter.delete('/agents/:id', requirePerm('integrations.manage'), wrap(asyn
   const r = await one('DELETE FROM agents WHERE id = $1 RETURNING host', [req.params.id]);
   if (!r) throw httpError(404, 'Agent not found.');
   seen.delete(req.params.id);
+  forgetAgentCredential(req.params.id);
   audit(req, 'agent.remove', { id: req.params.id, host: r.host });
   res.json({ ok: true });
 }));
@@ -192,14 +251,17 @@ agentsRouter.post('/agent-tokens', requirePerm('integrations.manage'), wrap(asyn
   const name = String(req.body?.name || '').trim();
   const env = clean(req.body?.env, 64);
   const days = Number(req.body?.expiresDays || 0);
+  const maxUses = req.body?.maxUses == null || req.body.maxUses === '' || Number(req.body.maxUses) === 0 ? null : Number(req.body.maxUses);
+  if (maxUses !== null && (!Number.isInteger(maxUses) || maxUses < 1 || maxUses > 100000)) throw httpError(400, 'Max uses must be 1 to 100000, or empty for unlimited.');
   if (!name || name.length > 60) throw httpError(400, 'Give the token a name (max 60 characters), e.g. "Production Linux servers".');
   if (!Number.isInteger(days) || days < 0 || days > 3650) throw httpError(400, 'Expiry must be 0 (never) to 3650 days.');
   const prefix = crypto.randomBytes(4).toString('hex');
   const token = `oat_${prefix}_${randomToken(24)}`;
-  const r = await one(`INSERT INTO agent_tokens (name, prefix, token_hash, env, created_by, expires_at)
-                       VALUES ($1,$2,$3,$4,$5, CASE WHEN $6::int > 0 THEN now() + make_interval(days => $6::int) END) RETURNING *`,
-  [name, prefix, sha256(token), env, req.user.username, days]);
-  audit(req, 'agent.token.create', { name, prefix, env });
+  const r = await one(`INSERT INTO agent_tokens (name, prefix, token_hash, env, created_by, expires_at, max_uses)
+                       VALUES ($1,$2,$3,$4,$5, CASE WHEN $6::int > 0 THEN now() + make_interval(days => $6::int) END, $7) RETURNING *`,
+  [name, prefix, sha256(token), env, req.user.username, days, maxUses]);
+  audit(req, 'agent.token.create', { name, prefix, env, expiresDays: days || null, maxUses });
+  res.set('Cache-Control', 'no-store'); // the only time the token is ever sent
   res.json({ token, ...tokenRow(r) });
 }));
 
