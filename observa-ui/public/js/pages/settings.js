@@ -251,7 +251,7 @@ export function settingsPage(main, ctx) {
       h('dt', {}, 'Alerts'), h('dd', {}, 'Prometheus rules + Alertmanager'),
       h('dt', {}, 'Logs / Traces'), h('dd', {}, 'Loki / Tempo (see Data Sources)'),
       h('dt', {}, 'App database'), h('dd', {}, 'PostgreSQL'),
-      h('dt', {}, 'Grafana'), h('dd', {}, h('a', { href: ctx.me.grafanaUrl, target: '_blank', rel: 'noopener' }, 'Open Grafana ', icon('external', 12))),
+      h('dt', {}, 'Dashboards'), h('dd', {}, 'Built in (see Dashboards)'),
       h('dt', {}, 'Keyboard'), h('dd', {}, 'Press / to search'))));
   }
 

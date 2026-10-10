@@ -1,6 +1,6 @@
 // Incidents: list (opened automatically from alerts, or declared by people) and one page per incident.
 import { h, api, clear, icon, emptyState, errorBox, select, tabs, modal, field, toast, fmt, dateTime, ago, timeChart, demoBadge, legendRow } from '../ui.js';
-import { chartSlots } from './common.js';
+import { chartSlots, isIdle, IDLE_HINT } from './common.js';
 import { sevPill, statusPill, levelPill } from './overview.js';
 import { openLog } from './logs.js';
 import { errorState, staleNotice } from '../personas/widgets.js';
@@ -232,7 +232,8 @@ export function incidentDetailPage(main, ctx) {
         clear(body).append(all.length ? h('section', { class: 'panel' }, h('p', { class: 'muted', style: { marginTop: 0 } }, `Services connected to ${x.service}. A problem often spreads along these links.`),
           h('div', { class: 'dep-list' }, all.map((y) => h(y.status === 'external' ? 'div' : 'a', y.status === 'external' ? { class: 'dep dep-external' } : { class: 'dep', href: ctx.link(`/services/${encodeURIComponent(y.name)}`), 'data-link': true },
             h('b', {}, y.name), h('span', { class: 'dim' }, y.rel),
-            h('span', { class: `pill ${y.status === 'healthy' ? 'st-ok' : y.status === 'degraded' ? 'st-slow' : y.status === 'down' ? 'st-err' : 'st-res'}` }, y.status)))))
+            isIdle(y) ? h('span', { class: 'pill st-res', title: IDLE_HINT }, 'no traffic')
+              : h('span', { class: `pill ${y.status === 'healthy' ? 'st-ok' : y.status === 'degraded' ? 'st-slow' : y.status === 'down' ? 'st-err' : 'st-res'}` }, y.status)))))
           : h('section', { class: 'panel' }, emptyState('No related services known', 'They are learned from traces.')));
       }).catch((e) => clear(body).append(errorBox(e.message)));
     }

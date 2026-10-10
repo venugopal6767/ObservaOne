@@ -1,6 +1,6 @@
 // Overview: health of everything at a glance. Every number and row opens the page behind it.
 import { h, api, clear, icon, fmt, short, ago, sparkline, doughnut, timeChart, emptyState, errorBox, demoBadge } from '../ui.js';
-import { chartSlots } from './common.js';
+import { chartSlots, withIdle, IDLE_HINT } from './common.js';
 import { openLog } from './logs.js';
 import { attentionStrip, errorState, staleNotice, statusPill } from '../personas/widgets.js';
 
@@ -63,7 +63,7 @@ export function overviewPage(main, ctx) {
     clear(stale); clear(failBox);
     main.removeAttribute('aria-busy');
     okAt = Date.now();
-    const d = ov.value;
+    const d = { ...ov.value, services: withIdle(ov.value.services) };
     const incidents = inc.status === 'fulfilled' ? inc.value : null;
     drawHeader(d, incidents);
     drawAttention(d, incidents, inc.status === 'rejected');
@@ -93,7 +93,7 @@ export function overviewPage(main, ctx) {
     const s = d.services?.summary;
     if (s?.down) items.push({ level: 'critical', text: `${s.down} service${s.down > 1 ? 's' : ''} unhealthy`, detail: d.services.demo ? 'from sample service data' : null, action: { label: 'View services', href: '/services?status=down' } });
     if (s?.degraded) items.push({ level: 'warning', text: `${s.degraded} service${s.degraded > 1 ? 's' : ''} degraded`, detail: d.services.demo ? 'from sample service data' : null, action: { label: 'View services', href: '/services?status=degraded' } });
-    if (d.hostsDown?.length) items.push({ level: 'critical', text: `${d.hostsDown.length} host${d.hostsDown.length > 1 ? 's' : ''} not responding`, detail: d.hostsDown.slice(0, 4).join(', '), action: { label: 'View hosts', href: '/infrastructure' } });
+    if (d.hostsDown?.length) items.push({ level: 'critical', text: `${d.hostsDown.length} host${d.hostsDown.length > 1 ? 's' : ''} not reporting (exporter not answering)`, detail: d.hostsDown.slice(0, 4).join(', '), action: { label: 'View hosts', href: '/infrastructure' } });
     if (d.diskHot?.length) items.push({ level: d.diskHot[0].usedPct >= 95 ? 'critical' : 'warning', text: `${d.diskHot.length} host${d.diskHot.length > 1 ? 's' : ''} with a disk over 90% full`, detail: d.diskHot.slice(0, 3).map((x) => `${x.host} ${Math.round(x.usedPct)}%`).join(', '), action: { label: 'View hosts', href: '/infrastructure' } });
     // checks that could not run are said out loud, never shown as "all clear"
     const failed = [incFailed && 'incidents', d.servicesError && 'services', (d.hostsDown === null || d.diskHot === null) && 'hosts and disks'].filter(Boolean);
@@ -147,12 +147,12 @@ export function overviewPage(main, ctx) {
       kpi({
         ic: 'server', tone: 'blue', title: 'Total Hosts', value: String(d.hosts.total), href: '/infrastructure',
         delta: deltaCount(d.hosts.healthy, d.hosts.before, true), spark: d.hosts.series, sparkColor: '#22c55e',
-        foot: [h('span', { class: 'c-green' }, `${d.hosts.healthy} healthy`), h('span', { class: 'c-red' }, `${d.hosts.unhealthy} unhealthy`), h('span', { class: 'dim' }, `${d.hosts.unknown} unknown`)],
+        foot: [h('span', { class: 'c-green' }, `${d.hosts.healthy} healthy`), h('span', { class: 'c-orange', title: 'The exporter is not answering; the host itself may still be running' }, `${d.hosts.unhealthy} not reporting`), h('span', { class: 'dim' }, `${d.hosts.unknown} unknown`)],
       }),
       kpi({
         ic: 'cube', tone: 'blue', title: 'Total Services', value: s ? String(s.total) : 'N/A', href: '/services', demo: d.services?.demo,
         delta: s && d.servicesBefore ? deltaCount(s.healthy, d.servicesBefore.healthy, true) : null, spark: k?.rps.series, sparkColor: '#22c55e',
-        foot: s ? [h('span', { class: 'c-green' }, `${s.healthy} healthy`), h('span', { class: 'c-orange' }, `${s.degraded} degraded`), h('span', { class: 'c-red' }, `${s.down} down`)] : [h('span', { class: 'dim' }, d.servicesError || 'No service data')],
+        foot: s ? [h('span', { class: 'c-green' }, `${s.healthy} healthy`), h('span', { class: 'c-orange' }, `${s.degraded} degraded`), h('span', { class: 'c-red' }, `${s.down} down`), s.idle ? h('span', { class: 'dim', title: IDLE_HINT }, `${s.idle} no traffic`) : null] : [h('span', { class: 'dim' }, d.servicesError || 'No service data')],
       }),
       kpi({
         ic: 'incident', tone: 'red', title: 'Active Incidents', value: ic ? String(ic.active) : 'N/A', href: '/incidents', spark: buckets, sparkColor: '#ef4444', bars: true,
@@ -182,8 +182,9 @@ export function overviewPage(main, ctx) {
         h('i', { class: `dot ${dot}` }), h('span', {}, label), h('b', {}, String(n)), h('span', { class: 'dim' }, pct(n)));
       health.append(h('div', { class: 'ov-health' },
         h('div', { class: 'donut' }, c, h('div', { class: 'center' }, h('b', {}, s.total), h('span', {}, 'Services'))),
-        h('div', { class: 'ov-health-list' }, rowOf('dot-green', 'Healthy', s.healthy, 'healthy'), rowOf('dot-orange', 'Degraded', s.degraded, 'degraded'), rowOf('dot-red', 'Unhealthy', s.down, 'down'))));
-      setChart('health', doughnut(c, ['Healthy', 'Degraded', 'Unhealthy'], [s.healthy, s.degraded, s.down], ['#22c55e', '#f59e0b', '#ef4444']));
+        h('div', { class: 'ov-health-list' }, rowOf('dot-green', 'Healthy', s.healthy, 'healthy'), rowOf('dot-orange', 'Degraded', s.degraded, 'degraded'), rowOf('dot-red', 'Unhealthy', s.down, 'down'),
+          s.idle ? rowOf('dot-muted', 'No traffic', s.idle, 'idle') : null)));
+      setChart('health', doughnut(c, ['Healthy', 'Degraded', 'Unhealthy', 'No traffic'], [s.healthy, s.degraded, s.down, s.idle || 0], ['#22c55e', '#f59e0b', '#ef4444', '#94a3b8']));
     }
     const incBox = h('div');
     const active = (incidents?.incidents || []).filter((x) => x.status !== 'resolved').slice(0, 4);

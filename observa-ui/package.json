@@ -1,6 +1,6 @@
 {
   "name": "observa-ui",
-  "version": "1.8.3",
+  "version": "1.8.4",
   "description": "ObservaOne - monitoring UI with login on top of Prometheus, Alertmanager, Loki and Tempo",
   "private": true,
   "type": "module",

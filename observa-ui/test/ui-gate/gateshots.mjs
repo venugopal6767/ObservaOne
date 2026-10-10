@@ -10,7 +10,9 @@ const pages = [['home', '/views'], ['overview', '/overview'], ['services', '/ser
   const svc = (await j('/api/services')).list?.[0]?.name, inc = (await j('/api/incidents?status=all&limit=1')).incidents?.[0]?.id;
   for (const x of pages) { if (x[0] === 'service' && svc) x[1] = `/services/${encodeURIComponent(svc)}`; if (x[0] === 'incident' && inc) x[1] = `/incidents/${inc}`; }
   await p0.context().close(); }
-const widths = [[390, 844], [768, 1024], [1366, 768], [1920, 1080]];
+// phone, tablet, common laptops (1024 / 1280 / 1366 / 1440) and full HD; WIDTHS=1024,1440 limits the run
+const ALL_WIDTHS = [[390, 844], [768, 1024], [1024, 768], [1280, 800], [1366, 768], [1440, 900], [1920, 1080]];
+const widths = process.env.WIDTHS ? ALL_WIDTHS.filter(([w]) => process.env.WIDTHS.split(',').map(Number).includes(w)) : ALL_WIDTHS;
 const problems = [];
 for (const theme of (process.env.THEMES || 'dark,light').split(',')) for (const [w, hgt] of widths) {
   const p = await login(b, 'admin', 'Admin-Pass-2026!', { width: w, height: hgt });
@@ -33,8 +35,11 @@ for (const theme of (process.env.THEMES || 'dark,light').split(',')) for (const 
       // stray "null" / "undefined" text from a DOM append of a missing value
       let stray = 0;
       for (const el of document.querySelectorAll('#main *')) for (const n of el.childNodes) if (n.nodeType === 3 && /^\s*(null|undefined|\[object)/.test(n.textContent)) stray++;
-      return { sw, vw, clipped, stray };
+      // no page sends users to Grafana (AUD-04/05)
+      const grafana = [...document.querySelectorAll('a[href]')].filter((a) => /grafana/i.test(a.getAttribute('href'))).length;
+      return { sw, vw, clipped, stray, grafana };
     });
+    if (m.grafana) problems.push(`${w} ${theme} ${path} ${m.grafana} link(s) to Grafana`);
     if (m.sw > m.vw + 1) problems.push(`${w} ${theme} ${path} horizontal scroll ${m.sw}>${m.vw}`);
     if (m.stray) problems.push(`${w} ${theme} ${path} ${m.stray} stray null/undefined text`);
     if (m.clipped) problems.push(`${w} ${theme} ${path} ${m.clipped} clipped text element(s)`);

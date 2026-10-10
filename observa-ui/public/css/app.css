@@ -607,17 +607,11 @@ tr.expand td { background: var(--panel-2); }
 .edit-bar { display: flex; align-items: center; gap: 10px; padding: 8px 12px; margin-bottom: 12px; border: 1px solid rgba(59,130,246,0.45); background: rgba(59,130,246,0.08); border-radius: var(--radius); font-size: 13px; }
 
 /* ======================= role-based dashboards ======================= */
-/* top bar: dashboard selector, environment, notifications */
-.dsel { position: relative; }
-.dsel-btn { display: flex; align-items: center; gap: 7px; height: 34px; padding: 0 10px; border-radius: var(--radius-sm); border: 1px solid var(--border-2); background: var(--panel); color: var(--text); cursor: pointer; font-size: 13px; white-space: nowrap; }
-.dsel-btn:hover { border-color: var(--accent); }
-.dsel-menu { left: 0; right: auto; top: 40px; min-width: 330px; }
-.dsel-menu button { align-items: flex-start; }
-.dsel-menu button.sel { background: var(--accent-soft); }
-.dsel-menu button:disabled { opacity: 0.45; cursor: not-allowed; }
-.dsel-item { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
-.dsel-item small { color: var(--muted); font-size: 11px; white-space: normal; }
-.dsel-home { margin-left: auto; color: var(--green); }
+/* role dashboards row on the Dashboards page (replaces the old top-bar selector) */
+.role-dash { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 14px; }
+.role-dash-label { font-size: 12px; color: var(--dim); margin-right: 2px; }
+.role-dash .btn[aria-current="true"] { border-color: var(--accent); }
+.role-dash-home { color: var(--green); display: inline-flex; }
 .menu-title { padding: 6px 10px 8px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--dim); }
 .menu-foot { display: flex; align-items: center; gap: 6px; padding: 8px 10px; margin-top: 4px; border-top: 1px solid var(--border); font-size: 12.5px; }
 .env-wrap .select { max-width: 170px; }
@@ -693,7 +687,6 @@ tr.expand td { background: var(--panel-2); }
 @media (max-width: 1500px) { .persona-kpis-6 { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @media (max-width: 1100px) {
   .persona-row-2, .persona-row-2b { grid-template-columns: 1fr; }
-  .dsel-label { display: none; }
   .env-wrap .ic, .range-wrap .ic { display: none; }
 }
 @media (max-width: 760px) {
@@ -705,7 +698,6 @@ tr.expand td { background: var(--panel-2); }
   .env-wrap .select, .range-wrap .select { max-width: 120px; font-size: 12px; }
   .brand { align-items: flex-start; padding-top: 14px; }
   .notif-menu { position: fixed; left: 8px; right: 8px; top: 110px; width: auto; }
-  .dsel-menu { position: fixed; left: 8px; right: 8px; top: 110px; min-width: 0; }
   .persona-head { flex-direction: column; align-items: flex-start; }
 }
 @media (max-width: 480px) { .persona-kpis-6 { grid-template-columns: 1fr; } }

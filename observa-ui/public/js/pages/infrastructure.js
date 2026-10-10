@@ -38,7 +38,7 @@ export function infrastructurePage(main, ctx) {
         h('thead', {}, h('tr', {}, ['Server', 'Status', 'OS', 'Env', 'Role', 'CPU', 'Memory', 'Lowest disk free', 'Last scrape', h('span', { class: 'sr-only' }, 'Dashboard')].map((x, i) => h('th', { class: `${i >= 5 && i <= 7 ? 'num' : ''} ${minor.has(i) ? 'col-phone-hide' : ''}` }, x)))),
         h('tbody', {}, servers.map((t) => h('tr', {},
           h('td', {}, h('b', { style: { fontWeight: 600 } }, t.host), t.source === 'agent' ? h('div', { class: 'dim', style: { fontSize: '11px' } }, h('a', { href: ctx.link('/agents'), 'data-link': true }, 'via ObservaOne Agent')) : h('div', { class: 'dim mono', style: { fontSize: '11px' } }, t.instance)),
-          h('td', {}, t.health === 'up' ? pill('UP', 'solid-green') : h('span', { class: 'pill pill-solid-red', title: t.lastError }, 'DOWN')),
+          h('td', {}, t.health === 'up' ? pill('UP', 'solid-green') : h('span', { class: 'pill pill-solid-orange', title: `${t.lastError ? `${t.lastError}. ` : ''}The exporter is not answering, so the host's own state is unknown.` }, 'NOT REPORTING')),
           h('td', { class: 'col-phone-hide' }, t.os === 'windows' ? 'Windows' : 'Linux'),
           h('td', { class: 'col-phone-hide' }, t.env || '—'), h('td', { class: 'col-phone-hide' }, t.role || '—'),
           h('td', { class: `num ${tone(C.get(t.host))}` }, val(C, t.host)),

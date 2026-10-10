@@ -94,3 +94,20 @@ All 19 gates pass. Final run: 16 gate scripts (267 checks), the earlier suites (
 
 - UX-012 fixed (one status-label helper). UX-010 corrected and fixed on all live pages. UX-013 and UX-014 re-verified. UX-017 stays accepted (no new evidence).
 - Proposed for review (not done): mark the least important columns in the role-dashboard tables (Deployments, SRE SLOs, incidents, on-call) as `minor` so they fit at 390 px instead of scrolling. Touches 8 sample-data dashboards.
+
+## Audit batch 1 (v1.8.4)
+
+From the UI/UX audit (report: "ObservaOne UI/UX Audit and Improvement Plan (v1.8.3)"). UI-only; no server, config or Grafana infrastructure changed.
+
+| ID | Pri | Change | Status | Evidence |
+|---|---|---|---|---|
+| AUD-01 | P1 | A service with 0 requests/s shows "No traffic" (neutral) instead of Down/Unhealthy on Services, Service detail, Overview and incident Related services; it is left out of Down counts and its uptime shows "No data" instead of 0%. The tooltip says idle and stopped cannot be told apart. Server status value unchanged. | Fixed (UI part) | `signals.mjs` |
+| AUD-03 | P1 | An exporter that stops answering shows "NOT REPORTING" (amber) with "the host's own state is unknown" on Infrastructure; Overview says "hosts not reporting (exporter not answering)". Alert-rule wording in `host-alerts.yml` unchanged (separate approval). | Fixed (UI part) | `signals.mjs` |
+| AUD-04 | P1 | Grafana button removed from built-in dashboards. | Fixed | `signals.mjs`, sweep link check |
+| AUD-05 | P2 | "Open Grafana" removed from Settings › About. | Fixed | `signals.mjs` |
+| AUD-06 | P2 | Top-bar dashboard selector removed. Role dashboards are listed on the Dashboards page (landing marked) and in search; Home still opens the role landing. | Fixed | `signals.mjs`, `shell.mjs`, `home.mjs` |
+| AUD-13 | P2 | `gateshots.mjs` covers 390, 768, 1024, 1280, 1366, 1440 and 1920 px and fails on any link to Grafana. | Fixed | sweep: no problems at 7 widths, both themes |
+
+Regression: 17 gate scripts all green (incl. new `signals.mjs` 20/20), controls audit 1,278 controls (15 fewer: the removed selector), 7-width sweep with no sideways scroll, clipped text, stray null text, Grafana link, console or API error.
+
+Still open from the audit: AUD-02 (server swallows failed queries), AUD-07 (landing source), AUD-08, AUD-09 (demo incidents), AUD-10, AUD-11, AUD-12, AUD-14–18.

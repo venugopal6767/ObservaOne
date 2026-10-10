@@ -16,7 +16,7 @@ export const COMPONENTS = [
   { id: 'grafana', name: 'Grafana', role: 'Dashboards', version: '12.4.12' },
   { id: 'alertmanager', name: 'Alertmanager', role: 'Alert routing', version: '0.34.1' },
   { id: 'nginx', name: 'Nginx', role: 'HTTPS front door', version: '1.30' },
-  { id: 'observa-ui', name: 'ObservaOne UI', role: 'This app', version: '1.8.3' },
+  { id: 'observa-ui', name: 'ObservaOne UI', role: 'This app', version: '1.8.4' },
 ];
 export const PLATFORMS = [['linux', 'Linux'], ['windows', 'Windows'], ['kubernetes', 'Kubernetes'], ['docker', 'Docker']];
 const LICENCE_GB_DAY = 120;

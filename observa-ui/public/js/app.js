@@ -3,7 +3,7 @@ import { h, $, clear, api, icon, logo, toast, select, modal } from './ui.js';
 import { renderLogin } from './pages/login.js';
 import { renderForcedMfa } from './pages/mfa.js';
 import { NAV_SECTIONS, EXTRA_ROUTES } from './pages/registry.js';
-import { selectorEntries, personaPath, landingFor, isLanding, setRoleAccess } from './personas/registry.js';
+import { selectorEntries, personaPath, landingFor, setRoleAccess } from './personas/registry.js';
 import { ENVIRONMENTS } from './personas/mock.js';
 
 export const RANGES = [
@@ -310,7 +310,6 @@ function buildShell() {
   const rangeWrap = h('div', { class: 'range-wrap' }, icon('clock', 15, 'dim'), rangeSel);
   const envSel = select(ENVIRONMENTS, state.env, (v) => setEnv(v), { class: 'select', 'aria-label': 'Environment', id: 'env' });
   const envWrap = h('div', { class: 'range-wrap env-wrap' }, icon('layers', 15, 'dim'), envSel);
-  const dashSel = buildDashboardSelector();
   const notif = buildNotifications();
   const liveChip = h('a', { class: 'live-chip hidden', id: 'live-chip', href: '/datasources', 'data-link': true });
 
@@ -331,7 +330,7 @@ function buildShell() {
 
   app.append(h('div', { class: 'shell' },
     h('div', { class: 'brand' }, burger, logo(28), h('span', { class: 'brand-name' }, first, rest.length ? h('b', {}, rest.join('')) : null)),
-    h('header', { class: 'topbar' }, searchBox, dashSel, h('div', { class: 'top-spacer' }), dsChip, envWrap, rangeWrap, freshChip, autoSel, refreshBtn, liveChip, notif, helpBtn, themeBtn, userBtn),
+    h('header', { class: 'topbar' }, searchBox, h('div', { class: 'top-spacer' }), dsChip, envWrap, rangeWrap, freshChip, autoSel, refreshBtn, liveChip, notif, helpBtn, themeBtn, userBtn),
     sidebar, backdrop,
     h('main', { class: 'main', id: 'main' })));
   setNavCollapsed(!!state.me.prefs?.navCollapsed);
@@ -370,33 +369,8 @@ export function setDsChip(label, color = '#f59e0b') {
   c.classList.remove('hidden');
 }
 
-// ---------------- dashboard selector ----------------
-// Lists Overview + every role dashboard this user may open; the current one is ticked, the landing one marked.
-function buildDashboardSelector() {
-  const can = (p) => hasPerm(state.me.user, p);
-  const label = h('span', { class: 'dsel-label' });
-  const list = h('div', { class: 'menu dsel-menu hidden', role: 'menu' });
-  const btn = h('button', { class: 'dsel-btn', 'aria-haspopup': 'menu', title: 'Switch dashboard', onclick: (e) => { e.stopPropagation(); draw(); list.classList.toggle('hidden'); } },
-    icon('dashboards', 15), label, icon('chevron', 13, 'dim'));
-  function current() {
-    const path = location.pathname;
-    return selectorEntries(can).find((p) => path === personaPath(p) || path.startsWith(`${personaPath(p)}/`)) || null;
-  }
-  function draw() {
-    clear(list).append(h('div', { class: 'menu-title' }, 'Dashboards you can open'),
-      ...selectorEntries(can).map((p) => h('button', { role: 'menuitem', disabled: !p.ready, class: current()?.id === p.id ? 'sel' : '', onclick: () => { list.classList.add('hidden'); navigate(link(personaPath(p))); } },
-        icon(p.icon, 15), h('span', { class: 'dsel-item' }, h('b', {}, p.label), h('small', {}, p.ready ? p.desc : 'Coming next')),
-        isLanding(state.me, p.id) ? h('span', { class: 'dsel-home', title: 'Your landing dashboard' }, icon('home', 12)) : null)),
-      h('a', { class: 'menu-foot', href: '/dashboards', 'data-link': true, onclick: () => list.classList.add('hidden') }, icon('dashboards', 13), 'Custom dashboards'));
-  }
-  function update() {
-    const c = current();
-    label.textContent = c ? c.short : 'Dashboards';
-  }
-  window.addEventListener('oo:routed', update);
-  document.addEventListener('click', () => list.classList.add('hidden'));
-  return h('div', { class: 'dsel' }, btn, list);
-}
+// The top-bar dashboard selector was removed (AUD-06): Home opens the role's landing dashboard,
+// and every dashboard this user may open is listed on the Dashboards page and in search (Ctrl+K).
 
 // ---------------- notifications ----------------
 // Real alert and incident counts, plus a feed of recent events (mock until the notifications backend exists).

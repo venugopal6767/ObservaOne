@@ -29,6 +29,19 @@ export function statCard(label, value, { unit, trend, trendGoodWhen = 'down', ex
     extra || null);
 }
 
+// A service with no requests is idle, not down. The server still marks 0 requests/s as "down",
+// so the UI shows it as "No traffic" and keeps it out of the Down/Unhealthy counts.
+// It cannot tell an idle service from a stopped one; the label's tooltip says so.
+export const IDLE_HINT = 'No requests in the last few minutes. ObservaOne cannot tell an idle service from a stopped one.';
+export const isIdle = (x) => !!x && x.status === 'down' && !x.rps && !x.errorRate;
+export const idleStatus = (x) => (isIdle(x) ? { ...x, status: 'idle' } : x);
+export function withIdle(data) {
+  if (!data?.list || !data.summary) return data;
+  const list = data.list.map(idleStatus);
+  const idle = list.filter((x) => x.status === 'idle').length;
+  return { ...data, list, summary: { ...data.summary, down: data.summary.down - idle, idle } };
+}
+
 export function pctChange(now, before) {
   if (now === null || before === null || before === undefined || !Number.isFinite(before) || before === 0) return null;
   return ((now - before) / Math.abs(before)) * 100;

@@ -1,12 +1,12 @@
 import { h, api, clear, icon, emptyState, demoBadge, fmt, short, tabs, timeChart, legendRow, dateTime } from '../ui.js';
-import { chartSlots } from './common.js';
+import { chartSlots, withIdle, idleStatus, IDLE_HINT } from './common.js';
 import { openLog } from './logs.js';
 import { levelPill, sevPill, statusPill } from './overview.js';
 import { errorState, staleNotice } from '../personas/widgets.js';
 
 const skel = (cls, height) => h('div', { class: `${cls} skeleton`, style: { height } });
 
-const STATUS = { healthy: ['Healthy', 'pill-solid-green'], degraded: ['Degraded', 'pill-solid-orange'], down: ['Down', 'pill-solid-red'] };
+const STATUS = { healthy: ['Healthy', 'pill-solid-green'], degraded: ['Degraded', 'pill-solid-orange'], down: ['Down', 'pill-solid-red'], idle: ['No traffic', 'pill-solid-muted'] };
 
 export function servicesPage(main, ctx) {
   const summary = h('div', { class: 'grid cards-4' }, ...Array.from({ length: 4 }, () => skel('summary-card', '76px')));
@@ -32,7 +32,7 @@ export function servicesPage(main, ctx) {
 
   async function load() {
     try {
-      data = await api('/services');
+      data = withIdle(await api('/services'));
       okAt = Date.now();
       clear(stale);
       clear(titleBadge).append(demoBadge(data.demo) || '');
@@ -61,12 +61,18 @@ export function servicesPage(main, ctx) {
       card('Degraded', s.degraded, 'bubble-orange', 'alert', 'degraded'),
       card('Down', s.down, 'bubble-red', 'down', 'down'));
     clear(out);
+    if (s.idle) {
+      const on = statusFilter === 'idle';
+      out.append(h('p', { class: 'muted', style: { margin: '0 0 10px' }, title: IDLE_HINT },
+        `${s.idle} service${s.idle > 1 ? 's have' : ' has'} no traffic right now, shown as "No traffic" rather than Down. `,
+        h('button', { class: 'linkish', 'aria-pressed': String(on), onclick: () => { statusFilter = on ? '' : 'idle'; draw(); } }, on ? 'Show all services' : 'Show only these')));
+    }
     if (!data.list.length) {
       out.append(h('div', { class: 'table-wrap' }, emptyState('No services found',
         'The live service queries returned nothing. Edit config/services.json to match your application metrics, or switch "Service metrics" to demo in Data Sources.')));
       return;
     }
-    const order = { down: 0, degraded: 1, healthy: 2 };
+    const order = { down: 0, degraded: 1, idle: 2, healthy: 3 };
     const val = (x, k) => (k === 'status' ? order[x.status] : k === 'name' ? x.name : x[k] ?? -1);
     const rows = data.list
       .filter((x) => (!search || x.name.toLowerCase().includes(search)) && (!statusFilter || x.status === statusFilter))
@@ -84,7 +90,7 @@ export function servicesPage(main, ctx) {
         const latCls = x.p95 >= 1000 ? 'c-red' : x.p95 >= 500 ? 'c-orange' : '';
         return h('tr', {},
           h('td', {}, h('a', { href: ctx.link(`/services/${encodeURIComponent(x.name)}`), 'data-link': true, style: { fontWeight: 600 } }, x.name), x.namespace ? h('span', { class: 'dim svc-ns' }, x.namespace) : null),
-          h('td', {}, h('span', { class: `pill ${cls}`, style: { minWidth: '74px' } }, label)),
+          h('td', {}, h('span', { class: `pill ${cls}`, style: { minWidth: '74px' }, title: x.status === 'idle' ? IDLE_HINT : null }, label)),
           h('td', { class: 'num col-phone-hide' }, short(x.rps)),
           h('td', { class: `num col-phone-hide ${latCls}` }, x.p95 === null ? h('span', { class: 'dim', title: 'No latency data in this range' }, 'n/a') : fmt(x.p95, 'ms')),
           h('td', { class: `num ${errCls}` }, `${x.errorRate.toFixed(1)}%`),
@@ -100,7 +106,7 @@ export function servicesPage(main, ctx) {
 }
 
 // ---------------- service detail ----------------
-const HEALTH = { healthy: ['Healthy', 'st-ok'], degraded: ['Degraded', 'st-slow'], down: ['Unhealthy', 'st-err'] };
+const HEALTH = { healthy: ['Healthy', 'st-ok'], degraded: ['Degraded', 'st-slow'], down: ['Unhealthy', 'st-err'], idle: ['No traffic', 'st-res'] };
 
 export function serviceDetailPage(main, ctx) {
   const name = decodeURIComponent(location.pathname.split('/')[2] || '');
@@ -119,6 +125,9 @@ export function serviceDetailPage(main, ctx) {
   async function load() {
     try {
       d = await api(`/services/${encodeURIComponent(name)}`, { query: ctx.range });
+      // idle is not down: the server reports uptime 0 for any "down" service, which is wrong when there is simply no traffic
+      if (idleStatus(d.service).status === 'idle') d = { ...d, service: idleStatus(d.service), uptime: null };
+      d.dependencies = { ...d.dependencies, calls: d.dependencies.calls.map(idleStatus), calledBy: d.dependencies.calledBy.map(idleStatus) };
       okAt = Date.now();
       clear(stale);
       draw();
@@ -135,7 +144,7 @@ export function serviceDetailPage(main, ctx) {
     clear(head).append(
       back(),
       h('span', { class: `svc-badge ${hc}` }, icon(sv.status === 'healthy' ? 'check' : 'alert', 18)),
-      h('div', {}, h('h1', {}, sv.name, ' ', h('span', { class: `pill ${hc}` }, hl), ' ', demoBadge(d.demo, true)),
+      h('div', {}, h('h1', {}, sv.name, ' ', h('span', { class: `pill ${hc}`, title: sv.status === 'idle' ? IDLE_HINT : null }, hl), ' ', demoBadge(d.demo, true)),
         h('div', { class: 'detail-meta' }, sv.namespace ? h('span', {}, `namespace ${sv.namespace}`) : null, h('span', { class: 'dim' }, 'Request, error and latency data for this service'))));
     clear(tabsEl).append(tabs([['overview', 'Overview'], ['metrics', 'Metrics'], ['logs', 'Logs'], ['traces', 'Traces'], ['dependencies', 'Dependencies'], ['deployments', 'Deployments']], tab, (k) => {
       tab = k; history.replaceState({}, '', tabUrl(k)); draw();

@@ -3,6 +3,18 @@
 import { h, api, clear, icon, pill, sparkline, modal, field, toast, emptyState, select, confirmBox } from '../ui.js';
 import { errorState, staleNotice } from '../personas/widgets.js';
 import { chartSlots, renderPromPanel } from './common.js';
+import { selectorEntries, personaPath, landingFor } from '../personas/registry.js';
+
+// Overview and the role dashboards this user's role may open; the landing one is marked.
+// Which role sees which is set in Users & Roles; it controls what is listed, not access to data.
+function roleDashboards(ctx) {
+  const entries = selectorEntries(ctx.can).filter((p) => p.ready);
+  if (!entries.length) return h('div'); // never null: it is passed to main.append
+  const landing = landingFor(ctx.me, ctx.can)?.id;
+  return h('nav', { class: 'role-dash', 'aria-label': 'Role dashboards' }, h('span', { class: 'role-dash-label' }, 'Role dashboards'),
+    ...entries.map((p) => h('a', { class: 'btn btn-sm', href: ctx.link(personaPath(p)), 'data-link': true, title: p.desc },
+      icon(p.icon, 13), p.short, p.id === landing ? h('span', { class: 'role-dash-home', title: 'Opens when you press Home' }, icon('home', 12)) : null)));
+}
 
 const COLORS = ['#3b82f6', '#3b82f6', '#a855f7', '#22c55e', '#06b6d4', '#f59e0b'];
 const WIDTHS = [[3, '1/4'], [4, '1/3'], [6, '1/2'], [8, '2/3'], [12, 'Full']];
@@ -96,6 +108,7 @@ export function dashboardsPage(main, ctx) {
     h('div', { class: 'page-head' },
       h('div', {}, h('h1', {}, 'Dashboards'), h('p', {}, 'Your own dashboards, the ones shared with you, and the built-in ones')),
       h('div', { class: 'actions' }, ctx.can('dashboards.edit') ? h('button', { class: 'btn btn-primary', onclick: newDashboard }, icon('plus', 15), 'New Dashboard') : null)),
+    roleDashboards(ctx),
     h('div', { class: 'toolbar' }, tabsEl, h('div', { class: 'grow' }), searchInput),
     stale, grid);
 
@@ -252,7 +265,6 @@ export function dashboardViewPage(main, ctx) {
         ctx.can('dashboards.edit') ? h('button', { class: 'btn', onclick: () => copyDashboard(ctx, dash) }, icon('copy', 14), 'Copy') : null,
         dash.editable ? h('button', { class: 'btn', onclick: () => editDetails(ctx, dash, (r) => { dash = r; drawHead(); }) }, icon('share', 14), 'Share & settings') : null,
         dash.editable && !editing ? h('button', { class: 'btn btn-primary', onclick: startEdit }, icon('edit', 14), 'Edit panels') : null,
-        dash.grafanaUid && ctx.me.grafanaUrl ? h('a', { class: 'btn', href: `${ctx.me.grafanaUrl}d/${dash.grafanaUid}`, target: '_blank', rel: 'noopener' }, icon('external', 14), 'Grafana') : null,
         dash.editable ? h('button', { class: 'btn btn-danger', title: 'Delete dashboard', onclick: async () => {
           if (!(await confirmBox('Delete dashboard', `Delete "${dash.title}"? This cannot be undone.`, 'Delete'))) return;
           await api(`/dashboards/${encodeURIComponent(dash.id)}`, { method: 'DELETE' });
