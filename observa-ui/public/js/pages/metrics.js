@@ -1,5 +1,4 @@
-import { errorState, staleNotice } from '../personas/widgets.js';
-import { h, api, clear, icon, fmt, timeChart, legendName, emptyState, select, tabs, modal, field, toast, dateTime, PALETTE, timeHM } from '../ui.js';
+import { h, api, clear, icon, fmt, timeChart, legendName, select, tabs, modal, field, toast, dateTime, palette, timeHM, stateView, stateFromError, timeEl, timeHeader, color } from '../ui.js';
 import { chartSlots } from './common.js';
 
 const EXAMPLES = [
@@ -11,12 +10,10 @@ const EXAMPLES = [
 
 export function metricsPage(main, ctx) {
   const setChart = chartSlots(ctx);
-  ctx.setDsChip('Prometheus', '#22c55e');
-  const P = ctx.params;
-  let view = P.get('view') === 'table' ? 'table' : 'graph', unit = P.get('unit') || 'none', stepSel = P.get('step') || 'auto', last = null, okAt = 0;
+  ctx.setDsChip('Prometheus', color('ok'));
+  let view = 'graph', unit = 'none', stepSel = 'auto', last = null;
   const startQuery = ctx.params.get('q') || ctx.pref('metricsQuery') || 'rate(prometheus_http_requests_total[5m])';
-  const input = h('input', { value: startQuery, list: 'metric-names', spellcheck: 'false', 'aria-label': 'PromQL query', onkeydown: (e) => { if (e.key === 'Enter') runQuiet(); } });
-  const stale = h('div');
+  const input = h('input', { value: startQuery, list: 'metric-names', spellcheck: 'false', 'aria-label': 'PromQL query', onkeydown: (e) => { if (e.key === 'Enter') run(); } });
   const datalist = h('datalist', { id: 'metric-names' });
   const out = h('div');
   const legendBox = h('div', { class: 'legend-col' });
@@ -25,50 +22,39 @@ export function metricsPage(main, ctx) {
 
   main.append(
     h('div', { class: 'page-head' }, h('div', {}, h('h1', {}, 'Metrics Explorer'), h('p', {}, 'Query and visualize metrics from Prometheus'))),
-    h('div', { class: 'query-bar' }, h('div', { class: 'query-input' }, input, datalist), h('button', { class: 'btn btn-primary', onclick: runQuiet }, 'Run Query')),
+    h('div', { class: 'query-bar' }, h('div', { class: 'query-input' }, input, datalist), h('button', { class: 'btn btn-primary', onclick: run }, 'Run Query')),
     h('div', { class: 'toolbar' }, viewTabs, h('div', { class: 'grow' }),
-      h('span', { class: 'muted', 'aria-hidden': 'true' }, 'Unit'), select([['none', 'Auto'], ['percent', 'Percent'], ['bytes', 'Bytes'], ['bps', 'bits/s'], ['Bps', 'Bytes/s'], ['s', 'Seconds'], ['ms', 'Milliseconds'], ['reqps', 'Requests/s']], unit, (v) => { unit = v; syncUrl(); draw(); }, { class: 'select select-sm', 'aria-label': 'Unit' }),
-      h('span', { class: 'muted', 'aria-hidden': 'true' }, 'Step'), select([['auto', 'Auto'], ['15', '15s'], ['60', '1m'], ['300', '5m'], ['900', '15m']], stepSel, (v) => { stepSel = v; lastKey = null; runQuiet(); }, { class: 'select select-sm', 'aria-label': 'Step' }),
-      ctx.can('dashboards.edit') ? h('button', { class: 'btn btn-sm', onclick: addToDashboard }, icon('plus', 13), 'Add to Dashboard') : null),
-    stale,
+      h('span', { class: 'muted' }, 'Unit'), select([['none', 'Auto'], ['percent', 'Percent'], ['bytes', 'Bytes'], ['bps', 'bits/s'], ['Bps', 'Bytes/s'], ['s', 'Seconds'], ['ms', 'Milliseconds'], ['reqps', 'Requests/s']], unit, (v) => { unit = v; draw(); }, { class: 'select select-sm', 'aria-label': 'Unit' }),
+      h('span', { class: 'muted' }, 'Step'), select([['auto', 'Auto'], ['15', '15s'], ['60', '1m'], ['300', '5m'], ['900', '15m']], stepSel, (v) => { stepSel = v; run(); }, { class: 'select select-sm', 'aria-label': 'Step' }),
+      ctx.can('dashboards.edit') && ctx.canOpen('/dashboards') ? h('button', { class: 'btn btn-sm', onclick: addToDashboard }, icon('plus', 13), 'Add to Dashboard') : null),
     h('section', { class: 'panel' }, out),
     tableBox,
     h('details', { class: 'panel', style: { marginTop: '14px' } }, h('summary', { style: { cursor: 'pointer', fontWeight: 600 } }, 'Example queries'),
       h('div', { style: { marginTop: '10px', display: 'grid', gap: '6px' } }, EXAMPLES.map(([q, t]) =>
-        h('div', {}, h('button', { class: 'linkish', title: 'Run this query', onclick: () => { input.value = q; runQuiet(); } }, h('code', {}, q)), h('span', { class: 'muted' }, `  ${t}`))))));
+        h('div', {}, h('a', { href: '#', onclick: (e) => { e.preventDefault(); input.value = q; run(); } }, h('code', {}, q)), h('span', { class: 'muted' }, `  ${t}`))))));
 
   function drawTabs() {
-    clear(viewTabs).append(tabs([['table', 'Table'], ['graph', 'Graph']], view, (k) => { view = k; syncUrl(); drawTabs(); draw(); }));
+    clear(viewTabs).append(tabs([['table', 'Table'], ['graph', 'Graph']], view, (k) => { view = k; drawTabs(); draw(); }));
   }
   drawTabs();
 
   api('/prom/metric-names').then((names) => datalist.append(...names.map((n) => h('option', { value: n })))).catch(() => {});
 
-  // query, view, unit, step, env and range live in the URL
-  function syncUrl() {
-    history.replaceState({}, '', ctx.link('/metrics', { q: input.value.trim(), view: view === 'graph' ? '' : view, unit: unit === 'none' ? '' : unit, step: stepSel === 'auto' ? '' : stepSel }));
-  }
-  let lastKey = null;
-  function runQuiet() { run().catch(() => {}); }
   async function run() {
     const query = input.value.trim();
-    if (!query) { clear(out).append(emptyState('Type a PromQL query', 'Or pick one of the example queries below.')); return; }
+    if (!query) return;
     if (query !== ctx.pref('metricsQuery')) ctx.savePref('metricsQuery', query);
-    syncUrl();
-    // a new query shows a placeholder; a refresh of the same query updates in place
-    const isNew = query !== lastKey || !last;
-    lastKey = query;
-    if (isNew) { clear(out).append(h('div', { class: 'chart-box lg skeleton' })); clear(tableBox); }
+    history.replaceState({}, '', `/metrics?q=${encodeURIComponent(query)}`);
+    clear(out).append(stateView('loading', { skeleton: 'chart' }));
+    clear(tableBox);
     try {
       const { start, end } = ctx.range;
       const r = await api('/prom/query_range', { query: { query, start, end, step: stepSel === 'auto' ? undefined : stepSel } });
       last = { query, result: r.result || [], resultType: r.resultType };
-      okAt = Date.now(); clear(stale);
       draw();
     } catch (e) {
-      if (last && !isNew) clear(stale).append(staleNotice({ okAt, message: e.message, retry: () => ctx.refreshNow() }));
-      else { last = null; clear(tableBox); clear(out).append(errorState(e.message, () => ctx.refreshNow(), 'The query failed')); }
-      throw e;
+      last = null;
+      clear(out).append(stateFromError(e, 'Metrics'));
     }
   }
 
@@ -77,11 +63,12 @@ export function metricsPage(main, ctx) {
     clear(out);
     clear(tableBox);
     const res = last.result;
-    if (!res.length) { out.append(emptyState('No data', 'The query returned no series for this time range.')); return; }
+    if (!res.length) { out.append(stateView('empty', { title: 'No metrics available for the selected time range', text: 'Prometheus answered, but the query returned no series. Check the metric name and labels, or widen the time range.' })); return; }
     const series = res.slice(0, 20).map((r) => ({ label: legendName(r.metric), points: r.values }));
     if (view === 'graph') {
       const c = h('canvas');
-      clear(legendBox).append(...series.map((s, i) => h('div', { class: 'legend-item', title: s.label }, h('i', { style: { background: PALETTE[i % PALETTE.length] } }), h('span', { class: 'ell' }, s.label))));
+      const pal = palette();
+      clear(legendBox).append(...series.map((s, i) => h('div', { class: 'legend-item', title: s.label }, h('i', { style: { background: pal[i % pal.length] } }), h('span', { class: 'ell' }, s.label))));
       out.append(h('div', { class: 'metrics-graph' }, h('div', { class: 'chart-box lg' }, c), legendBox));
       setChart('main', timeChart(c, series, { unit }));
       if (res.length > 20) out.append(h('div', { class: 'muted', style: { marginTop: '6px' } }, `Showing 20 of ${res.length} series. Narrow the query to see the rest.`));
@@ -93,15 +80,15 @@ export function metricsPage(main, ctx) {
     const short = (l) => { const m = /\{(.*)\}/.exec(l); return m ? m[1].split(', ').map((x) => x.split('=')[1]?.replace(/"/g, '')).join(' / ') : l; };
     const target = view === 'table' ? out : tableBox;
     target.append(h('div', { class: 'table-wrap', style: { maxHeight: view === 'table' ? '560px' : '320px' } }, h('table', { class: 'tbl' },
-      h('thead', {}, h('tr', {}, h('th', {}, 'Time'), cols.map((s) => h('th', { class: 'num', title: s.label }, short(s.label))))),
-      h('tbody', {}, times.map((t) => h('tr', {}, h('td', { class: 'mono ts' }, view === 'table' ? dateTime(t * 1000) : timeHM(t * 1000)), maps.map((m) => h('td', { class: 'num' }, m.has(t) ? fmt(Number(m.get(t)), unit) : h('span', { class: 'dim' }, '—')))))))));
+      h('thead', {}, h('tr', {}, h('th', {}, timeHeader()), cols.map((s) => h('th', { class: 'num', title: s.label }, short(s.label))))),
+      h('tbody', {}, times.map((t) => h('tr', {}, h('td', { class: 'mono' }, timeEl(t * 1000, view === 'table' ? dateTime(t * 1000) : timeHM(t * 1000))), maps.map((m) => h('td', { class: 'num' }, m.has(t) ? fmt(Number(m.get(t)), unit) : '-'))))))));
     if (series.length > 8) target.append(h('div', { class: 'muted', style: { marginTop: '6px' } }, 'Table shows the first 8 series.'));
   }
 
   async function addToDashboard() {
     if (!last) return toast('Run a query first', 'err');
     let dashes = [];
-    try { dashes = (await api('/dashboards')).filter((d) => d.editable); } catch (e) { return toast(e.message, 'err'); }
+    try { dashes = (await api('/dashboards')).filter((d) => d.kind === 'custom'); } catch (e) { return toast(e.message, 'err'); }
     if (!dashes.length) return toast('Create a custom dashboard first (Dashboards > New Dashboard).', 'err');
     let dashId = dashes[0].id, type = 'line', w = '6';
     const title = h('input', { class: 'input', value: last.query.slice(0, 60) });
@@ -116,12 +103,11 @@ export function metricsPage(main, ctx) {
       { label: 'Cancel' },
       { label: 'Add panel', primary: true, onclick: async () => {
         await api(`/dashboards/${dashId}/panels`, { method: 'POST', body: { title: title.value, type, query: last.query, legend: legend.value, unit: unit === 'none' ? 'none' : unit, w: Number(w) } });
-        toast(`Panel added to "${dashes.find((d) => d.id === dashId)?.title || 'the dashboard'}"`);
+        toast('Panel added');
       } },
     ]);
   }
 
-  const ready = run();
-  ready.catch(() => {});
-  return { refresh: run, ready };
+  run();
+  return { refresh: run };
 }

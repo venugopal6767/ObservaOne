@@ -1,12 +1,13 @@
 {
   "name": "observa-ui",
-  "version": "1.8.5",
+  "version": "1.2.0",
   "description": "ObservaOne - monitoring UI with login on top of Prometheus, Alertmanager, Loki and Tempo",
   "private": true,
   "type": "module",
   "main": "src/server.js",
   "scripts": {
-    "start": "node src/server.js"
+    "start": "node src/server.js",
+    "test": "node --test \"tests/*.test.js\""
   },
   "engines": {
     "node": ">=20"

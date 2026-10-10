@@ -138,94 +138,9 @@ export const EXTRA_MIGRATIONS = [
   },
   {
     id: 4,
-    name: 'incidents',
+    name: 'remove demo mode: saved demo data sources become live',
     sql: `
-      CREATE TABLE incidents (
-        id              BIGSERIAL PRIMARY KEY,
-        fingerprint     TEXT,
-        title           TEXT NOT NULL,
-        severity        TEXT NOT NULL DEFAULT 'warning' CHECK (severity IN ('critical', 'warning', 'info')),
-        status          TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'acknowledged', 'investigating', 'resolved')),
-        service         TEXT NOT NULL DEFAULT '',
-        host            TEXT NOT NULL DEFAULT '',
-        environment     TEXT NOT NULL DEFAULT '',
-        summary         TEXT NOT NULL DEFAULT '',
-        source          TEXT NOT NULL DEFAULT 'manual' CHECK (source IN ('alert', 'manual', 'demo')),
-        alert_name      TEXT NOT NULL DEFAULT '',
-        labels          JSONB NOT NULL DEFAULT '{}',
-        assigned_to     TEXT,
-        created_by      TEXT,
-        started_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-        acknowledged_at TIMESTAMPTZ,
-        resolved_at     TIMESTAMPTZ,
-        updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
-      );
-      -- only one open incident per alert group
-      CREATE UNIQUE INDEX incidents_open_fp ON incidents (fingerprint) WHERE status <> 'resolved' AND fingerprint IS NOT NULL;
-      CREATE INDEX incidents_started_idx ON incidents (started_at DESC);
-
-      CREATE TABLE incident_events (
-        id          BIGSERIAL PRIMARY KEY,
-        incident_id BIGINT NOT NULL REFERENCES incidents(id) ON DELETE CASCADE,
-        at          TIMESTAMPTZ NOT NULL DEFAULT now(),
-        actor       TEXT,
-        kind        TEXT NOT NULL,
-        text        TEXT NOT NULL DEFAULT ''
-      );
-      CREATE INDEX incident_events_inc_idx ON incident_events (incident_id, at);
-    `,
-  },
-  {
-    id: 5,
-    name: 'user dashboards',
-    sql: `
-      -- new dashboards are private to their owner until shared
-      ALTER TABLE dashboards ALTER COLUMN visibility SET DEFAULT 'private';
-      ALTER TABLE dashboards ADD CONSTRAINT dashboards_visibility_chk CHECK (visibility IN ('private', 'team', 'everyone'));
-      ALTER TABLE dashboards ADD COLUMN copied_from TEXT;
-      CREATE INDEX dashboards_owner_idx ON dashboards (lower(owner));
-
-      -- starred dashboards per user (system ids are not in the dashboards table, so no FK)
-      CREATE TABLE dashboard_favorites (
-        user_id      BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        dashboard_id TEXT NOT NULL,
-        created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-        PRIMARY KEY (user_id, dashboard_id)
-      );
-    `,
-  },
-  {
-    id: 6,
-    name: 'unique user e-mail',
-    sql: `
-      UPDATE users SET email = lower(trim(email)) WHERE email IS NOT NULL;
-      UPDATE users SET email = NULL WHERE email = '';
-      -- one account per e-mail address (skipped if old data already has duplicates; the app still checks)
-      DO $$
-      BEGIN
-        IF NOT EXISTS (SELECT lower(email) FROM users WHERE email IS NOT NULL GROUP BY lower(email) HAVING count(*) > 1) THEN
-          CREATE UNIQUE INDEX users_email_unique ON users (lower(email)) WHERE email IS NOT NULL;
-        END IF;
-      END $$;
-    `,
-  },
-  {
-    id: 7,
-    name: 'dashboards per role',
-    sql: `
-      ALTER TABLE roles ADD COLUMN dashboards JSONB;
-      ALTER TABLE roles ADD COLUMN landing TEXT;
-      UPDATE roles SET dashboards = '["business","devops","developer","sre","security","appowner","itadmin","kubernetes"]', landing = 'itadmin' WHERE name = 'admin';
-      UPDATE roles SET dashboards = '["business","devops","developer","sre","security","appowner","kubernetes"]', landing = 'devops' WHERE name = 'operator';
-      UPDATE roles SET dashboards = '["business","developer","appowner"]', landing = 'business' WHERE name = 'viewer';
-      -- custom roles: start from what their permissions allow
-      UPDATE roles r SET dashboards = (
-        SELECT jsonb_agg(id) FROM (VALUES
-          ('business', TRUE), ('devops', r.permissions ? '*' OR r.permissions ? 'dashboards.edit'), ('developer', TRUE),
-          ('sre', r.permissions ? '*' OR r.permissions ? 'incidents.manage'), ('security', r.permissions ? '*' OR r.permissions ? 'security.read'),
-          ('appowner', TRUE), ('itadmin', r.permissions ? '*' OR r.permissions ? 'settings.manage'), ('kubernetes', TRUE)
-        ) AS v(id, ok) WHERE ok)
-      WHERE r.dashboards IS NULL;
+      UPDATE datasource_settings SET mode = 'live', updated_at = now(), updated_by = 'migration-4' WHERE mode = 'demo';
     `,
   },
 ];

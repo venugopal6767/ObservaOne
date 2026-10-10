@@ -105,7 +105,16 @@ OS_NAME="$(echo "$OS_NAME" | tr -d "'\"\\$\`")"   # used inside quoted settings 
 HOST_NAME="$(echo "$HOST_NAME" | tr -cd 'A-Za-z0-9._-')"
 [[ "$ENV_NAME$ROLE" =~ ^[A-Za-z0-9._-]*$ ]] || die "--env and --role may only use letters, digits, . _ -"
 
-TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+# Work in /var/tmp (on disk), not /tmp: on Ubuntu 25.10+ /tmp is a RAM disk (tmpfs) that is too small
+# on small instances for the agent (~600 MB while unpacking).
+TMP_BASE="${OBSERVA_TMPDIR:-/var/tmp}"
+[ -d "$TMP_BASE" ] || TMP_BASE=/tmp
+NEED_MB=800
+FREE_MB="$(df -Pm "$TMP_BASE" | awk 'NR==2 {print $4}')"
+[ "${FREE_MB:-0}" -ge "$NEED_MB" ] || die "Only ${FREE_MB} MB free in $TMP_BASE, ${NEED_MB} MB needed. Free some disk space, or set OBSERVA_TMPDIR to a bigger folder."
+FREE_MB="$(df -Pm / | awk 'NR==2 {print $4}')"
+[ "${FREE_MB:-0}" -ge 500 ] || die "Only ${FREE_MB} MB free on /, 500 MB needed for the agent. Free some disk space first."
+TMP="$(mktemp -d -p "$TMP_BASE" observaone.XXXXXX)"; trap 'rm -rf "$TMP"' EXIT
 CURL=(curl -fsSL --retry 3 --connect-timeout 15)
 
 # ---------------------------------------------------------------- trust the server
@@ -225,7 +234,7 @@ for g in adm systemd-journal; do getent group "$g" >/dev/null && usermod -aG "$g
 
 systemctl stop observaone-agent.service observaone-node-exporter.service 2>/dev/null || true
 install -d -m 0755 "$PREFIX/bin"
-tar -xzf "$TMP/$OT" -C "$TMP" otelcol-contrib
+tar -xzf "$TMP/$OT" -C "$TMP" otelcol-contrib || die "Could not unpack $OT (disk full? check: df -h $TMP_BASE /)"
 tar -xzf "$TMP/$NE" -C "$TMP" --strip-components=1 "node_exporter-${NODE_EXPORTER_VERSION}.linux-${ARCH}/node_exporter"
 install -m 0755 "$TMP/otelcol-contrib" "$PREFIX/bin/otelcol-contrib"
 install -m 0755 "$TMP/node_exporter" "$PREFIX/bin/node_exporter"

@@ -1,285 +1,158 @@
-// Overview: health of everything at a glance. Every number and row opens the page behind it.
-import { h, api, clear, icon, fmt, short, ago, sparkline, doughnut, timeChart, emptyState, errorBox, demoBadge } from '../ui.js';
-import { chartSlots, withIdle, IDLE_HINT } from './common.js';
-import { openLog } from './logs.js';
-import { attentionStrip, errorState, staleNotice, statusPill } from '../personas/widgets.js';
+import { h, api, clear, short, timeChart, barChart, doughnut, legendRow, legendName, stateView, stateFromError, ApiError, skeleton, statusColor, thresholdColor } from '../ui.js';
+import { chartSlots, statCard, pctChange } from './common.js';
 
-const SEV = { critical: ['Critical', 'sev-critical'], warning: ['Warning', 'sev-warning'], info: ['Info', 'sev-info'] };
-const LEVEL_PILL = { ERROR: 'lv-error', WARN: 'lv-warn', INFO: 'lv-info', DEBUG: 'lv-debug' };
-
-export const sevPill = (s) => { const [l, c] = SEV[s] || [s, 'sev-info']; return h('span', { class: `pill ${c}` }, l); };
-// one status-label helper for the whole app (UX-012); re-exported so existing imports keep working
-export { statusPill };
-export const levelPill = (lv) => h('span', { class: `pill ${LEVEL_PILL[lv] || 'lv-debug'}` }, lv);
-
+// Every value here is real or shown as unavailable with its reason. Nothing is filled in.
 export function overviewPage(main, ctx) {
   const setChart = chartSlots(ctx);
-  // environment comes from the global filter in the top bar
-  const env = ctx.env;
-  const kpis = h('div', { class: 'ov-kpis ov-kpis-5' });
-  const rowA = h('div', { class: 'ov-row ov-row-a' });
-  const rowB = h('div', { class: 'ov-row ov-row-b' });
-  const rowC = h('div', { class: 'ov-row ov-row-c' });
-  const right = h('div', { class: 'actions' });
-  const context = h('p', { class: 'ov-context' }, 'Real-time view of your infrastructure, applications, and services.');
-  const attn = h('div', { class: 'ov-attn' });
-  const stale = h('div', { class: 'ov-stale' });
-  const failBox = h('div');
+  const cards = h('div', { class: 'grid cards-6' });
+  const rowA = h('div', { class: 'grid cols-2', style: { marginTop: '14px' } });
+  const rowB = h('div', { class: 'grid cols-3', style: { marginTop: '14px' } });
   main.append(
-    h('div', { class: 'page-head' }, h('div', {}, h('h1', {}, 'Overview'), context), right),
-    stale, failBox, attn, kpis, rowA, rowB, rowC);
-  // loading: blocks in the shape of each row until the first data arrives
-  const block = (cls, height) => h('div', { class: `${cls} skeleton`, style: { height } });
-  kpis.append(...Array.from({ length: 5 }, () => block('kpi', '118px')));
-  rowA.append(block('panel', '250px'), block('panel', '250px'));
-  rowB.append(...Array.from({ length: 4 }, () => block('panel', '170px')));
-  rowC.append(...Array.from({ length: 3 }, () => block('panel', '240px')));
-  main.setAttribute('aria-busy', 'true');
-  let okAt = 0; // when the page last drew good data
+    h('div', { class: 'page-head' }, h('div', {}, h('h1', {}, 'Overview'), h('p', {}, 'Monitor your entire infrastructure and applications'))),
+    cards, rowA, rowB);
+  cards.append(skeleton('cards', 6));
+  rowB.append(skeleton('chart'));
 
-  const panel = (title, ic, body, link) => h('section', { class: 'panel ov-panel' },
-    h('div', { class: 'panel-head' }, icon(ic, 16, 'ov-ic'), h('h3', {}, title), link ? h('div', { class: 'right' }, link) : null), body);
-  const viewAll = (label, path) => h('a', { class: 'ov-link', href: ctx.link(path), 'data-link': true }, label, icon('arrowRight', 13));
+  // Panels follow the global time range in the top bar, so they carry no range label of their own.
+  // A panel that shows something else (e.g. the current value only) says so with a chip.
+  const panel = (title, body, { right } = {}) =>
+    h('section', { class: 'panel' }, h('div', { class: 'panel-head' }, h('h3', {}, title), right ? h('div', { class: 'right' }, right) : null), body);
+  const nowChip = () => h('span', { class: 'pill pill-muted', title: 'Current value, not the selected time range' }, 'Now');
+  // small grey line under a tile that explains a missing value
+  const reason = (text) => h('div', { class: 'stat-reason', title: text }, text.length > 60 ? `${text.slice(0, 57)}...` : text);
+  const agentsLink = () => (ctx.canOpen('/agents') ? h('a', { href: '/agents', 'data-link': true, class: 'btn btn-sm' }, 'Install an agent') : null);
+  // a failed piece of the overview, as the right state (unavailable vs error)
+  const failed = (msg, what) => stateFromError(new ApiError(msg, { status: /Cannot reach|timeout|HTTP 5\d\d/i.test(msg) ? 502 : 400 }), what);
 
   async function load() {
-    const { start, end } = ctx.range;
-    const [ov, inc, logs, traces] = await Promise.allSettled([
-      api('/overview', { query: { start, end, env } }),
-      api('/incidents', { query: { status: 'all', limit: 100 } }),
-      api('/logs', { query: { query: '{service_name=~".+"}', start, end, limit: 6 } }),
-      api('/traces', { query: { start, end, limit: 6 } }),
-    ]);
-    if (ov.status === 'rejected') {
-      main.removeAttribute('aria-busy');
-      if (okAt) {
-        // keep what is on screen; say it is old and why
-        clear(stale).append(staleNotice({ okAt, message: ov.reason.message, retry: () => retry() }));
-      } else {
-        [attn, kpis, rowA, rowB, rowC].forEach((x) => clear(x));
-        clear(failBox).append(errorState(ov.reason.message, () => retry(), 'The Overview could not load'));
-      }
-      throw ov.reason; // tells the shell this refresh failed, so "Updated … ago" is not reset
+    let d;
+    try {
+      d = await api('/overview', { query: ctx.range });
+    } catch (e) {
+      clear(cards).append(stateFromError(e, 'Overview'));
+      clear(rowA); clear(rowB);
+      return;
     }
-    clear(stale); clear(failBox);
-    main.removeAttribute('aria-busy');
-    okAt = Date.now();
-    const d = { ...ov.value, services: withIdle(ov.value.services) };
-    const incidents = inc.status === 'fulfilled' ? inc.value : null;
-    drawHeader(d, incidents);
-    drawAttention(d, incidents, inc.status === 'rejected');
-    drawKpis(d, incidents);
-    drawRowA(d, incidents, inc.status === 'rejected' ? inc.reason.message : null);
-    drawRowB(d);
-    drawRowC(d, logs, traces);
-  }
-
-  function drawHeader(d, incidents) {
-    clear(right).append(...[
-      env ? h('span', { class: 'pill pill-blue', title: 'Change it in the top bar' }, `Environment: ${env}`) : null].filter(Boolean));
-    const secs = ctx.rangeSeconds;
-    const rangeTxt = secs < 3600 ? `last ${secs / 60} minutes` : secs < 86400 ? `last ${secs / 3600} hour${secs > 3600 ? 's' : ''}` : `last ${secs / 86400} day${secs > 86400 ? 's' : ''}`;
-    clear(context).append(`Environment: ${env || 'all'} · Time range: ${rangeTxt} · Data as of ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`);
-  }
-
-  // ---------------- what needs attention now (live data only) ----------------
-  function drawAttention(d, incidents, incFailed) {
-    const items = [];
-    const open = (incidents?.incidents || []).filter((x) => x.status === 'open');
-    const openCrit = open.filter((x) => x.severity === 'critical');
-    const one = (list, word) => (list.length === 1 ? { label: 'Open incident', href: `/incidents/${list[0].id}` } : { label: `View ${word}`, href: '/incidents' });
-    if (openCrit.length) items.push({ level: 'critical', text: `${openCrit.length} critical incident${openCrit.length > 1 ? 's' : ''} not acknowledged`, detail: openCrit.slice(0, 2).map((x) => x.title).join(' · '), action: one(openCrit, 'incidents') });
-    const openOther = open.filter((x) => x.severity !== 'critical');
-    if (openOther.length) items.push({ level: 'warning', text: `${openOther.length} incident${openOther.length > 1 ? 's' : ''} waiting for someone to acknowledge`, detail: openOther.slice(0, 2).map((x) => x.title).join(' · '), action: one(openOther, 'incidents') });
-    const s = d.services?.summary;
-    if (s?.down) items.push({ level: 'critical', text: `${s.down} service${s.down > 1 ? 's' : ''} unhealthy`, detail: d.services.demo ? 'from sample service data' : null, action: { label: 'View services', href: '/services?status=down' } });
-    if (s?.degraded) items.push({ level: 'warning', text: `${s.degraded} service${s.degraded > 1 ? 's' : ''} degraded`, detail: d.services.demo ? 'from sample service data' : null, action: { label: 'View services', href: '/services?status=degraded' } });
-    if (d.hostsDown?.length) items.push({ level: 'critical', text: `${d.hostsDown.length} host${d.hostsDown.length > 1 ? 's' : ''} not reporting (exporter not answering)`, detail: d.hostsDown.slice(0, 4).join(', '), action: { label: 'View hosts', href: '/infrastructure' } });
-    if (d.diskHot?.length) items.push({ level: d.diskHot[0].usedPct >= 95 ? 'critical' : 'warning', text: `${d.diskHot.length} host${d.diskHot.length > 1 ? 's' : ''} with a disk over 90% full`, detail: d.diskHot.slice(0, 3).map((x) => `${x.host} ${Math.round(x.usedPct)}%`).join(', '), action: { label: 'View hosts', href: '/infrastructure' } });
-    // checks that could not run are said out loud, never shown as "all clear"
-    const failed = [incFailed && 'incidents', d.servicesError && 'services', (d.hostsDown === null || d.diskHot === null) && 'hosts and disks'].filter(Boolean);
-    // links keep environment and time range
-    for (const x of items) x.action.href = ctx.link(x.action.href);
-    // a check that could not run is always visible (never behind "Show more") and stops the strip from saying "All clear"
-    const notice = failed.length ? h('div', { class: 'attn-notice', role: 'status' }, icon('alert', 14),
-      h('span', {}, h('b', {}, `Could not check ${failed.join(', ')}.`), ' A data source did not answer, so this list may be incomplete. '),
-      h('a', { href: '/datasources', 'data-link': true }, 'Data sources')) : null;
-    const strip = items.length || !notice ? attentionStrip(items) : h('section', { class: 'attn', 'aria-label': 'Needs your attention' }, h('div', { class: 'attn-title' }, icon('alert', 14), 'Needs your attention'));
-    if (notice) strip.append(notice);
-    clear(attn).append(strip);
-  }
-
-  // ---------------- KPI cards ----------------
-  function kpi({ ic, tone, title, value, unit, delta, spark, sparkColor, bars, foot, href, demo }) {
-    const c = h('canvas');
-    const card = h('a', { class: `kpi kpi-${tone}`, href: ctx.link(href), 'data-link': true },
-      h('div', { class: 'kpi-top' }, h('span', { class: 'kpi-ic' }, icon(ic, 18)), h('span', { class: 'kpi-title' }, title, demo ? demoBadge(true, true) : null)),
-      h('div', { class: 'kpi-mid' },
-        h('div', { class: 'kpi-val' }, delta ? h('span', { class: `kpi-delta ${delta.cls}` }, delta.text) : null, h('b', {}, value), unit ? h('small', {}, unit) : null),
-        h('div', { class: 'kpi-spark' }, spark && spark.length > 1 ? c : null)),
-      h('div', { class: 'kpi-foot' }, foot));
-    if (spark && spark.length > 1) setChart(`spark-${title}`, sparkline(c, spark, sparkColor, bars));
-    return card;
-  }
-  const deltaCount = (now, before, goodWhenUp) => {
-    if (now === null || before === null || before === undefined) return null;
-    const diff = Math.round(now - before);
-    if (!diff) return null;
-    return { text: `${diff > 0 ? '↑' : '↓'} ${Math.abs(diff)}`, cls: (diff > 0) === goodWhenUp ? 'good' : 'bad' };
-  };
-  const deltaPct = (now, before, { relative = false } = {}) => {
-    if (now === null || before === null || !Number.isFinite(before) || (relative && !before)) return null;
-    const v = relative ? ((now - before) / before) * 100 : now - before;
-    if (Math.abs(v) < 0.05) return null;
-    return { text: `${v > 0 ? '↑' : '↓'} ${Math.abs(v).toFixed(1)}%`, cls: v > 0 ? 'bad' : 'good' };
-  };
-
-  function drawKpis(d, incidents) {
-    const s = d.services?.summary;
-    const ic = incidents?.counts;
-    // incidents opened per hour over the last 24 h, as small bars
-    const buckets = Array.from({ length: 24 }, (_, i) => [i, 0]);
-    for (const x of incidents?.incidents || []) {
-      const hAgo = Math.floor((Date.now() - Date.parse(x.startedAt)) / 3600_000);
-      if (hAgo >= 0 && hAgo < 24) buckets[23 - hAgo][1]++;
-    }
-    const k = d.kpi;
-    clear(kpis).append(
-      kpi({
-        ic: 'server', tone: 'blue', title: 'Total Hosts', value: String(d.hosts.total), href: '/infrastructure',
-        delta: deltaCount(d.hosts.healthy, d.hosts.before, true), spark: d.hosts.series, sparkColor: '#22c55e',
-        foot: [h('span', { class: 'c-green' }, `${d.hosts.healthy} healthy`), h('span', { class: 'c-orange', title: 'The exporter is not answering; the host itself may still be running' }, `${d.hosts.unhealthy} not reporting`), h('span', { class: 'dim' }, `${d.hosts.unknown} unknown`)],
-      }),
-      kpi({
-        ic: 'cube', tone: 'blue', title: 'Total Services', value: s ? String(s.total) : 'N/A', href: '/services', demo: d.services?.demo,
-        delta: s && d.servicesBefore ? deltaCount(s.healthy, d.servicesBefore.healthy, true) : null, spark: k?.rps.series, sparkColor: '#22c55e',
-        foot: s ? [h('span', { class: 'c-green' }, `${s.healthy} healthy`), h('span', { class: 'c-orange' }, `${s.degraded} degraded`), h('span', { class: 'c-red' }, `${s.down} down`), s.idle ? h('span', { class: 'dim', title: IDLE_HINT }, `${s.idle} no traffic`) : null] : [h('span', { class: 'dim' }, d.servicesError || 'No service data')],
-      }),
-      kpi({
-        ic: 'incident', tone: 'red', title: 'Active Incidents', value: ic ? String(ic.active) : 'N/A', href: '/incidents', spark: buckets, sparkColor: '#ef4444', bars: true,
-        foot: ic ? [h('span', { class: 'c-red' }, `${ic.critical} critical`), h('span', { class: 'c-orange' }, `${ic.warning} warning`)] : [h('span', { class: 'dim' }, 'Incidents unavailable')],
-      }),
-      kpi({
-        ic: 'pulse', tone: 'blue', title: 'Error Rate', value: k?.errorRate.now === null || !k ? 'N/A' : k.errorRate.now.toFixed(1), unit: k && k.errorRate.now !== null ? '%' : '', href: '/services', demo: k?.demo,
-        delta: k ? deltaPct(k.errorRate.now, k.errorRate.before) : null, spark: k?.errorRate.series, sparkColor: '#06b6d4',
-        foot: k && k.errorRate.before !== null ? [h('span', { class: 'dim' }, `from ${k.errorRate.before.toFixed(1)}% (start of range)`)] : [h('span', { class: 'dim' }, k ? 'No requests in this range' : 'Request metrics unavailable')],
-      }),
-      kpi({
-        ic: 'timer', tone: 'purple', title: 'P95 Latency', value: k?.p95.now ? String(Math.round(k.p95.now)) : 'N/A', unit: k?.p95.now ? 'ms' : '', href: '/traces', demo: k?.demo,
-        delta: k ? deltaPct(k.p95.now, k.p95.before, { relative: true }) : null, spark: k?.p95.series, sparkColor: '#a855f7',
-        foot: k && k.p95.before ? [h('span', { class: 'dim' }, `from ${Math.round(k.p95.before)} ms (start of range)`)] : [h('span', { class: 'dim' }, k ? 'No traced requests in this range' : 'Latency metrics unavailable')],
+    // Only the parts whose module is on (server decides; it does not even query the others)
+    const M = d.modules || {};
+    if (!M.infrastructure && !M.alerting && !M.services) {
+      cards.className = ''; // full width, not squeezed into one tile column
+      clear(cards).append(stateView('empty', {
+        title: 'No monitoring modules are enabled',
+        text: ctx.can('settings.manage') ? 'Turn on the modules this deployment uses in Settings > Modules.' : 'Nothing is enabled for your account yet. Contact your administrator.',
+        action: ctx.can('settings.manage') ? h('a', { href: '/settings?tab=modules', 'data-link': true, class: 'btn btn-sm' }, 'Open Modules') : null,
       }));
-  }
+      clear(rowA); clear(rowB);
+      return;
+    }
+    const svc = d.services;
+    const s = svc?.summary;
+    // a function: each tile needs its own element (one DOM node can't sit in three tiles)
+    const svcReason = () => (d.servicesError ? reason(`Service metrics unavailable: ${d.servicesError}`) : null);
+    const noTraffic = s && !s.totalRps;
 
-  // ---------------- service health + active incidents ----------------
-  function drawRowA(d, incidents, incErr) {
-    const s = d.services?.summary;
-    const health = h('div');
-    if (!s || !s.total) health.append(emptyState('No services yet', d.servicesError || 'Your applications do not report request metrics yet.'));
+    // ---- stat cards ----
+    const tiles = [];
+    if (M.services) tiles.push(
+      statCard('Total Services', s ? String(s.total) : '-', {
+        // the server count is Infrastructure data: only shown when that module is on
+        extra: svcReason() || (!M.infrastructure ? null : d.servers.total === null
+          ? reason(`Servers: ${d.servers.error || 'unknown'}`)
+          : h('div', { class: 'muted', style: { fontSize: '11.5px', marginTop: '4px' } }, `${d.servers.total} servers monitored`)),
+      }));
+    if (M.infrastructure) tiles.push(
+      statCard('CPU Usage', d.cpu.now === null ? '-' : d.cpu.now.toFixed(1), {
+        unit: d.cpu.now === null ? '' : '%', trend: pctChange(d.cpu.now, d.cpu.before), tone: d.cpu.now >= 90 ? 'red' : '',
+        extra: d.cpu.now === null ? reason(d.cpu.error ? `Unavailable: ${d.cpu.error}` : 'No CPU data from any server') : null,
+      }),
+      statCard('Memory Usage', d.mem.now === null ? '-' : d.mem.now.toFixed(1), {
+        unit: d.mem.now === null ? '' : '%', trend: pctChange(d.mem.now, d.mem.before), tone: d.mem.now >= 90 ? 'red' : '',
+        extra: d.mem.now === null ? reason(d.mem.error ? `Unavailable: ${d.mem.error}` : 'No memory data from any server') : null,
+      }));
+    if (M.services) tiles.push(
+      statCard('Request Rate', s ? short(s.totalRps) : '-', { unit: s ? '/s' : '', extra: svcReason() || (noTraffic ? reason('No traffic in this period') : null) }),
+      statCard('Error Rate', s && s.errorRate !== null ? s.errorRate.toFixed(1) : '-', {
+        unit: s && s.errorRate !== null ? '%' : '',
+        tone: s && s.errorRate >= 5 ? 'red' : s && s.errorRate >= 1 ? 'orange' : '',
+        extra: svcReason() || (noTraffic ? reason('No requests, so no error rate') : null),
+      }));
+    let alertCard = null;
+    if (M.alerting) tiles.push(alertCard =
+      statCard('Active Alerts', d.alerts.active === null ? '-' : String(d.alerts.active), {
+        // grey when unknown: an unreachable Alertmanager must not look like "no alerts"
+        tone: d.alerts.active === null ? '' : d.alerts.active ? 'red' : 'green', iconName: 'alerting',
+        extra: d.alerts.error ? reason(`Alertmanager unavailable: ${d.alerts.error}`)
+          : h('div', { class: 'muted', style: { fontSize: '11.5px', marginTop: '4px' } }, `${d.alerts.critical} critical`),
+      }));
+    cards.className = `grid cards-${tiles.length}`;
+    clear(cards).append(...tiles);
+    if (alertCard && ctx.canOpen('/alerting')) {
+      alertCard.style.cursor = 'pointer';
+      alertCard.onclick = () => ctx.navigate('/alerting');
+    }
+
+    // ---- request rate + latency ----
+    clear(rowA);
+    if (M.services) rowA.append(
+      seriesPanel('Request Rate', d.rpsSeries, d.rpsError || d.servicesError, 'reqps', 'rps'),
+      seriesPanel('Latency (P95)', d.latSeries, d.latError || d.servicesError, 'ms', 'lat'),
+    );
+    rowA.style.display = M.services ? '' : 'none';
+
+    // ---- cpu by node, memory by server, services health ----
+    const cpuBox = h('div');
+    if (d.cpuByHostError) cpuBox.append(failed(d.cpuByHostError, 'CPU'));
+    else if (!d.cpuByHost.length) cpuBox.append(stateView('empty', { title: 'No monitored hosts available', text: 'Install the ObservaOne Agent on a server, or add it to prometheus/targets.', action: agentsLink() }));
     else {
       const c = h('canvas');
-      const pct = (n) => `${((n / s.total) * 100).toFixed(1)}%`;
-      const rowOf = (dot, label, n, filter) => h('a', { class: 'ov-health-row', href: ctx.link('/services', { status: filter }), 'data-link': true },
-        h('i', { class: `dot ${dot}` }), h('span', {}, label), h('b', {}, String(n)), h('span', { class: 'dim' }, pct(n)));
-      health.append(h('div', { class: 'ov-health' },
+      cpuBox.append(h('div', { class: 'chart-box' }, c));
+      const colors = d.cpuByHost.map((x) => thresholdColor(x.value, { warn: 80, crit: 90 }));
+      setChart('cpu', barChart(c, d.cpuByHost.map((x) => x.host || '(no host label)'), d.cpuByHost.map((x) => x.value), { unit: 'percent', colors, max: 100 }));
+    }
+    const memBox = h('div');
+    if (d.memError) memBox.append(failed(d.memError, 'Memory'));
+    else if (!d.memSeries.length) memBox.append(stateView('empty', { title: 'No memory data for the selected time range' }));
+    else {
+      const c = h('canvas');
+      const series = d.memSeries.slice(0, 8).map((r) => ({ label: r.metric.host, points: r.values }));
+      memBox.append(h('div', { class: 'chart-box', style: { height: '180px' } }, c), legendRow(series.map((x) => x.label)));
+      setChart('mem', timeChart(c, series, { unit: 'percent', area: true, max: 100 }));
+    }
+    const healthBox = h('div');
+    if (!s) healthBox.append(failed(d.servicesError || 'No answer', 'Services'));
+    else if (!s.total) healthBox.append(stateView('empty', { title: 'No services discovered', text: 'No application request metrics match config/services.json yet.' }));
+    else {
+      const c = h('canvas');
+      healthBox.append(h('div', { class: 'health' },
         h('div', { class: 'donut' }, c, h('div', { class: 'center' }, h('b', {}, s.total), h('span', {}, 'Services'))),
-        h('div', { class: 'ov-health-list' }, rowOf('dot-green', 'Healthy', s.healthy, 'healthy'), rowOf('dot-orange', 'Degraded', s.degraded, 'degraded'), rowOf('dot-red', 'Unhealthy', s.down, 'down'),
-          s.idle ? rowOf('dot-muted', 'No traffic', s.idle, 'idle') : null)));
-      setChart('health', doughnut(c, ['Healthy', 'Degraded', 'Unhealthy', 'No traffic'], [s.healthy, s.degraded, s.down, s.idle || 0], ['#22c55e', '#f59e0b', '#ef4444', '#94a3b8']));
+        h('div', { class: 'health-list' },
+          h('div', {}, h('i', { class: 'dot dot-green' }), 'Healthy', h('b', {}, s.healthy)),
+          h('div', {}, h('i', { class: 'dot dot-orange' }), 'Degraded', h('b', {}, s.degraded)),
+          h('div', {}, h('i', { class: 'dot dot-red' }), 'Down', h('b', {}, s.down)),
+          h('div', { title: 'No requests in this period' }, h('i', { class: 'dot', style: { background: 'var(--unknown)' } }), 'No traffic', h('b', {}, s.noTraffic)))));
+      setChart('health', doughnut(c, ['Healthy', 'Degraded', 'Down', 'No traffic'], [s.healthy, s.degraded, s.down, s.noTraffic], ['ok', 'warn', 'crit', 'unknown'].map(statusColor)));
     }
-    const incBox = h('div');
-    const active = (incidents?.incidents || []).filter((x) => x.status !== 'resolved').slice(0, 4);
-    if (incErr) incBox.append(errorBox(incErr));
-    else if (!active.length) incBox.append(emptyState('No active incidents', 'Everything is quiet right now.'));
-    else {
-      incBox.append(h('table', { class: 'tbl ov-tbl' },
-        h('thead', {}, h('tr', {}, ['Severity', 'Title', 'Service', 'Started', 'Status'].map((x) => h('th', {}, x)))),
-        h('tbody', {}, active.map((x) => h('tr', { class: 'clickable', onclick: () => ctx.navigate(ctx.link(`/incidents/${x.id}`)) },
-          h('td', {}, h('span', { class: 'ov-sev' }, h('i', { class: `dot ${x.severity === 'critical' ? 'dot-red' : 'dot-orange'}` }), sevPill(x.severity))),
-          h('td', { class: 'ov-title' }, x.title),
-          h('td', {}, x.service ? h('a', { href: ctx.link(`/services/${encodeURIComponent(x.service)}`), 'data-link': true, onclick: (e) => e.stopPropagation() }, x.service) : h('span', { class: 'dim' }, x.host || '—')),
-          h('td', { class: 'dim' }, ago(x.startedAt)),
-          h('td', {}, statusPill(x.status)))))));
-    }
-    clear(rowA).append(
-      panel('Service Health', 'heart', health, viewAll('View All Services', '/services')),
-      panel('Active Incidents', 'incident', incBox, viewAll('View All', '/incidents')));
-  }
+    const bottom = [];
+    if (M.infrastructure) bottom.push(panel('CPU Usage by Node', cpuBox, { right: nowChip() }), panel('Memory Usage by Server', memBox));
+    if (M.services) bottom.push(panel('Services Health', healthBox, { right: [nowChip(), ctx.canOpen('/services') ? h('a', { href: '/services', 'data-link': true, style: { marginLeft: '10px' } }, 'View all') : null] }));
+    rowB.className = `grid cols-${Math.max(1, bottom.length)}`;
+    rowB.style.marginTop = '14px';
+    clear(rowB).append(...bottom);
 
-  // ---------------- CPU / memory / disk / network ----------------
-  function drawRowB(d) {
-    const mini = (title, ic, color, m, unit, href, max) => {
-      const box = h('div', { class: 'ov-mini-chart' });
-      const valueText = m.now === null || m.now === undefined ? (m.error ? 'Unavailable' : 'No data') : unit === 'bps' ? fmt(m.now, 'bps') : `${Math.round(m.now)}%`;
-      const p = h('section', { class: 'panel ov-panel ov-mini' },
-        h('div', { class: 'panel-head' }, h('span', { class: 'ov-mini-ic', style: { color } }, icon(ic, 16)),
-          h('div', {}, h('h3', {}, title), h('div', { class: 'ov-mini-val' }, valueText)),
-          h('div', { class: 'right' }, viewAll('View', href))),
-        box);
-      if (m.error) box.append(h('div', { class: 'dim', style: { fontSize: '12px' } }, 'No data'));
-      else if (m.series?.length > 1) {
+    function seriesPanel(title, s2, errMsg, unit, key) {
+      const box = h('div');
+      if (!s2) box.append(failed(errMsg || 'No answer', title));
+      else if (!s2.result.length) box.append(stateView('empty', { title: 'No request metrics for the selected time range', text: 'Your applications do not expose request metrics yet, or config/services.json does not match them.' }));
+      else {
         const c = h('canvas');
-        box.append(c);
-        setChart(`mini-${title}`, timeChart(c, [{ label: title, points: m.series, color }], { unit: unit === 'bps' ? 'bps' : 'percent', area: true, max }));
-      } else box.append(h('div', { class: 'dim', style: { fontSize: '12px', padding: '20px 0' } }, 'Waiting for data'));
-      return p;
-    };
-    clear(rowB).append(
-      mini('CPU Usage', 'cpu', '#3b82f6', d.cpu, 'percent', '/infrastructure', 100),
-      mini('Memory Usage', 'memory', '#a855f7', d.mem, 'percent', '/infrastructure', 100),
-      mini('Disk Usage', 'disk', '#22c55e', d.disk, 'percent', '/insights', 100),
-      mini('Network I/O', 'network', '#06b6d4', d.net, 'bps', `/metrics?q=${encodeURIComponent('sum by (host) (rate(node_network_receive_bytes_total[5m]))')}`));
-  }
-
-  // ---------------- top services, recent logs, recent traces ----------------
-  function drawRowC(d, logs, traces) {
-    const top = h('div');
-    if (!d.topErrors?.length) top.append(emptyState('No service data'));
-    else {
-      const maxErr = Math.max(1, ...d.topErrors.map((x) => x.errorRate));
-      top.append(h('table', { class: 'tbl ov-tbl' },
-        h('thead', {}, h('tr', {}, h('th', {}, 'Service'), h('th', {}, 'Error rate'), h('th', { class: 'num' }, 'Requests'), h('th', {}))),
-        h('tbody', {}, d.topErrors.map((x) => {
-          const tone = x.errorRate >= 5 ? '#ef4444' : x.errorRate >= 1 ? '#f59e0b' : '#22c55e';
-          return h('tr', { class: 'clickable', onclick: () => ctx.navigate(ctx.link(`/services/${encodeURIComponent(x.name)}`)) },
-            h('td', {}, h('span', { class: 'ov-svc' }, h('i', { class: 'ov-svc-ic', style: { color: tone } }, icon(x.status === 'healthy' ? 'check' : 'alert', 12)), x.name)),
-            h('td', {}, h('div', { class: 'ov-errbar' }, h('span', { style: { color: tone } }, `${x.errorRate.toFixed(1)}%`), h('div', { class: 'bar' }, h('i', { style: { width: `${(x.errorRate / maxErr) * 100}%`, background: tone } })))),
-            h('td', { class: 'num' }, `${short(x.rps * 60)}/min`),
-            h('td', { class: 'num dim' }, icon('chevron', 12, 'rot-90')));
-        }))));
+        const series = s2.result.map((r) => ({ label: r.metric.service || legendName(r.metric), points: r.values }));
+        box.append(h('div', { class: 'chart-box' }, c), legendRow(series.map((x) => x.label)));
+        setChart(key, timeChart(c, series, { unit }));
+      }
+      return panel(title, box);
     }
-    const logBox = h('div');
-    if (logs.status === 'rejected') logBox.append(errorBox(logs.reason.message));
-    else if (!logs.value.entries.length) logBox.append(emptyState('No logs in this time range'));
-    else logBox.append(h('table', { class: 'tbl ov-tbl' },
-      h('thead', {}, h('tr', {}, ['Time', 'Level', 'Service', 'Message'].map((x) => h('th', {}, x)))),
-      h('tbody', {}, logs.value.entries.slice(0, 5).map((e) => h('tr', { class: 'clickable', onclick: () => openLog(ctx, e) },
-        h('td', { class: 'mono dim' }, new Date(e.ts).toTimeString().slice(0, 8)),
-        h('td', {}, levelPill(e.level)),
-        h('td', { class: e.service ? 'c-link' : 'dim' }, e.service || '—'),
-        h('td', { class: 'ov-msg', title: e.message }, e.message))))));
-    const trBox = h('div');
-    if (traces.status === 'rejected') trBox.append(errorBox(traces.reason.message));
-    else if (!traces.value.traces.length) trBox.append(emptyState('No traces in this time range'));
-    else trBox.append(h('table', { class: 'tbl ov-tbl' },
-      h('thead', {}, h('tr', {}, ['Time', 'Service', 'Duration', 'Status'].map((x, i) => h('th', { class: i === 2 ? 'num' : '' }, x)))),
-      h('tbody', {}, traces.value.traces.slice(0, 5).map((t) => {
-        const st = t.error ? ['Error', 'st-err'] : t.durationMs > 1000 ? ['Slow', 'st-slow'] : t.error === null ? ['—', 'st-res'] : ['OK', 'st-ok'];
-        return h('tr', { class: 'clickable', onclick: () => ctx.navigate(ctx.link(`/traces/${t.traceId}`)) },
-          h('td', { class: 'mono dim' }, new Date(t.startMs).toTimeString().slice(0, 8)),
-          h('td', { class: 'c-link' }, t.rootService),
-          h('td', { class: 'num' }, fmt(t.durationMs, 'ms')),
-          h('td', {}, h('span', { class: `pill ${st[1]}` }, st[0])));
-      }))));
-    clear(rowC).append(
-      panel('Top Services by Error Rate', 'pulse', top, viewAll('View All', '/services?sort=errorRate')),
-      panel(h('span', {}, 'Recent Logs ', demoBadge(logs.value?.demo, true)), 'logs', logBox, viewAll('View All', '/logs')),
-      panel(h('span', {}, 'Recent Traces ', demoBadge(traces.value?.demo, true)), 'traces', trBox, viewAll('View All', '/traces')));
   }
 
   load();
-  // Retry from a stale notice or error: runs the same load and updates the top-bar freshness through the shell
-  const retry = () => ctx.refreshNow ? ctx.refreshNow() : load().catch(() => {});
-  const ready = load();
-  ready.catch(() => {});
-  return { refresh: load, ready };
+  return { refresh: load };
 }

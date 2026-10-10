@@ -1,53 +1,38 @@
-import { errorState, staleNotice } from '../personas/widgets.js';
-import { h, api, clear, icon, emptyState, dateTime, toggle, modal, field, select, toast, confirmBox, ago } from '../ui.js';
+import { h, api, clear, icon, dateTime, toggle, modal, field, select, toast, confirmBox, stateView, stateFromError, timeEl, timeHeader } from '../ui.js';
 
 const SEV = { critical: ['Critical', 'pill-solid-red'], warning: ['Warning', 'pill-solid-orange'], info: ['Info', 'pill-solid-blue'] };
 
 export function alertingPage(main, ctx) {
   let tab = ctx.params.get('tab') || 'active';
-  let alerts = null, silences = [], rules = null, rulesEditable = false, notif = null, error = null, okAt = 0;
+  let alerts = null, silences = [], rules = null, rulesEditable = false, notif = null, error = null;
   const tabsEl = h('div', { class: 'chips' });
-  const stale = h('div');
-  const out = h('div', {}, h('div', { class: 'table-wrap skeleton', style: { height: '320px' } }));
-  const actions = h('div', { class: 'actions' });
-  // same name as the menu item
+  const out = h('div', {}, h('div', { class: 'table-wrap' }, stateView('loading', { skeleton: 'table' })));
   main.append(
-    h('div', { class: 'page-head' }, h('div', {}, h('h1', {}, 'Alert Rules'), h('p', {}, 'Firing alerts, alert rules, silences and notifications')), actions),
+    h('div', { class: 'page-head' }, h('div', {}, h('h1', {}, 'Alerting'), h('p', {}, 'Manage alerts and notifications')),
+      h('div', { class: 'actions' }, ctx.can('alerts.rules') ? h('button', { class: 'btn btn-primary', onclick: newRule }, icon('plus', 15), 'New Alert Rule') : null)),
     h('div', { class: 'toolbar' }, tabsEl),
-    stale, out);
-
-  // "New Alert Rule" works only when the server allows rule editing; otherwise it is locked and says why
-  function drawActions() {
-    if (!ctx.can('alerts.rules')) return clear(actions);
-    clear(actions).append(rulesEditable
-      ? h('button', { class: 'btn btn-primary', onclick: newRule }, icon('plus', 15), 'New Alert Rule')
-      : h('button', { class: 'btn btn-unavail', 'aria-disabled': 'true', title: 'Rule editing is off on this server. Set UI_RULES_FILE (see README) to create rules here.',
-        onclick: () => toast('Rule editing is off on this server. Set UI_RULES_FILE (see README). Nothing was changed.', 'err') }, icon('lock', 13), 'New Alert Rule'));
-  }
+    out);
 
   async function load() {
+    error = null;
     try {
       const [a, r] = await Promise.all([api('/alerts'), api('/rules')]);
       alerts = a.alerts; silences = a.silences; rules = r.rules; rulesEditable = r.editable;
-      error = null; okAt = Date.now(); clear(stale);
     } catch (e) {
-      if (alerts) { clear(stale).append(staleNotice({ okAt, message: e.message, retry: () => ctx.refreshNow() })); throw e; }
-      error = e.message;
-      draw();
-      throw e;
+      error = e;
     }
-    drawActions();
     draw();
   }
-  const reloadQuiet = () => load().catch(() => {});
 
   function draw() {
     const active = (alerts || []).filter((a) => a.state === 'active');
-    const counts = { active: active.length, all: (alerts || []).length, rules: (rules || []).length, silences: silences.filter((s) => s.state === 'active').length };
+    // unknown counts show "-": a failed load must not look like "0 alerts"
+    const n = (v) => (error ? '-' : v);
+    const counts = { active: n(active.length), all: n((alerts || []).length), rules: n((rules || []).length), silences: n((silences || []).filter((s) => s.state === 'active').length) };
     clear(tabsEl).append(...[['active', `Active (${counts.active})`], ['all', `All (${counts.all})`], ['rules', `Rules (${counts.rules})`], ['silences', `Silences (${counts.silences})`], ['notifications', 'Notifications']]
-      .map(([k, l]) => h('button', { class: `tab ${tab === k ? 'active' : ''}`, 'aria-pressed': String(tab === k), style: { border: '1px solid var(--border-2)', height: '30px' }, onclick: () => { tab = k; history.replaceState({}, '', ctx.link('/alerting', { tab: k === 'active' ? '' : k })); draw(); } }, l)));
+      .map(([k, l]) => h('button', { class: `tab ${tab === k ? 'active' : ''}`, style: { border: '1px solid var(--border-2)', height: '30px' }, onclick: () => { tab = k; history.replaceState({}, '', `/alerting?tab=${k}`); draw(); } }, l)));
     clear(out);
-    if (error) return out.append(errorState(error, () => ctx.refreshNow(), 'Alerts could not load'));
+    if (error) return out.append(h('div', { class: 'table-wrap' }, stateFromError(error, 'Alerts')));
     if (tab === 'active' || tab === 'all') return out.append(alertTable(tab === 'active' ? active : alerts));
     if (tab === 'rules') return out.append(ruleTable());
     if (tab === 'silences') return out.append(silenceTable());
@@ -55,10 +40,14 @@ export function alertingPage(main, ctx) {
   }
 
   function alertTable(list) {
-    if (!list.length) return h('div', { class: 'table-wrap' }, emptyState('No alerts', tab === 'active' ? 'Everything is quiet right now.' : ''));
+    if (!list.length) {
+      return h('div', { class: 'table-wrap' }, stateView('empty', tab === 'active'
+        ? { title: 'No active alerts', text: 'Alertmanager reports nothing firing right now.' }
+        : { title: 'No alerts', text: 'Alertmanager has no alerts, firing or silenced.' }));
+    }
     const canSilence = ctx.can('alerts.silence');
     return h('div', { class: 'table-wrap' }, h('table', { class: 'tbl' },
-      h('thead', {}, h('tr', {}, ['Alert Name', 'Severity', 'Status', 'Server', 'Started', 'Message', 'Notify'].map((x, i) => h('th', { class: [2, 3, 4, 5].includes(i) ? 'col-phone-hide' : '' }, x)))),
+      h('thead', {}, h('tr', {}, ['Alert Name', 'Severity', 'Status', 'Server', timeHeader('Started'), 'Message', 'Notify'].map((x) => h('th', {}, x)))),
       h('tbody', {}, list.map((a) => {
         const [sl, sc] = SEV[a.severity] || [a.severity, 'pill-solid-muted'];
         const silenced = a.state === 'suppressed' && a.silencedBy?.length;
@@ -67,10 +56,10 @@ export function alertingPage(main, ctx) {
         return h('tr', {},
           h('td', {}, h('b', { style: { fontWeight: 600 } }, a.name)),
           h('td', {}, h('span', { class: `pill ${sc}` }, sl)),
-          h('td', { class: 'col-phone-hide' }, statusPill),
-          h('td', { class: 'col-phone-hide' }, a.labels.host || a.labels.instance || h('span', { class: 'dim' }, '—')),
-          h('td', { class: 'mono col-phone-hide', style: { whiteSpace: 'nowrap' }, title: ago(a.startsAt) }, dateTime(Date.parse(a.startsAt)).slice(0, 16)),
-          h('td', { class: 'msg col-phone-hide', title: a.description }, a.summary || a.description),
+          h('td', {}, statusPill),
+          h('td', {}, a.labels.host || a.labels.instance || '-'),
+          h('td', { class: 'mono', style: { whiteSpace: 'nowrap' } }, timeEl(Date.parse(a.startsAt), dateTime(Date.parse(a.startsAt)).slice(0, 16))),
+          h('td', { class: 'msg', title: a.description }, a.summary || a.description),
           h('td', {}, toggle(!silenced, async (on, el) => {
             try {
               if (!on) {
@@ -81,8 +70,8 @@ export function alertingPage(main, ctx) {
               }
             } catch (e) { toast(e.message, 'err'); }
             el.checked = !silenced;
-            reloadQuiet();
-          }, !canSilence || a.state === 'suppressed' && !silenced, canSilence ? `Notifications for ${a.name}: off = silence this alert` : 'Needs the operator role')));
+            load();
+          }, !canSilence || a.state === 'suppressed' && !silenced, canSilence ? 'Off = silence this alert' : 'Needs the operator role')));
       }))));
   }
 
@@ -108,44 +97,44 @@ export function alertingPage(main, ctx) {
   }
 
   function ruleTable() {
-    if (!rules.length) return h('div', { class: 'table-wrap' }, emptyState('No alert rules loaded'));
+    if (!rules.length) return h('div', { class: 'table-wrap' }, stateView('empty', { title: 'No alert rules loaded', text: 'Prometheus has no alerting rules. Add rule files under prometheus/rules, or create one here with "New Alert Rule".' }));
     const stateP = { firing: 'pill-solid-red', pending: 'pill-solid-orange', inactive: 'pill-solid-green' };
     return h('div', {},
       !rulesEditable && ctx.can('alerts.rules') ? h('div', { class: 'info-box' }, 'Rules from files are read-only here. Set UI_RULES_FILE to allow creating rules in this page.') : null,
       h('div', { class: 'table-wrap' }, h('table', { class: 'tbl' },
-        h('thead', {}, h('tr', {}, ['Rule', 'Group', 'Severity', 'State', 'For', 'Query', h('span', { class: 'sr-only' }, 'Actions')].map((x, i) => h('th', { class: [1, 4, 5].includes(i) ? 'col-phone-hide' : '' }, x)))),
+        h('thead', {}, h('tr', {}, ['Rule', 'Group', 'Severity', 'State', 'For', 'Query', ''].map((x) => h('th', {}, x)))),
         h('tbody', {}, rules.map((r) => {
           const [sl, sc] = SEV[r.severity] || [r.severity, 'pill-solid-muted'];
           return h('tr', {},
-            h('td', { class: 'wrap-any' }, h('b', { style: { fontWeight: 600 } }, r.name), h('div', { class: 'dim', style: { fontSize: '11.5px' } }, r.summary.replace(/\{\{.*?\}\}/g, '…'))),
-            h('td', { class: 'dim col-phone-hide' }, r.group),
+            h('td', {}, h('b', { style: { fontWeight: 600 } }, r.name), h('div', { class: 'dim', style: { fontSize: '11.5px' } }, r.summary.replace(/\{\{.*?\}\}/g, '…'))),
+            h('td', { class: 'dim' }, r.group),
             h('td', {}, h('span', { class: `pill ${sc}` }, sl)),
             h('td', {}, h('span', { class: `pill ${stateP[r.state] || 'pill-muted'}` }, r.state === 'inactive' ? 'OK' : `${r.state}${r.firing ? ` (${r.firing})` : ''}`), r.health === 'err' ? h('div', { class: 'c-red', style: { fontSize: '11px' } }, r.lastError) : null),
-            h('td', { class: 'dim col-phone-hide' }, r.duration ? `${Math.round(r.duration / 60)}m` : '0m'),
-            h('td', { class: 'mono msg col-phone-hide', style: { fontSize: '11.5px', maxWidth: '380px' }, title: r.query }, r.query),
-            h('td', {}, r.custom && ctx.can('alerts.rules') ? h('button', { class: 'icon-btn', title: `Delete rule ${r.name}`, 'aria-label': `Delete rule ${r.name}`, onclick: async () => {
+            h('td', { class: 'dim' }, r.duration ? `${Math.round(r.duration / 60)}m` : '0m'),
+            h('td', { class: 'mono msg', style: { fontSize: '11.5px', maxWidth: '380px' }, title: r.query }, r.query),
+            h('td', {}, r.custom && ctx.can('alerts.rules') ? h('button', { class: 'icon-btn', title: 'Delete rule', onclick: async () => {
               if (!(await confirmBox('Delete rule', `Delete alert rule "${r.name}"?`, 'Delete'))) return;
-              try { await api(`/rules/${encodeURIComponent(r.name)}`, { method: 'DELETE' }); toast('Rule deleted'); reloadQuiet(); } catch (e) { toast(e.message, 'err'); }
+              try { await api(`/rules/${encodeURIComponent(r.name)}`, { method: 'DELETE' }); toast('Rule deleted'); load(); } catch (e) { toast(e.message, 'err'); }
             } }, icon('trash', 14)) : null));
         })))));
   }
 
   function silenceTable() {
-    if (!silences.length) return h('div', { class: 'table-wrap' }, emptyState('No silences', 'Turn off "Notify" on an alert to silence it.'));
+    if (!silences.length) return h('div', { class: 'table-wrap' }, stateView('empty', { title: 'No silences', text: 'Turn off "Notify" on an alert to silence it.' }));
     return h('div', { class: 'table-wrap' }, h('table', { class: 'tbl' },
-      h('thead', {}, h('tr', {}, ['Matchers', 'State', 'Created by', 'Comment', 'Ends', h('span', { class: 'sr-only' }, 'Actions')].map((x, i) => h('th', { class: [2, 3].includes(i) ? 'col-phone-hide' : '' }, x)))),
+      h('thead', {}, h('tr', {}, ['Matchers', 'State', 'Created by', 'Comment', timeHeader('Ends'), ''].map((x) => h('th', {}, x)))),
       h('tbody', {}, silences.map((s) => h('tr', {},
         h('td', { class: 'mono', style: { fontSize: '12px' } }, s.matchers.map((m) => `${m.name}="${m.value}"`).join(', ')),
         h('td', {}, h('span', { class: `pill ${s.state === 'active' ? 'pill-blue' : 'pill-muted'}` }, s.state)),
-        h('td', { class: 'col-phone-hide' }, s.createdBy), h('td', { class: 'msg col-phone-hide' }, s.comment),
-        h('td', { class: 'mono' }, dateTime(Date.parse(s.endsAt)).slice(0, 16)),
+        h('td', {}, s.createdBy), h('td', { class: 'msg' }, s.comment),
+        h('td', { class: 'mono' }, timeEl(Date.parse(s.endsAt), dateTime(Date.parse(s.endsAt)).slice(0, 16))),
         h('td', {}, s.state === 'active' && ctx.can('alerts.silence') ? h('button', { class: 'btn btn-sm', onclick: async () => {
-          try { await api(`/silences/${s.id}`, { method: 'DELETE' }); toast('Silence ended'); reloadQuiet(); } catch (e) { toast(e.message, 'err'); }
+          try { await api(`/silences/${s.id}`, { method: 'DELETE' }); toast('Silence ended'); load(); } catch (e) { toast(e.message, 'err'); }
         } }, 'End now') : null))))));
   }
 
   async function drawNotifications() {
-    out.append(h('div', { class: 'table-wrap skeleton', style: { height: '200px' } }));
+    out.append(h('div', { class: 'table-wrap' }, stateView('loading', { skeleton: 'table' })));
     try {
       notif = notif || await api('/notifications');
       clear(out);
@@ -155,10 +144,10 @@ export function alertingPage(main, ctx) {
         h('thead', {}, h('tr', {}, h('th', {}, 'Receiver'), h('th', {}, 'Channel'), h('th', {}, 'Sends to'))),
         h('tbody', {}, notif.receivers.flatMap((r) => (r.channels.length ? r.channels : [{ type: '(none)', targets: [] }]).map((c) => h('tr', {},
           h('td', {}, h('b', { style: { fontWeight: 600 } }, r.name), r.name === notif.route.receiver ? h('span', { class: 'pill pill-blue', style: { marginLeft: '8px' } }, 'default') : null),
-          h('td', {}, c.type), h('td', { class: 'mono' }, c.targets.join(', ') || '—'))))))));
+          h('td', {}, c.type), h('td', { class: 'mono' }, c.targets.join(', ') || '-'))))))));
       out.append(h('p', { class: 'muted', style: { marginTop: '10px' } }, `Alerts are grouped by ${(notif.route.groupBy || []).join(', ')} and repeated every ${notif.route.repeat || '4h'} while still firing.`));
     } catch (e) {
-      clear(out).append(errorState(e.message, () => { clear(out); drawNotifications(); }, 'Notification settings could not load'));
+      clear(out).append(h('div', { class: 'table-wrap' }, stateFromError(e, 'Notifications')));
     }
   }
 
@@ -180,12 +169,11 @@ export function alertingPage(main, ctx) {
         await api('/rules', { method: 'POST', body: { name: name.value.trim(), expr: expr.value.trim(), severity: sev, forMinutes: Number(forMin), summary: summary.value } });
         toast('Rule created and loaded by Prometheus');
         tab = 'rules';
-        reloadQuiet();
+        load();
       } },
     ], { wide: true });
   }
 
-  const ready = load();
-  ready.catch(() => {});
-  return { refresh: load, ready };
+  load();
+  return { refresh: load };
 }

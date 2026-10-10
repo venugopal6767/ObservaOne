@@ -9,7 +9,6 @@ import { newSecret, verifyTotp, otpauthUri, recoveryCodes } from '../totp.js';
 import {
   PERMISSIONS, BUILTIN_ROLES, loadRoles, invalidateRoles, canGrantRole, hasPerm, requirePerm, requireUser,
   httpError, newApiKey, checkOwnPassword,
-  cleanEmail, assertEmailFree, DASHBOARD_IDS, defaultDashboards,
 } from '../auth.js';
 import { getSetting, setSetting } from '../settings.js';
 import { enabledProviders } from '../sso.js';
@@ -76,12 +75,10 @@ accessRouter.post('/me/mfa/recovery-codes', requireUser, wrap(async (req, res) =
 
 accessRouter.put('/me/profile', requireUser, wrap(async (req, res) => {
   const { email, displayName, phone } = req.body || {};
-  const local = (req.user.authSource || 'local') === 'local';
-  const mail = cleanEmail(email, { required: local });
-  await assertEmailFree(mail, req.userId);
+  if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw httpError(400, 'E-mail address looks wrong.');
   if (phone && !/^\+?[0-9 ()-]{6,20}$/.test(phone)) throw httpError(400, 'Phone number looks wrong (use +country code).');
   await q(`UPDATE users SET email = $2, display_name = $3, phone = $4, updated_at = now() WHERE id = $1`,
-    [req.userId, mail, displayName ? String(displayName).slice(0, 80) : null, phone || null]);
+    [req.userId, email || null, displayName ? String(displayName).slice(0, 80) : null, phone || null]);
   audit(req, 'profile.update');
   res.json({ ok: true });
 }));
@@ -92,19 +89,9 @@ accessRouter.get('/roles', wrap(async (req, res) => {
   const counts = Object.fromEntries((await q('SELECT role, count(*)::int AS n FROM users GROUP BY role')).rows.map((r) => [r.role, r.n]));
   res.json({
     permissions: PERMISSIONS,
-    roles: [...roles.values()].map((r) => ({ name: r.name, description: r.description, builtin: r.builtin, permissions: [...r.permissions], users: counts[r.name] || 0, dashboards: r.dashboards, landing: r.landing })),
-    dashboards: DASHBOARD_IDS,
+    roles: [...roles.values()].map((r) => ({ name: r.name, description: r.description, builtin: r.builtin, permissions: [...r.permissions], users: counts[r.name] || 0 })),
   });
 }));
-
-// dashboards a role can open, and the one its users land on (must be one of them)
-function cleanDashboards(list, landing) {
-  if (!Array.isArray(list)) throw httpError(400, 'dashboards must be a list');
-  const out = DASHBOARD_IDS.filter((d) => list.includes(d));
-  const land = landing === null || landing === undefined || landing === '' || landing === 'overview' ? (landing === 'overview' ? 'overview' : null) : String(landing);
-  if (land && land !== 'overview' && !out.includes(land)) throw httpError(400, 'The landing dashboard must be one of the dashboards this role can open.');
-  return { dashboards: out, landing: land };
-}
 
 function cleanPerms(list) {
   if (!Array.isArray(list)) throw httpError(400, 'permissions must be a list');
@@ -118,10 +105,8 @@ accessRouter.post('/roles', requirePerm('users.manage'), wrap(async (req, res) =
   if (!/^[a-z][a-z0-9_-]{1,31}$/.test(name || '')) throw httpError(400, 'Role name: 2-32 lower-case letters, numbers, - or _.');
   const perms = cleanPerms(permissions);
   if (!perms.every((p) => hasPerm(req.user, p))) throw httpError(403, 'You cannot create a role with rights you do not have.');
-  const dash = req.body?.dashboards ? cleanDashboards(req.body.dashboards, req.body.landing) : { dashboards: defaultDashboards(perms), landing: null };
   try {
-    await q('INSERT INTO roles (name, description, permissions, dashboards, landing) VALUES ($1, $2, $3, $4, $5)',
-      [name, String(description).slice(0, 200), JSON.stringify(perms), JSON.stringify(dash.dashboards), dash.landing]);
+    await q('INSERT INTO roles (name, description, permissions) VALUES ($1, $2, $3)', [name, String(description).slice(0, 200), JSON.stringify(perms)]);
   } catch (e) {
     if (e.code === '23505') throw httpError(409, 'A role with this name exists.');
     throw e;
@@ -142,17 +127,6 @@ accessRouter.put('/roles/:name', requirePerm('users.manage'), wrap(async (req, r
   invalidateRoles();
   audit(req, 'role.update', { role: r.name, permissions: perms });
   res.json({ ok: true });
-}));
-
-// change which dashboards a role sees (allowed for built-in roles too: it grants no extra rights)
-accessRouter.put('/roles/:name/dashboards', requirePerm('users.manage'), wrap(async (req, res) => {
-  const r = await one('SELECT name FROM roles WHERE name = $1', [req.params.name]);
-  if (!r) throw httpError(404, 'Role not found.');
-  const { dashboards, landing } = cleanDashboards(req.body?.dashboards, req.body?.landing);
-  await q('UPDATE roles SET dashboards = $2, landing = $3, updated_at = now() WHERE name = $1', [r.name, JSON.stringify(dashboards), landing]);
-  invalidateRoles();
-  audit(req, 'role.dashboards', { role: r.name, dashboards, landing });
-  res.json({ ok: true, dashboards, landing });
 }));
 
 accessRouter.delete('/roles/:name', requirePerm('users.manage'), wrap(async (req, res) => {

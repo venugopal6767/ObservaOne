@@ -4,7 +4,7 @@ One Docker setup that gives you a monitoring website with login:
 
 | Address | What it is | Who can open it |
 |---|---|---|
-| `https://SERVER/` | **ObservaOne UI**: Overview, Incidents, Services, Infrastructure, Metrics, Logs, Traces, Dashboards, Agents, Data Sources, Insights, Settings | UI users (admin / operator / viewer) |
+| `https://SERVER/` | **ObservaOne UI**: Overview, Dashboards, Metrics, Logs, Traces, Services, Infrastructure, Alerting, Data Sources, Settings | UI users (admin / operator / viewer) |
 | `https://SERVER/grafana/` | Grafana with the same Windows/Linux dashboards | Grafana users |
 | `https://SERVER/prometheus/` | Prometheus (raw metrics, targets) | `WEB_ADMIN_USER` only |
 | `https://SERVER/alertmanager/` | Alertmanager (raw alerts, silences) | `WEB_ADMIN_USER` only |
@@ -43,10 +43,7 @@ One Docker setup that gives you a monitoring website with login:
    ```
    - Passwords need 12+ characters with upper case, lower case, a number and a symbol.
    - Don't use `$ " ' \ #` or spaces.
-   - Set `SERVER_NAME` to the name or IP people will type in the browser. If you leave it as `localhost`, the
-     self-signed certificate still covers the server's own IP addresses (and, on AWS EC2, its public IP), and the
-     Agents page uses the address you opened the UI with. A DNS name or an Elastic IP is still best: an EC2 public IP
-     changes when the instance is stopped and started.
+   - Set `SERVER_NAME` to the name or IP people will type in the browser.
 3. Start everything:
    ```bash
    docker compose up -d --build
@@ -61,34 +58,6 @@ One Docker setup that gives you a monitoring website with login:
    - Sign in with `UI_ADMIN_USER` / `UI_ADMIN_PASSWORD` from `.env`.
 
 > **Passwords from `.env` are only used the first time.** After that, users and passwords live in the database. Change them in **Settings → Users**, or each user changes their own in **Settings → My profile**.
-
-## 2b. Finding your way around (click-through)
-
-Everything on the **Overview** opens the page behind it:
-
-| Click on | Opens |
-|---|---|
-| A KPI card (hosts, services, incidents, error rate, latency) | Infrastructure, Services, Incidents, Services, Traces |
-| Service Health / Top Services / a service name anywhere | **Service page**: Overview, Metrics, Logs, Traces, Dependencies, Deployments |
-| An active incident | **Incident page**: status, assign, notes, timeline, the service's metrics, logs and traces during the incident |
-| A log line | **Log Details**: Message, JSON, Context (lines around it), Related Traces, **View Trace** |
-| A trace | **Trace page**: Duration, Services, Spans, Status; Timeline, Spans, Logs, Metrics, Service Map |
-
-**Incidents** open automatically when alerts fire (one per alert and service/host) and resolve themselves when the alerts stop. People acknowledge, mark as investigating, assign, add notes and resolve. You can also declare one with **Create Incident**. Alert rules and silences are under **Alert Rules** in the Manage group.
-
-**Insights** predicts problems: *Forecasts* shows when each disk or memory fills up (trend fitted to recent history, ignoring spikes and clean-ups), *Anomalies* shows metrics that are unusual for this time of day or week. It is plain statistics, not a machine-learning model.
-
-**When data cannot load (v1.8.2):** every page shows grey placeholders while loading. If a refresh fails, the last good data stays on screen with "Couldn't refresh at … — showing data from …" and a **Try again** button, and the "Updated … ago" stamp keeps the time of the last success. If the first load fails, the page names the cause and offers **Try again**. Sample data is never shown in place of a failure. Filters, tabs, environment and time range are kept in the URL, so Back, Forward and shared links show the same view. The UI quality gate (baseline, rules, issue tracker) is in `docs/ui-quality/`, and its browser checks are in `observa-ui/test/ui-gate/`.
-
-**Needs your attention** at the top of the Overview is built from live data only: unacknowledged incidents, unhealthy or degraded services, hosts not answering and disks over 90% full. If a source does not answer it says "Could not check …" instead of showing all clear. Values that are missing show "N/A" or "No data", never a made-up number.
-
-**Top bar (v1.8):**
-- **Search (Ctrl+K or /):** pages, role and custom dashboards, services, metrics, incidents by number, trace IDs, and actions (switch theme, refresh, profile, keyboard shortcuts, sign out).
-- **Auto-refresh:** Auto (page default, usually 30s), Off, 15s, 30s, 1m or 5m. Saved per user. Pages only reload while the tab is visible. "Updated … ago" shows on wide screens, and in the refresh button tooltip.
-- **Help (?):** keyboard shortcuts, API reference, data source status, About (version).
-- **Menu:** the arrow at the bottom collapses it to icons (saved per user). Below 1100px it is an icon rail; on phones the ☰ button opens it as a drawer.
-
-Light / dark mode: the sun / moon button at the top right. The choice is saved per user.
 
 ## 3. Roles
 
@@ -142,7 +111,7 @@ The UI keeps its data in the `observa-db` container:
 | `sessions` | who is signed in, from which browser and IP, and when it expires |
 | `login_failures` | wrong-password counters and lockouts |
 | `dashboards` | custom dashboards and their panels |
-| `datasource_settings` | Loki/Tempo URLs and live/demo mode set by admins |
+| `datasource_settings` | Loki/Tempo URLs set by admins |
 | `user_preferences` | each user's time range and last Metrics/Logs/Traces query, so they follow you to another browser |
 | `audit_log` | every sign-in, change and denied action |
 
@@ -232,7 +201,7 @@ Run `node_exporter` on port 9100 on each server, then add it to `prometheus/targ
 
 ## 6. Turn on real logs and traces
 
-Out of the box, the **Logs**, **Traces** and **Services** pages show **demo data**, with a yellow `DEMO DATA` badge. Metrics, Infrastructure and Alerting are always real.
+Every page shows only real data. Until something sends logs, traces or application metrics, the **Logs**, **Traces** and **Services** pages show an empty state that says what to connect. There is no demo or sample data.
 
 **Logs:** install Grafana Alloy on the servers and push to Loki through Nginx. Example `config.alloy` (check it against your Alloy version):
 ```alloy
@@ -252,9 +221,9 @@ loki.write "central" {
 
 **Traces:** point your OpenTelemetry Collector's `otlphttp` exporter at `https://monitoring.example.local/otlp`, with basic auth `INGEST_USER` / `INGEST_PASSWORD`. Traces go to Tempo and logs sent over OTLP go to Loki.
 
-Then in the UI go to **Data Sources → Loki → Edit → Mode: Live**, and do the same for Tempo. To make this the default, set `LOKI_MODE=live` and `TEMPO_MODE=live` in `.env`.
+Data appears on the Logs and Traces pages as soon as it reaches Loki and Tempo. Check the connection in **Data Sources → Test**.
 
-**Services page (request rate, latency, errors):** edit `observa-ui/config/services.json` so the 3 PromQL queries match your applications' metrics. Then switch **Service metrics** to Live.
+**Services page (request rate, latency, errors):** edit `observa-ui/config/services.json` so the 3 PromQL queries match your applications' metrics. Services with no requests show **No traffic**, not Down.
 
 ## 7. Alerts and email
 
@@ -262,6 +231,25 @@ Then in the UI go to **Data Sources → Loki → Edit → Mode: Live**, and do t
 - Admins can also create rules in **Alerting → New Alert Rule**. The UI checks the query, writes the rule and reloads Prometheus. If Prometheus rejects the rule, the change is undone.
 - To turn on **email**, fill in the `smtp_*` lines and `email_configs` in `alertmanager/alertmanager.yml`, then run `docker compose restart alertmanager`.
 - To **silence** an alert (for example during maintenance), switch off **Notify** on it in Alerting. This needs the operator role or higher.
+
+## 7b. Tests
+
+The UI has an automated test suite (Node's built-in test runner, no extra packages):
+
+```bash
+cd observa-ui
+npm ci            # once
+npm test          # unit + source checks; API tests are skipped
+```
+
+To also run the API tests against a running ObservaOne (they change Settings > Modules and put it back afterwards):
+
+```bash
+OBSERVA_TEST_URL=https://SERVER OBSERVA_TEST_ADMIN_PASSWORD='...' \
+OBSERVA_TEST_VIEWER_PASSWORD='...' NODE_TLS_REJECT_UNAUTHORIZED=0 npm test
+```
+
+`NODE_TLS_REJECT_UNAUTHORIZED=0` is only for the self-signed lab certificate. What is checked: no demo or sample data, health rules (no traffic, not reporting), module visibility on the API, permissions, no Grafana links in the UI, and that every page's imports exist.
 
 ## 8. Everyday commands
 
@@ -331,60 +319,3 @@ agent/                    ObservaOne Agent: install.sh (Linux + Docker), install
                           kubernetes.yaml, docker-compose.yml, configs/*.yaml, files/ (offline binaries)
 scripts/                  one-time setup jobs (certificate, logins, Grafana users), fetch-agent-files.sh
 ```
-
-## 2c. Dashboards for each role (sample data)
-
-The top bar has a **dashboard selector**. It lists Overview plus the role dashboards your **role** includes. "Home" (`/views`) opens your landing dashboard.
-
-**Choosing dashboards per role:** an admin opens **Settings › Roles › Dashboards for each role**.
-- Tick which dashboards each role can open.
-- Pick the one its users land on after sign-in ("Opens after sign-in").
-- Click **Save dashboards**. Users see the change on their next page load.
-- Built-in roles can be changed here too, because this grants no extra rights.
-- A new custom role starts with the dashboards its permissions suggest.
-
-| Dashboard | URL | Default roles | Default landing for |
-|---|---|---|---|
-| Business / Executive | `/views/business` | admin, operator, viewer | viewer |
-| DevOps Engineer | `/views/devops` | admin, operator | operator |
-| Developer | `/views/developer` | admin, operator, viewer | |
-| SRE / Reliability | `/views/sre` | admin, operator | |
-| Security Team | `/views/security` | admin, operator | |
-| Application Owner | `/views/appowner` | admin, operator, viewer | |
-| IT / Platform Admin | `/views/itadmin` | admin | admin |
-| Kubernetes | `/views/kubernetes` | admin, operator | |
-
-**Kubernetes:**
-- **Pages:** an overview, then cluster › namespace › workload › pod, plus a page per node.
-- **Problems explained:** CrashLoopBackOff, OOMKilled, ImagePullBackOff, Pending and NotReady each come with a plain explanation of the cause.
-- **Live data:** the built-in **Kubernetes Cluster** and **Kubernetes Workloads** dashboards (Dashboards › System) show live data from the Kubernetes agent (`agent/kubernetes.yaml`: kube-state-metrics, cAdvisor and node metrics with a `cluster` label).
-
-- **Landing page:** press **Set as landing** on any role dashboard. The choice is saved in your browser.
-- **Filters follow you:** the **Environment** and **time range** in the top bar are added to every drill-down link, along with page filters (team, service, cluster…). Back and shared links show the same data.
-- **Drill-downs per role:**
-  - DevOps: deployments, pipelines, clusters.
-  - Developer: services, endpoints, error groups, trace timeline.
-  - SRE: SLOs, plus the incident workflow (declare → acknowledge → investigate → mitigate → resolve → postmortem).
-  - Business: customer services, problems, the monthly report.
-  - App Owner: applications, releases.
-  - Security: detections (triage, block an address), hosts, source addresses.
-  - Platform Admin: agents, platform components (disk forecast), ingestion vs licence.
-- **Test states:** add `?mock=error` or `?mock=empty` to any role dashboard URL.
-- **Sample data only:** the data comes from `public/js/personas/mock*.js`, and there is no backend for these dashboards yet. Every role dashboard shows a **Sample data** banner with a link to the live page that covers the same ground.
-- **Actions that need an integration are locked:** roll back, promote, re-run, rolling restart, cordon, drain, delete pod, block address, scan, page on-call, create ticket, upgrade agents, budget alerts and the weekly e-mail show a lock and "Not available yet". Clicking one says what integration is missing and changes nothing. SRE incident and Security triage changes are kept only in the browser tab (the banner says so).
-- **Hosted preview:** `observa-ui/preview/build.sh` builds one HTML file with everything (needs `esbuild`). It shows the role dashboards with sample sign-in and a "View as" role switch. No server is needed.
-
-**How the role dashboards behave:**
-- **Needs your attention:** up to 3 items at the top of each dashboard, worst first, each with a button to act on it. When nothing is wrong it shows "All clear".
-- **Colour means a problem:** healthy rows are grey; only warnings and failures are coloured.
-- **Tables:** click a header to sort (click again to reverse). Long tables get a filter box and pages of 10. In narrow panels the least important column is hidden.
-- **Breadcrumbs** on every detail page (for example DevOps Engineer › Deployments › checkout v4.23.1). They keep your environment and time range.
-- **"Sample data drawn … ago"** under each role dashboard title.
-- **The menu is grouped:** Home, then Observe (Overview, Services, Infrastructure, Kubernetes), Investigate (Incidents, Logs, Traces), Analyze (Metrics, Dashboards, Insights) and Manage (Data Sources, Agents, Alert Rules, Users & Roles, Settings). Items your role cannot use are not shown, and the server still checks every request.
-
-**Personal dashboards** (Dashboards page):
-- Each custom dashboard has an owner and a sharing setting: Only me, My team or Everyone.
-- Tabs: My dashboards, Shared with me, Favourites (★), System.
-- **Copy** turns any dashboard you can see into your own.
-- **Edit panels** lets you move, resize, rename or remove panels.
-- **Set as home** opens that dashboard after sign-in.

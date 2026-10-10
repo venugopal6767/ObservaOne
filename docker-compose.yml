@@ -16,9 +16,6 @@ services:
   certs-init:
     image: alpine/openssl:3.5.9
     entrypoint: ["/bin/sh", "/scripts/make-cert.sh"]
-    # host network: sees the server's own IP addresses (and, on AWS, the instance metadata for the
-    # public IP), so the certificate covers the address agents use even when SERVER_NAME is not set
-    network_mode: host
     environment:
       SERVER_NAME: ${SERVER_NAME:-localhost}
     volumes:
@@ -83,27 +80,21 @@ services:
   # ---- ObservaOne: the main web UI (login, dashboards, logs, traces, alerts) ----
   observa:
     build: ./observa-ui
-    image: observa-ui:1.8.5
+    image: observa-ui:1.2.0
     environment:
       UI_BRAND: ${UI_BRAND:-ObservaOne}
       UI_ADMIN_USER: ${UI_ADMIN_USER:-admin}
-      UI_ADMIN_EMAIL: ${UI_ADMIN_EMAIL:-}
       UI_ADMIN_PASSWORD: ${UI_ADMIN_PASSWORD:?set UI_ADMIN_PASSWORD in .env}
       UI_OPERATOR_USER: ${UI_OPERATOR_USER:-operator}
-      UI_OPERATOR_EMAIL: ${UI_OPERATOR_EMAIL:-}
       UI_OPERATOR_PASSWORD: ${UI_OPERATOR_PASSWORD:-}
       UI_VIEWER_USER: ${UI_VIEWER_USER:-viewer}
-      UI_VIEWER_EMAIL: ${UI_VIEWER_EMAIL:-}
       UI_VIEWER_PASSWORD: ${UI_VIEWER_PASSWORD:-}
       SESSION_IDLE_MINUTES: ${SESSION_IDLE_MINUTES:-30}
       SESSION_MAX_HOURS: ${SESSION_MAX_HOURS:-8}
       PROMETHEUS_URL: http://prometheus:9090/prometheus
       ALERTMANAGER_URL: http://alertmanager:9093/alertmanager
       LOKI_URL: http://loki:3100
-      LOKI_MODE: ${LOKI_MODE:-demo}
       TEMPO_URL: http://tempo:3200
-      TEMPO_MODE: ${TEMPO_MODE:-demo}
-      SERVICES_MODE: ${SERVICES_MODE:-demo}
       GRAFANA_URL: http://grafana:3000
       GRAFANA_PUBLIC_URL: /grafana/
       UI_RULES_FILE: /etc/prometheus-ui/ui-rules.yml
@@ -273,9 +264,9 @@ services:
 
   # ---- Tempo: traces (apps send OTLP to https://SERVER/otlp/v1/traces) ----
   tempo-init:
-    image: alpine/openssl:3.5.9          # the Tempo image has no shell tools; this small one does
+    image: grafana/tempo:2.10.8
     user: root
-    entrypoint: ["/bin/sh", "-c", "chown -R 10001:10001 /var/tempo"]
+    entrypoint: ["chown", "10001:10001", "/var/tempo"]
     volumes:
       - tempo-data:/var/tempo
     restart: "no"

@@ -21,7 +21,16 @@ export const $ = (sel, root = document) => root.querySelector(sel);
 export function clear(el) { while (el.firstChild) el.removeChild(el.firstChild); return el; }
 
 // ---------- API ----------
-export class ApiError extends Error {}
+// status = HTTP status; state = what the server said about the data source
+// ('unavailable' = configured but not answering, 'not_configured' = no address set)
+export class ApiError extends Error {
+  constructor(message, { status, state, source } = {}) {
+    super(message);
+    this.status = status;
+    this.state = state || null;
+    this.source = source || null;
+  }
+}
 export async function api(path, { method = 'GET', body, query } = {}) {
   let url = `/api${path}`;
   if (query) {
@@ -40,7 +49,7 @@ export async function api(path, { method = 'GET', body, query } = {}) {
   if (res.status === 401 && path !== '/login') {
     window.dispatchEvent(new CustomEvent('oo:unauthorized', { detail: data?.error }));
   }
-  if (!res.ok) throw new ApiError(data?.error || `HTTP ${res.status}`);
+  if (!res.ok) throw new ApiError(data?.error || `HTTP ${res.status}`, { status: res.status, state: data?.state, source: data?.source });
   return data;
 }
 
@@ -84,6 +93,37 @@ export function dateTime(ms) {
   const p = (n) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
+// ---------- time zones ----------
+// Every timestamp the UI prints is in the viewer's local time. These make that zone explicit,
+// so people in different offices can compare times.
+export function tzName() {
+  try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'local time'; } catch { return 'local time'; }
+}
+// "UTC+05:30" for the given moment (offset can change with daylight saving)
+export function tzLabel(ms = Date.now()) {
+  const off = -new Date(ms).getTimezoneOffset();
+  const p = (n) => String(n).padStart(2, '0');
+  return `UTC${off >= 0 ? '+' : '-'}${p(Math.floor(Math.abs(off) / 60))}:${p(Math.abs(off) % 60)}`;
+}
+// Hover text for one timestamp: local time with zone name, the same moment in UTC, and how long ago
+export function timeTitle(ms) {
+  if (!Number.isFinite(ms)) return '';
+  return `${dateTime(ms)} ${tzLabel(ms)} (${tzName()})\n${new Date(ms).toISOString().replace('T', ' ').slice(0, 19)} UTC\n${ago(new Date(ms).toISOString())}`;
+}
+// A timestamp element: shown text + full detail on hover. "text" defaults to the full local time.
+export function timeEl(ms, text) {
+  if (!Number.isFinite(ms)) return '-';
+  return h('time', { datetime: new Date(ms).toISOString(), title: timeTitle(ms) }, text ?? dateTime(ms));
+}
+// Full local time with its zone, for single values outside tables: "2026-10-11 00:44:12 UTC+05:30"
+export function dateTimeZ(ms) {
+  return Number.isFinite(ms) ? `${dateTime(ms)} ${tzLabel(ms)}` : '-';
+}
+// Table header for a time column: "Time (UTC+05:30)"
+export function timeHeader(label = 'Time') {
+  return `${label} (${tzLabel()})`;
+}
+
 export function ago(iso) {
   const s = Math.max(0, (Date.now() - Date.parse(iso)) / 1000);
   if (s < 60) return `${Math.floor(s)}s ago`;
@@ -100,18 +140,6 @@ export function legendName(metric, tpl) {
 
 // ---------- icons (24x24 stroke icons) ----------
 const P = {
-  menu: '<path d="M4 6h16M4 12h16M4 18h16"/>',
-  info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5h.01"/>',
-  upload: '<path d="M12 16V4M7 9l5-5 5 5"/><path d="M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/>',
-  bell: '<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.9 1.9 0 0 0 3.4 0"/>',
-  layers: '<path d="M12 3l9 5-9 5-9-5z"/><path d="M3 13l9 5 9-5"/>',
-  star: '<path d="M12 3.5l2.6 5.3 5.8.8-4.2 4.1 1 5.8L12 16.8l-5.2 2.7 1-5.8-4.2-4.1 5.8-.8z"/>',
-  copy: '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/>',
-  users: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M16 4.6a3.5 3.5 0 0 1 0 6.8M18 14.2a6.5 6.5 0 0 1 3.5 5.8"/>',
-  globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>',
-  home: '<path d="M3 11l9-8 9 8"/><path d="M5 9.5V21h14V9.5"/>',
-  share: '<circle cx="18" cy="5" r="2.5"/><circle cx="6" cy="12" r="2.5"/><circle cx="18" cy="19" r="2.5"/><path d="M8.2 10.8l7.6-4.4M8.2 13.2l7.6 4.4"/>',
-  arrowLeft: '<path d="M19 12H5M11 6l-6 6 6 6"/>',
   overview: '<rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/>',
   dashboards: '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/>',
   metrics: '<path d="M3 3v18h18"/><path d="M7 15l4-4 3 3 5-6"/>',
@@ -151,20 +179,6 @@ const P = {
   download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>',
   shield: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>',
   list: '<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>',
-  incident: '<path d="M12 3 2 20h20L12 3z"/><path d="M12 10v4M12 17h.01"/>',
-  insights: '<path d="M12 3l1.8 4.6L18 9.5l-4.2 1.9L12 16l-1.8-4.6L6 9.5l4.2-1.9z"/><path d="M19 15l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"/>',
-  sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
-  moon: '<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>',
-  server: '<rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/>',
-  cpu: '<rect x="6" y="6" width="12" height="12" rx="2"/><rect x="9.5" y="9.5" width="5" height="5"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/>',
-  memory: '<rect x="2" y="7" width="20" height="10" rx="2"/><path d="M6 11h2M10 11h2M14 11h2M6 17v3M10 17v3M14 17v3M18 17v3"/>',
-  disk: '<ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>',
-  network: '<path d="M12 3v6M12 9H5v4M12 9h7v4"/><rect x="2" y="13" width="6" height="6" rx="1"/><rect x="16" y="13" width="6" height="6" rx="1"/><rect x="9" y="1" width="6" height="4" rx="1"/>',
-  pulse: '<path d="M2 12h4l3-8 4 16 3-8h6"/>',
-  timer: '<circle cx="12" cy="13" r="8"/><path d="M12 9v4l2 2M9 2h6"/>',
-  arrowRight: '<path d="M5 12h14M13 6l6 6-6 6"/>',
-  dots: '<circle cx="12" cy="5" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="12" cy="19" r="1.2"/>',
-  back: '<path d="M19 12H5M11 18l-6-6 6-6"/>',
   agent: '<rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/>',
 };
 export function icon(name, size = 18, extraClass = '') {
@@ -180,12 +194,97 @@ export function logo(size = 30) {
 
 // ---------- small components ----------
 export function pill(text, tone = 'muted') { return h('span', { class: `pill pill-${tone}` }, text); }
-export function demoBadge(on, short = false) { return on ? h('span', { class: 'demo-badge', title: 'This data source is in demo mode. Connect it in Data Sources.' }, short ? 'DEMO' : 'DEMO DATA') : null; }
 export function emptyState(title, text, action) {
   return h('div', { class: 'empty' }, icon('activity', 28), h('div', { class: 'empty-title' }, title), text ? h('div', { class: 'muted' }, text) : null, action || null);
 }
 export function errorBox(msg) { return h('div', { class: 'error-box' }, icon('alert', 16), h('span', {}, msg)); }
 export function spinner() { return h('div', { class: 'spinner' }); }
+
+// ---------- data states ----------
+// One look and one meaning per state, on every page:
+//   loading        waiting for the answer
+//   empty          the source answered, there is simply no data for this view
+//   not_configured the source has no address yet (an admin must set it)
+//   unavailable    the source is configured but did not answer (down, network, timeout)
+//   error          the request failed for another reason (bad query, server error)
+//   stale          the last data is older than expected (shown with its age)
+//   partial        some parts loaded, some did not (use stateBanner)
+// Never replace any of these with made-up numbers.
+const STATE_META = {
+  loading: { icon: null, title: 'Loading...' },
+  empty: { icon: 'activity', title: 'No data' },
+  not_configured: { icon: 'settings', title: 'Not configured' },
+  unavailable: { icon: 'alert', title: 'Data source unavailable' },
+  error: { icon: 'alert', title: 'Something went wrong' },
+  stale: { icon: 'clock', title: 'Data is out of date' },
+  partial: { icon: 'alert', title: 'Some data is missing' },
+};
+export function stateView(kind, { title, text, action, skeleton: sk } = {}) {
+  const m = STATE_META[kind] || STATE_META.error;
+  if (kind === 'loading') {
+    // a skeleton shaped like what is coming (table / chart / cards); spinner only for small inline waits
+    return h('div', { class: 'state-loading', role: 'status', 'aria-live': 'polite', 'aria-busy': 'true' },
+      sk ? skeleton(sk) : spinner(), h('span', { class: 'sr-only' }, title || m.title));
+  }
+  return h('div', { class: `state state-${kind}`, role: kind === 'error' || kind === 'unavailable' ? 'alert' : 'status' },
+    icon(m.icon, 26),
+    h('div', { class: 'state-title' }, title || m.title),
+    text ? h('div', { class: 'state-text' }, text) : null,
+    action || null);
+}
+// Grey placeholder shapes while data loads. They never show numbers or text.
+export function skeleton(kind = 'table', n) {
+  if (kind === 'cards') return h('div', { class: 'skeleton-cards' }, Array.from({ length: n || 4 }, () => h('div', { class: 'sk sk-card' })));
+  if (kind === 'chart') return h('div', { class: 'skeleton' }, h('div', { class: 'sk sk-line', style: { width: '30%' } }), h('div', { class: 'sk sk-chart' }));
+  return h('div', { class: 'skeleton' }, Array.from({ length: n || 6 }, () =>
+    h('div', { class: 'sk-row' }, h('div', { class: 'sk sk-line' }), h('div', { class: 'sk sk-line' }), h('div', { class: 'sk sk-line' }), h('div', { class: 'sk sk-line' }))));
+}
+
+// Row count + paging for a table. Returns the rows to draw and the footer element.
+// The count is always the real number of rows we have; "of N" is never estimated.
+export function paginate(rows, { page = 0, pageSize = 50, onPage, noun = 'rows', note } = {}) {
+  const total = rows.length;
+  const pages = Math.max(1, Math.ceil(total / pageSize));
+  const p = Math.min(Math.max(0, page), pages - 1);
+  const from = total ? p * pageSize + 1 : 0, to = Math.min(total, (p + 1) * pageSize);
+  const foot = h('div', { class: 'table-foot', role: 'status' },
+    h('span', {}, total ? `${from}-${to} of ${total} ${noun}` : `0 ${noun}`),
+    note ? h('span', { class: 'dim' }, note) : null,
+    pages > 1 ? h('div', { class: 'pager' },
+      h('button', { class: 'btn', disabled: p === 0, 'aria-label': 'Previous page', onclick: () => onPage(p - 1) }, 'Previous'),
+      h('span', {}, `Page ${p + 1} of ${pages}`),
+      h('button', { class: 'btn', disabled: p >= pages - 1, 'aria-label': 'Next page', onclick: () => onPage(p + 1) }, 'Next')) : null);
+  return { rows: rows.slice(p * pageSize, (p + 1) * pageSize), foot, page: p };
+}
+
+// A thin line above content: partial data, truncated results, stale values
+export function stateBanner(kind, text) {
+  const m = STATE_META[kind] || STATE_META.partial;
+  return h('div', { class: `state-banner state-banner-${kind}`, role: 'status' }, icon(m.icon || 'alert', 15), h('span', {}, text));
+}
+// Turn a failed API call into the right state. "what" names the data, e.g. "Logs".
+export function stateFromError(e, what = 'Data') {
+  const toSources = h('a', { href: '/datasources', 'data-link': true, class: 'btn btn-sm' }, 'Open Data Sources');
+  if (e?.state === 'not_configured') return stateView('not_configured', { title: `${what}: data source not configured`, text: e.message, action: toSources });
+  if (e?.state === 'unavailable' || e?.status === 502 || e?.status === 503 || e?.status === 504) {
+    return stateView('unavailable', { title: `${what}: data source unavailable`, text: `${e.message}. Nothing is shown until it answers again.`, action: toSources });
+  }
+  return stateView('error', { title: `${what} could not be loaded`, text: e?.message || 'Unknown error' });
+}
+// Health of one thing (host, scrape target, service). "unknown"-like states never look green or red.
+const HEALTH = {
+  up: ['UP', 'solid-green', 'Answering normally'],
+  healthy: ['Healthy', 'solid-green', ''],
+  degraded: ['Degraded', 'solid-orange', ''],
+  down: ['DOWN', 'solid-red', ''],
+  not_reporting: ['Not reporting', 'stale', 'No data received recently. The host may be fine; the agent or network may have stopped.'],
+  no_traffic: ['No traffic', 'muted', 'No requests in this period, so there is no error rate or latency to judge.'],
+  unknown: ['Unknown', 'muted', 'Not checked yet.'],
+};
+export function healthPill(health, detail) {
+  const [label, tone, hint] = HEALTH[health] || HEALTH.unknown;
+  return h('span', { class: `pill pill-${tone}`, title: detail || hint || label }, label);
+}
 
 export function select(options, value, onchange, attrs = {}) {
   const s = h('select', { class: 'select', ...attrs, onchange: (e) => onchange(e.target.value) },
@@ -202,7 +301,7 @@ export function tabs(items, active, onclick) {
 }
 
 export function toggle(checked, onchange, disabled = false, title = '') {
-  const input = h('input', { type: 'checkbox', checked, disabled, 'aria-label': title || null, onchange: (e) => onchange(e.target.checked, e.target) });
+  const input = h('input', { type: 'checkbox', checked, disabled, onchange: (e) => onchange(e.target.checked, e.target) });
   return h('label', { class: `switch ${disabled ? 'disabled' : ''}`, title }, input, h('span', { class: 'slider' }));
 }
 
@@ -218,11 +317,24 @@ export function toast(msg, tone = 'ok') {
 
 // ---------- modal ----------
 export function modal(title, body, actions = [], { wide = false } = {}) {
-  const close = () => { overlay.remove(); document.removeEventListener('keydown', onKey); };
-  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  // keyboard: focus moves into the dialog, Tab stays inside it, Escape closes it,
+  // and focus goes back to whatever opened it
+  const opener = document.activeElement;
+  const titleId = `dlg-${Math.random().toString(36).slice(2, 8)}`;
+  const close = () => { overlay.remove(); document.removeEventListener('keydown', onKey); opener?.focus?.(); };
+  const focusables = () => [...overlay.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])')].filter((el) => !el.disabled);
+  const onKey = (e) => {
+    if (e.key === 'Escape') close();
+    if (e.key === 'Tab') {
+      const f = focusables(); if (!f.length) return;
+      const first = f[0], last = f[f.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    }
+  };
   const overlay = h('div', { class: 'modal-overlay', onclick: (e) => { if (e.target === overlay) close(); } },
-    h('div', { class: `modal ${wide ? 'wide' : ''}`, role: 'dialog', 'aria-modal': 'true' },
-      h('div', { class: 'modal-head' }, h('h3', {}, title), h('button', { class: 'icon-btn', onclick: close, 'aria-label': 'Close' }, icon('x'))),
+    h('div', { class: `modal ${wide ? 'wide' : ''}`, role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': titleId },
+      h('div', { class: 'modal-head' }, h('h3', { id: titleId }, title), h('button', { class: 'icon-btn', onclick: close, 'aria-label': 'Close' }, icon('x'))),
       h('div', { class: 'modal-body' }, body),
       actions.length ? h('div', { class: 'modal-foot' }, actions.map((a) =>
         h('button', { class: `btn ${a.primary ? 'btn-primary' : a.danger ? 'btn-danger' : ''}`, onclick: async (e) => {
@@ -236,7 +348,7 @@ export function modal(title, body, actions = [], { wide = false } = {}) {
         } }, a.label))) : null));
   document.body.append(overlay);
   document.addEventListener('keydown', onKey);
-  setTimeout(() => overlay.querySelector('input,select,textarea')?.focus(), 30);
+  setTimeout(() => (overlay.querySelector('input,select,textarea') || overlay.querySelector('.modal-foot .btn-primary, .modal-foot .btn-danger, .modal-foot .btn') || overlay.querySelector('.modal-head .icon-btn'))?.focus(), 30);
   return close;
 }
 export function field(label, input, hint) {
@@ -251,26 +363,50 @@ export function confirmBox(title, text, okLabel = 'Confirm', danger = true) {
   });
 }
 
-// ---------- charts (Chart.js, loaded globally) ----------
-export const PALETTE = ['#3b82f6', '#a855f7', '#f59e0b', '#ef4444', '#22c55e', '#06b6d4', '#ec4899', '#84cc16', '#f97316', '#14b8a6'];
-const cssVar = (n, d) => (getComputedStyle(document.documentElement).getPropertyValue(n).trim() || d);
-const light = () => document.documentElement.dataset.theme === 'light';
+// ---------- theme colours ----------
+// Colours come from CSS variables (app.css), so charts and status marks follow the dark/light theme.
+// Read them when a chart is drawn; the app redraws the page when the theme changes.
+export function color(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(`--${name}`).trim() || '#888888';
+}
+// Series colours, in order
+export function palette() {
+  return Array.from({ length: 10 }, (_, i) => color(`chart-${i + 1}`));
+}
+// Black or white text, whichever reads better on this background colour (WCAG contrast)
+export function readableOn(bg) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(String(bg).trim());
+  if (!m) return '#ffffff';
+  const n = parseInt(m[1], 16);
+  const ch = [(n >> 16) & 255, (n >> 8) & 255, n & 255].map((v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; });
+  const L = 0.2126 * ch[0] + 0.7152 * ch[1] + 0.0722 * ch[2];
+  return (L + 0.05) / 0.05 >= 1.05 / (L + 0.05) ? '#0b1324' : '#ffffff';
+}
+// Status colour by meaning: ok / warn / crit / unknown
+export function statusColor(kind) {
+  return color({ ok: 'ok', warn: 'warn', crit: 'crit' }[kind] || 'unknown');
+}
+// value -> status for "higher is worse" (CPU, memory) or "lower is worse" (free disk)
+export function thresholdColor(v, { warn, crit, lowerIsWorse = false, base = 'chart-1' } = {}) {
+  if (v === null || v === undefined || !Number.isFinite(Number(v))) return statusColor('unknown');
+  const bad = (t) => (lowerIsWorse ? v < t : v >= t);
+  return bad(crit) ? statusColor('crit') : bad(warn) ? statusColor('warn') : color(base);
+}
 
-export function baseOptions(unit, { stacked = false, min, max, showLegend = false } = {}) {
-  const GRID = light() ? 'rgba(15,23,42,0.08)' : 'rgba(148,163,184,0.08)';
-  const TICK = light() ? '#64748b' : '#7d8aa6';
-  const tipBg = cssVar('--panel', '#0b1324'), tipText = cssVar('--text', '#e6ecf7'), tipBorder = cssVar('--border-2', '#24324f');
+// ---------- charts (Chart.js, loaded globally) ----------
+function baseOptions(unit, { stacked = false, min, max, showLegend = false } = {}) {
+  const GRID = color('chart-grid'), TICK = color('chart-tick');
   return {
     responsive: true,
     maintainAspectRatio: false,
     animation: false,
     interaction: { mode: 'index', intersect: false },
     plugins: {
-      legend: { display: showLegend, position: 'bottom', labels: { color: TICK, boxWidth: 8, boxHeight: 8, usePointStyle: true, pointStyle: 'circle', font: { size: 11 } } },
+      legend: { display: showLegend, position: 'bottom', labels: { color: color('chart-legend'), boxWidth: 8, boxHeight: 8, usePointStyle: true, pointStyle: 'circle', font: { size: 11 } } },
       tooltip: {
-        backgroundColor: tipBg, borderColor: tipBorder, borderWidth: 1, titleColor: tipText, bodyColor: tipText, padding: 10,
+        backgroundColor: color('tooltip-bg'), borderColor: color('tooltip-border'), borderWidth: 1, titleColor: color('tooltip-title'), bodyColor: color('tooltip-body'), padding: 10,
         callbacks: {
-          title: (items) => (items[0] && typeof items[0].parsed.x === 'number' && items[0].parsed.x > 1e11 ? dateTime(items[0].parsed.x) : items[0]?.label),
+          title: (items) => (items[0] && typeof items[0].parsed.x === 'number' && items[0].parsed.x > 1e11 ? dateTimeZ(items[0].parsed.x) : items[0]?.label),
           label: (c) => ` ${c.dataset.label}: ${fmt(c.parsed.y ?? c.parsed, unit)}`,
         },
       },
@@ -283,8 +419,9 @@ export function baseOptions(unit, { stacked = false, min, max, showLegend = fals
 }
 
 export function timeChart(canvas, series, { unit = 'none', area = false, stacked = false, legend = false, min, max } = {}) {
+  const pal = palette();
   const datasets = series.map((s, i) => {
-    const c = s.color || PALETTE[i % PALETTE.length];
+    const c = s.color || pal[i % pal.length];
     return {
       label: s.label,
       data: s.points.map(([t, v]) => ({ x: t * 1000, y: v === null ? null : Number(v) })),
@@ -315,7 +452,7 @@ export function barChart(canvas, labels, values, { unit = 'none', colors, horizo
   }
   return new window.Chart(canvas, {
     type: 'bar',
-    data: { labels, datasets: [{ label: 'value', data: values, backgroundColor: colors || labels.map(() => '#2f6bff'), borderRadius: 3, maxBarThickness: 34 }] },
+    data: { labels, datasets: [{ label: 'value', data: values, backgroundColor: colors || labels.map(() => color('chart-1')), borderRadius: 3, maxBarThickness: 34 }] },
     options: opts,
   });
 }
@@ -324,27 +461,29 @@ export function doughnut(canvas, labels, values, colors) {
   return new window.Chart(canvas, {
     type: 'doughnut',
     data: { labels, datasets: [{ data: values, backgroundColor: colors, borderWidth: 0, spacing: 2 }] },
-    options: { responsive: true, maintainAspectRatio: false, cutout: '72%', animation: false, plugins: { legend: { display: false }, tooltip: { backgroundColor: '#0b1324' } } },
+    options: { responsive: true, maintainAspectRatio: false, cutout: '72%', animation: false, plugins: { legend: { display: false }, tooltip: { backgroundColor: color('tooltip-bg'), titleColor: color('tooltip-title'), bodyColor: color('tooltip-body'), borderColor: color('tooltip-border'), borderWidth: 1 } } },
   });
 }
 
-export function sparkline(canvas, points, color = '#3b82f6', bars = false) {
+export function sparkline(canvas, points, lineColor = color('chart-1'), bars = false) {
   return new window.Chart(canvas, {
     type: bars ? 'bar' : 'line',
     data: {
       labels: points.map((p) => p[0]),
-      datasets: [{ data: points.map((p) => Number(p[1])), borderColor: color, backgroundColor: bars ? color : hexA(color, 0.25), fill: !bars, pointRadius: 0, borderWidth: 1.4, tension: 0.35, barPercentage: 0.7 }],
+      datasets: [{ data: points.map((p) => Number(p[1])), borderColor: lineColor, backgroundColor: bars ? lineColor : hexA(lineColor, 0.25), fill: !bars, pointRadius: 0, borderWidth: 1.4, tension: 0.35, barPercentage: 0.7 }],
     },
     options: { responsive: true, maintainAspectRatio: false, animation: false, events: [], plugins: { legend: { display: false }, tooltip: { enabled: false } }, scales: { x: { display: false }, y: { display: false, beginAtZero: true } } },
   });
 }
 
 export function hexA(hex, a) {
+  if (!/^#[0-9a-f]{6}$/i.test(hex)) return hex; // not a plain hex colour: use as is
   const n = parseInt(hex.slice(1), 16);
   return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
 }
 
 // legend row under charts (like the design)
-export function legendRow(labels, colors) {
-  return h('div', { class: 'legend-row' }, labels.map((l, i) => h('span', { class: 'legend-item' }, h('i', { style: { background: colors?.[i] || PALETTE[i % PALETTE.length] } }), l)));
+export function legendRow(labels) {
+  const pal = palette();
+  return h('div', { class: 'legend-row' }, labels.map((l, i) => h('span', { class: 'legend-item' }, h('i', { style: { background: pal[i % pal.length] } }), l)));
 }

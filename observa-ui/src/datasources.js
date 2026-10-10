@@ -1,4 +1,4 @@
-// Data sources: where each kind of data comes from (live backend or demo generator).
+// Data sources: where each kind of data comes from. Always real backends: there is no demo/sample mode.
 // Admin changes are stored in PostgreSQL; a small in-memory copy keeps lookups fast.
 import { config } from './config.js';
 import { q } from './db.js';
@@ -7,9 +7,9 @@ import { httpError } from './auth.js';
 export const DS_META = {
   prometheus: { name: 'Prometheus', kind: 'Metrics', modes: ['live'] },
   alertmanager: { name: 'Alertmanager', kind: 'Alerts', modes: ['live'] },
-  loki: { name: 'Loki', kind: 'Logs', modes: ['live', 'demo'] },
-  tempo: { name: 'Tempo', kind: 'Traces', modes: ['live', 'demo'] },
-  services: { name: 'Service metrics', kind: 'App RED metrics', modes: ['live', 'demo'] },
+  loki: { name: 'Loki', kind: 'Logs', modes: ['live'] },
+  tempo: { name: 'Tempo', kind: 'Traces', modes: ['live'] },
+  services: { name: 'Service metrics', kind: 'App RED metrics', modes: ['live'] },
   grafana: { name: 'Grafana', kind: 'Dashboards', modes: ['live'] },
 };
 
@@ -25,13 +25,22 @@ setInterval(() => loadDatasourceSettings().catch(() => {}), 30_000).unref();
 export function getDatasources() {
   const out = {};
   for (const [id, def] of Object.entries(config.datasources)) {
-    out[id] = { id, ...DS_META[id], ...def, ...(saved[id] || {}) };
+    // "mode" is always live: an old saved "demo" value (before migration 4) is ignored
+    out[id] = { id, ...DS_META[id], ...def, ...(saved[id] || {}), mode: 'live' };
   }
   return out;
 }
 
 export function ds(id) {
   return getDatasources()[id];
+}
+
+// The data source must have an address before we query it. No address = "not configured"
+// (a different state from "configured but not reachable", which fetchJson reports as 502).
+export function requireConfigured(id) {
+  const d = ds(id);
+  if (!d?.url) throw httpError(503, `${DS_META[id]?.name || id} is not configured. Set its address in Data Sources.`, { state: 'not_configured', source: id });
+  return d;
 }
 
 export async function updateDatasource(id, { url, mode }, byUser) {
@@ -61,7 +70,7 @@ export async function fetchJson(url, { method = 'GET', body, headers = {}, timeo
       signal: ctrl.signal,
     });
   } catch (e) {
-    throw httpError(502, `Cannot reach ${new URL(url).host}: ${e.name === 'AbortError' ? 'timeout' : e.cause?.code || e.message}`);
+    throw httpError(502, `Cannot reach ${new URL(url).host}: ${e.name === 'AbortError' ? 'timeout' : e.cause?.code || e.message}`, { state: 'unavailable' });
   } finally {
     clearTimeout(timer);
   }
@@ -74,7 +83,7 @@ export async function fetchJson(url, { method = 'GET', body, headers = {}, timeo
   }
   if (!res.ok) {
     const msg = data?.error || data?.message || data?.raw || res.statusText;
-    throw httpError(res.status >= 500 ? 502 : 400, `${String(msg).slice(0, 300)}`);
+    throw httpError(res.status >= 500 ? 502 : 400, `${String(msg).slice(0, 300)}`, res.status >= 500 ? { state: 'unavailable' } : undefined);
   }
   return data;
 }
@@ -113,11 +122,10 @@ export async function testDatasource(id) {
   const started = Date.now();
   try {
     if (id === 'services') {
-      if (d.mode === 'demo') return { ok: true, mode: 'demo', message: 'Using demo data' };
       await prom('/api/v1/query', { query: 'vector(1)' });
       return { ok: true, mode: 'live', message: 'Uses Prometheus', ms: Date.now() - started };
     }
-    if (d.mode === 'demo') return { ok: true, mode: 'demo', message: 'Using demo data' };
+    if (!d.url) return { ok: false, mode: 'live', message: 'Not configured' };
     const paths = {
       prometheus: '/-/ready',
       alertmanager: '/-/ready',

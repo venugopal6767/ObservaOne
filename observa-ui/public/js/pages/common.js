@@ -1,5 +1,5 @@
 // Helpers shared by several pages.
-import { h, api, icon, fmt, timeChart, barChart, legendName, emptyState, errorBox, clear, spinner } from '../ui.js';
+import { h, api, icon, fmt, timeChart, barChart, legendName, clear, stateView, stateFromError, thresholdColor, color } from '../ui.js';
 
 // Keeps one chart per key and destroys the old one on redraw.
 export function chartSlots(ctx) {
@@ -29,19 +29,6 @@ export function statCard(label, value, { unit, trend, trendGoodWhen = 'down', ex
     extra || null);
 }
 
-// A service with no requests is idle, not down. The server still marks 0 requests/s as "down",
-// so the UI shows it as "No traffic" and keeps it out of the Down/Unhealthy counts.
-// It cannot tell an idle service from a stopped one; the label's tooltip says so.
-export const IDLE_HINT = 'No requests in the last few minutes. ObservaOne cannot tell an idle service from a stopped one.';
-export const isIdle = (x) => !!x && x.status === 'down' && !x.rps && !x.errorRate;
-export const idleStatus = (x) => (isIdle(x) ? { ...x, status: 'idle' } : x);
-export function withIdle(data) {
-  if (!data?.list || !data.summary) return data;
-  const list = data.list.map(idleStatus);
-  const idle = list.filter((x) => x.status === 'idle').length;
-  return { ...data, list, summary: { ...data.summary, down: data.summary.down - idle, idle } };
-}
-
 export function pctChange(now, before) {
   if (now === null || before === null || before === undefined || !Number.isFinite(before) || before === 0) return null;
   return ((now - before) / Math.abs(before)) * 100;
@@ -51,16 +38,13 @@ export function pctChange(now, before) {
 export async function renderPromPanel(box, panel, ctx, setChart, key, vars = {}) {
   let query = panel.query;
   for (const [k, v] of Object.entries(vars)) query = query.replaceAll(`$${k}`, v);
-  // first draw shows a placeholder; a refresh keeps the current chart until new data arrives
-  const had = box.dataset.ok === '1';
-  if (!had) clear(box).append(h('div', { class: 'chart-box skeleton' }));
+  clear(box).append(stateView('loading', { skeleton: panel.type === 'stat' || panel.type === 'gauge' ? 'cards' : panel.type === 'table' ? 'table' : 'chart' }));
   try {
-    await (async () => {
     if (panel.type === 'stat' || panel.type === 'gauge' || panel.type === 'table' || panel.type === 'bar') {
       const d = await api('/prom/query', { query: { query } });
       const res = d.result || [];
       clear(box);
-      if (!res.length) return box.append(emptyState('No data', 'The query returned nothing for this time.'));
+      if (!res.length) return box.append(stateView('empty', { title: 'No data', text: 'Prometheus answered, but this panel\'s query returned nothing right now.' }));
       if (panel.type === 'stat' || panel.type === 'gauge') {
         const v = Number(res[0].value[1]);
         let tone = '';
@@ -77,7 +61,8 @@ export async function renderPromPanel(box, panel, ctx, setChart, key, vars = {})
         const rows = res.map((r) => [legendName(r.metric, panel.legend), Number(r.value[1])]).sort((a, b) => a[0].localeCompare(b[0]));
         const c = h('canvas');
         box.append(h('div', { class: 'chart-box' }, c));
-        const colors = rows.map(([, v]) => (panel.unit === 'percent' && /free/i.test(panel.title) ? (v < 10 ? '#ef4444' : v < 20 ? '#f59e0b' : '#22c55e') : '#2f6bff'));
+        // free space: low is bad; anything else: one neutral colour (no invented good/bad)
+        const colors = rows.map(([, v]) => (panel.unit === 'percent' && /free/i.test(panel.title) ? thresholdColor(v, { warn: 20, crit: 10, lowerIsWorse: true, base: 'ok' }) : color('chart-1')));
         setChart(key, barChart(c, rows.map((r) => r[0]), rows.map((r) => r[1]), { unit: panel.unit, colors, max: panel.unit === 'percent' ? 100 : undefined }));
         return;
       }
@@ -94,22 +79,13 @@ export async function renderPromPanel(box, panel, ctx, setChart, key, vars = {})
     const d = await api('/prom/query_range', { query: { query, start, end } });
     clear(box);
     const res = d.result || [];
-    if (!res.length) return box.append(emptyState('No data', 'The query returned nothing for this time range.'));
+    if (!res.length) return box.append(stateView('empty', { title: 'No data for the selected time range', text: 'Prometheus answered, but this panel\'s query returned nothing.' }));
     const c = h('canvas');
     box.append(h('div', { class: 'chart-box' }, c));
     setChart(key, timeChart(c, res.slice(0, 12).map((r) => ({ label: legendName(r.metric, panel.legend), points: r.values })), {
       unit: panel.unit, area: panel.type === 'area', legend: res.length > 1, max: panel.unit === 'percent' ? 100 : undefined,
     }));
-    })();
-    box.dataset.ok = '1';
-    box.querySelector('.panel-stale')?.remove();
-    return true;
   } catch (e) {
-    if (had) {
-      // keep the last good chart and say it is old
-      box.querySelector('.panel-stale')?.remove();
-      box.prepend(h('div', { class: 'panel-stale', role: 'status' }, icon('clock', 12), `Couldn't refresh: ${e.message}. Showing the last data.`));
-    } else clear(box).append(errorBox(e.message));
-    return false;
+    clear(box).append(stateFromError(e, panel.title || 'Panel'));
   }
 }

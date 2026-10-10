@@ -89,18 +89,18 @@ export const config = {
 
   // First-start users (only used when no user database exists yet)
   bootstrapUsers: [
-    { username: env('UI_ADMIN_USER', 'admin'), password: env('UI_ADMIN_PASSWORD', ''), email: env('UI_ADMIN_EMAIL', ''), role: 'admin' },
-    { username: env('UI_OPERATOR_USER', 'operator'), password: env('UI_OPERATOR_PASSWORD', ''), email: env('UI_OPERATOR_EMAIL', ''), role: 'operator' },
-    { username: env('UI_VIEWER_USER', 'viewer'), password: env('UI_VIEWER_PASSWORD', ''), email: env('UI_VIEWER_EMAIL', ''), role: 'viewer' },
+    { username: env('UI_ADMIN_USER', 'admin'), password: env('UI_ADMIN_PASSWORD', ''), role: 'admin' },
+    { username: env('UI_OPERATOR_USER', 'operator'), password: env('UI_OPERATOR_PASSWORD', ''), role: 'operator' },
+    { username: env('UI_VIEWER_USER', 'viewer'), password: env('UI_VIEWER_PASSWORD', ''), role: 'viewer' },
   ],
 
   // Data sources (can be changed later in the UI by an admin)
   datasources: {
     prometheus: { url: env('PROMETHEUS_URL', 'http://prometheus:9090/prometheus'), mode: 'live' },
     alertmanager: { url: env('ALERTMANAGER_URL', 'http://alertmanager:9093/alertmanager'), mode: 'live' },
-    loki: { url: env('LOKI_URL', 'http://loki:3100'), mode: env('LOKI_MODE', 'demo') },
-    tempo: { url: env('TEMPO_URL', 'http://tempo:3200'), mode: env('TEMPO_MODE', 'demo') },
-    services: { url: '(uses Prometheus)', mode: env('SERVICES_MODE', 'demo') },
+    loki: { url: env('LOKI_URL', 'http://loki:3100'), mode: 'live' },
+    tempo: { url: env('TEMPO_URL', 'http://tempo:3200'), mode: 'live' },
+    services: { url: '(uses Prometheus)', mode: 'live' },
     grafana: { url: env('GRAFANA_URL', 'http://grafana:3000/grafana'), mode: 'live', publicUrl: env('GRAFANA_PUBLIC_URL', '/grafana/') },
   },
 };

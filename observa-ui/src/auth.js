@@ -34,26 +34,13 @@ export const PERMISSIONS = {
   'settings.manage': 'System settings (MFA policy and similar)',
 };
 export const BUILTIN_ROLES = ['viewer', 'operator', 'admin'];
-// role dashboards an admin can give to a role (Settings > Roles > Dashboards)
-export const DASHBOARD_IDS = ['business', 'devops', 'developer', 'sre', 'security', 'appowner', 'itadmin', 'kubernetes'];
-// sensible starting set for a role, from its permissions
-export function defaultDashboards(perms) {
-  const has = (p) => perms.includes('*') || perms.includes(p);
-  return DASHBOARD_IDS.filter((id) => ({
-    business: true, developer: true, appowner: true, kubernetes: true,
-    devops: has('dashboards.edit'), sre: has('incidents.manage'), security: has('security.read'), itadmin: has('settings.manage'),
-  })[id]);
-}
 
 let roleCache = { at: 0, map: new Map() }; // name -> { permissions:Set, description, builtin }
 
 export async function loadRoles(force = false) {
   if (!force && Date.now() - roleCache.at < 30_000 && roleCache.map.size) return roleCache.map;
-  const { rows } = await q('SELECT name, description, permissions, builtin, dashboards, landing FROM roles ORDER BY builtin DESC, name');
-  roleCache = { at: Date.now(), map: new Map(rows.map((r) => [r.name, {
-    ...r, permissions: new Set(r.permissions),
-    dashboards: Array.isArray(r.dashboards) ? r.dashboards.filter((d) => DASHBOARD_IDS.includes(d)) : defaultDashboards(r.permissions),
-  }])) };
+  const { rows } = await q('SELECT name, description, permissions, builtin FROM roles ORDER BY builtin DESC, name');
+  roleCache = { at: Date.now(), map: new Map(rows.map((r) => [r.name, { ...r, permissions: new Set(r.permissions) }])) };
   return roleCache.map;
 }
 export function invalidateRoles() {
@@ -108,9 +95,6 @@ export function publicUser(u) {
     createdAt: u.created_at?.toISOString?.() || u.created_at,
     lastLogin: u.last_login ? new Date(u.last_login).toISOString() : null,
     permissions: [...permsOf(u.role)],
-    // which role dashboards this user sees, and where they land after sign-in (set per role by an admin)
-    dashboards: roleCache.map.get(u.role)?.dashboards || [],
-    landing: roleCache.map.get(u.role)?.landing || null,
   };
 }
 
@@ -130,52 +114,19 @@ export const findUser = (username) => one('SELECT * FROM users WHERE lower(usern
 export async function bootstrapUsers() {
   await loadRoles(true);
   const { rows } = await q('SELECT count(*)::int AS n FROM users');
-  if (rows[0].n > 0) {
-    // existing install: give the first-start users their e-mail from .env if they have none yet
-    for (const b of config.bootstrapUsers) {
-      let mail = null;
-      try { mail = cleanEmail(b.email); } catch { continue; }
-      if (!mail) continue;
-      const taken = await one('SELECT 1 FROM users WHERE lower(email) = $1', [mail]);
-      if (taken) continue;
-      const r = await q(`UPDATE users SET email = $2, updated_at = now() WHERE lower(username) = lower($1) AND (email IS NULL OR email = '')`, [b.username, mail]);
-      if (r.rowCount) console.log(`[auth] set e-mail for "${b.username}" from .env`);
-    }
-    return;
-  }
+  if (rows[0].n > 0) return;
   let created = 0;
   for (const b of config.bootstrapUsers) {
     if (!b.password) { console.warn(`[auth] no password set for ${b.role} user "${b.username}" - skipped`); continue; }
     const prob = passwordProblem(b.password);
     if (prob) { console.warn(`[auth] password for "${b.username}" rejected: ${prob} - user skipped`); continue; }
-    let mail = null;
-    try { mail = cleanEmail(b.email); } catch { console.warn(`[auth] e-mail for "${b.username}" is not valid - left empty`); }
-    if (!mail) console.warn(`[auth] no e-mail set for "${b.username}" - set UI_${b.role.toUpperCase()}_EMAIL in .env`);
-    await q('INSERT INTO users (username, role, password_hash, email) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING',
-      [b.username, b.role, await bcrypt.hash(b.password, BCRYPT_COST), mail]);
+    await q('INSERT INTO users (username, role, password_hash) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING',
+      [b.username, b.role, await bcrypt.hash(b.password, BCRYPT_COST)]);
     created++;
   }
   const admins = await one(`SELECT count(*)::int AS n FROM users WHERE role = 'admin'`);
   if (!admins.n) throw new Error('No valid admin user. Set UI_ADMIN_USER and UI_ADMIN_PASSWORD (12+ chars, upper, lower, number, symbol).');
   console.log(`[auth] created ${created} first-start user(s)`);
-}
-
-// ---------- e-mail: required for users created here, valid, and not used by another user ----------
-const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s.]{2,}$/;
-export function cleanEmail(email, { required = false } = {}) {
-  const e = String(email ?? '').trim().toLowerCase();
-  if (!e) {
-    if (required) throw httpError(400, 'E-mail is required.');
-    return null;
-  }
-  if (e.length > 254 || !EMAIL_RE.test(e)) throw httpError(400, `"${e}" is not a valid e-mail address.`);
-  return e;
-}
-export async function assertEmailFree(email, exceptUserId = null, client = null) {
-  if (!email) return;
-  const run = client ? (sql, params) => client.query(sql, params).then((r) => r.rows[0]) : one;
-  const other = await run('SELECT username FROM users WHERE lower(email) = $1 AND ($2::bigint IS NULL OR id <> $2)', [email, exceptUserId]);
-  if (other) throw httpError(409, `That e-mail is already used by ${other.username}.`);
 }
 
 async function assertRole(role) {
@@ -187,16 +138,13 @@ export async function createUser({ username, password, role, email, displayName,
   if (!USERNAME_RE.test(username || '')) throw httpError(400, 'Username: 3-64 letters, numbers, dot, dash, underscore or @.');
   await assertRole(role);
   if (actorPerms && !canGrantRole(actorPerms, role)) throw httpError(403, 'You cannot give a role with more rights than your own.');
-  const mail = cleanEmail(email, { required: true });
   const prob = passwordProblem(password);
   if (prob) throw httpError(400, prob);
-  if (await findUser(username)) throw httpError(409, 'User already exists.');
-  await assertEmailFree(mail);
   try {
     await q('INSERT INTO users (username, role, password_hash, email, display_name, phone) VALUES ($1,$2,$3,$4,$5,$6)',
-      [username, role, await bcrypt.hash(password, BCRYPT_COST), mail, displayName || null, phone || null]);
+      [username, role, await bcrypt.hash(password, BCRYPT_COST), email || null, displayName || null, phone || null]);
   } catch (e) {
-    if (e.code === '23505') throw httpError(409, String(e.constraint || '').includes('email') ? 'That e-mail is already used by another user.' : 'User already exists.');
+    if (e.code === '23505') throw httpError(409, 'User already exists.');
     throw e;
   }
 }
@@ -216,14 +164,11 @@ export async function updateUser(username, { role, password, disabled, email, di
     if (prob) throw httpError(400, prob);
   }
   const hash = password !== undefined ? await bcrypt.hash(password, BCRYPT_COST) : null;
-  const mail = email !== undefined ? cleanEmail(email) : undefined;
   await tx(async (c) => {
     await c.query('LOCK TABLE users IN SHARE ROW EXCLUSIVE MODE'); // no two admins demoting each other at once
     const u = (await c.query('SELECT * FROM users WHERE username = $1', [username])).rows[0];
     if (!u) throw httpError(404, 'User not found.');
     if (hash && u.auth_source !== 'local') throw httpError(400, `This user signs in with ${u.auth_source.toUpperCase()}; change the password there.`);
-    if (mail === null && u.auth_source === 'local') throw httpError(400, 'E-mail is required for users who sign in with a password.');
-    if (mail) await assertEmailFree(mail, u.id, c);
     const wasAdmin = permsOf(u.role).has('*');
     const losingAdmin = wasAdmin && !u.disabled && ((role && !permsOf(role).has('*')) || disabled);
     if (losingAdmin && (await activeAdmins(c)) <= 1) throw httpError(400, 'Cannot remove or disable the last admin.');
@@ -236,7 +181,7 @@ export async function updateUser(username, { role, password, disabled, email, di
          phone = CASE WHEN $9::boolean THEN $10 ELSE phone END,
          updated_at = now() WHERE id = $1`,
       [u.id, role ?? null, disabled === undefined ? null : !!disabled, hash,
-        mail !== undefined, mail ?? null, displayName !== undefined, displayName || null, phone !== undefined, phone || null]);
+        email !== undefined, email || null, displayName !== undefined, displayName || null, phone !== undefined, phone || null]);
     if (resetMfa) {
       await c.query(`UPDATE users SET mfa_enabled = FALSE, mfa_secret = NULL, mfa_pending_secret = NULL, mfa_recovery = '[]', mfa_last_step = NULL WHERE id = $1`, [u.id]);
     }
@@ -613,7 +558,7 @@ export function requireUser(req, res, next) {
 }
 
 // ---------- per-user preferences ----------
-const PREF_KEYS = new Set(['timeRange', 'metricsQuery', 'logsQuery', 'tracesQuery', 'homePage', 'dashboardVars', 'navCollapsed', 'theme', 'autoRefresh']);
+const PREF_KEYS = new Set(['timeRange', 'metricsQuery', 'logsQuery', 'tracesQuery', 'homePage', 'dashboardVars', 'navCollapsed', 'theme']);
 
 export async function getPrefs(userId) {
   if (!userId) return {};

@@ -1,7 +1,5 @@
 // Settings tabs for administrators: users, roles, teams, security policy, audit log.
-import { errorState } from '../personas/widgets.js';
-import { h, api, clear, icon, errorBox, spinner, modal, field, select, toast, confirmBox, dateTime, ago, pill } from '../ui.js';
-import { PERSONAS } from '../personas/registry.js';
+import { h, api, clear, icon, errorBox, spinner, modal, field, select, toast, confirmBox, ago, pill, timeEl, timeHeader, stateView, stateFromError, stateBanner, paginate } from '../ui.js';
 
 const SOURCE = { local: 'Password', ldap: 'LDAP', oidc: 'SSO', google: 'Google', github: 'GitHub' };
 
@@ -12,37 +10,33 @@ export function browserName(ua = '') {
 }
 
 // ---------------- Users ----------------
-const EMAIL_OK = /^[^@\s]+@[^@\s]+\.[^@\s.]{2,}$/;
-
 export async function usersTab(out, ctx) {
-  out.append(h('div', { class: 'table-wrap skeleton', style: { height: '280px' } }));
+  out.append(stateView('loading', { skeleton: 'table' }));
   let data;
-  try { data = await api('/users'); } catch (e) { clear(out).append(errorState(e.message, () => ctx.navigate(location.pathname + location.search, true), 'This section could not load')); return; }
+  try { data = await api('/users'); } catch (e) { clear(out).append(h('div', { class: 'table-wrap' }, stateFromError(e, 'Settings'))); return; }
   const filter = h('input', { class: 'input', placeholder: 'Filter users...', style: { width: '220px' } });
   const body = h('tbody');
   const reload = () => { clear(out); usersTab(out, ctx); };
   const draw = () => {
     const f = filter.value.toLowerCase();
-    clear(body).append(...data.users.filter((u) => (!onlyMissing || !u.email)).filter((u) => !f || `${u.username} ${u.displayName || ''} ${u.email || ''} ${u.role} ${(u.teams || []).join(' ')}`.toLowerCase().includes(f)).map((u) => {
+    clear(body).append(...data.users.filter((u) => !f || `${u.username} ${u.displayName || ''} ${u.email || ''} ${u.role} ${(u.teams || []).join(' ')}`.toLowerCase().includes(f)).map((u) => {
       const me = u.username === ctx.me.user.username;
       return h('tr', {},
         h('td', {}, h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px' } },
           h('div', { class: 'avatar sm' }, (u.displayName || u.username)[0].toUpperCase()),
           h('div', {}, h('b', { style: { fontWeight: 600 } }, u.username), me ? h('span', { style: { marginLeft: '6px' } }, pill('you', 'blue')) : null,
-            h('div', { class: 'dim', style: { fontSize: '11.5px' } }, [u.displayName, u.email].filter(Boolean).join(' · ')),
-            u.email ? null : h('span', { class: 'pill no-email', title: 'Without an e-mail this user gets no alert or incident notifications' }, icon('alert', 11), 'No e-mail')))),
+            h('div', { class: 'dim', style: { fontSize: '11.5px' } }, [u.displayName, u.email].filter(Boolean).join(' · '))))),
         h('td', {}, me ? u.role : select(data.roles.map((r) => [r, r]), u.role, async (role) => {
           try { await api(`/users/${encodeURIComponent(u.username)}`, { method: 'PUT', body: { role } }); toast(`${u.username} is now ${role}`); } catch (e) { toast(e.message, 'err'); }
           reload();
-        }, { class: 'select select-sm', 'aria-label': `Role for ${u.username}` })),
-        h('td', { class: 'col-phone-hide' }, SOURCE[u.authSource] || u.authSource),
-        h('td', { class: 'col-phone-hide' }, u.mfaEnabled ? pill('On', 'green') : h('span', { class: 'dim' }, 'off')),
-        h('td', { class: 'dim col-phone-hide', style: { fontSize: '12px' } }, (u.teams || []).join(', ') || '—'),
-        h('td', { class: 'col-phone-hide' }, u.disabled ? pill('Disabled', 'red') : pill('Active', 'green')),
-        h('td', { class: 'col-phone-hide' }, u.activeSessions ? pill(`${u.activeSessions} session${u.activeSessions > 1 ? 's' : ''}`, 'blue') : h('span', { class: 'dim' }, '—')),
-        h('td', { class: 'dim col-phone-hide' }, u.lastLogin ? ago(u.lastLogin) : 'never'),
-        h('td', {}, me ? h('div', { class: 'row-actions' }, h('a', { class: 'btn btn-sm', href: ctx.link('/settings', { tab: 'profile' }), 'data-link': true }, icon('edit', 12), 'Edit')) : h('div', { class: 'row-actions' },
-          h('button', { class: `btn btn-sm ${u.email ? '' : 'btn-warn'}`, onclick: () => editUser(u) }, icon('edit', 12), u.email ? 'Edit' : 'Add e-mail'),
+        }, { class: 'select select-sm', 'aria-label': `Role of ${u.username}` })),
+        h('td', {}, SOURCE[u.authSource] || u.authSource),
+        h('td', {}, u.mfaEnabled ? pill('On', 'green') : h('span', { class: 'dim' }, 'off')),
+        h('td', { class: 'dim', style: { fontSize: '12px' } }, (u.teams || []).join(', ') || '-'),
+        h('td', {}, u.disabled ? pill('Disabled', 'red') : pill('Active', 'green')),
+        h('td', {}, u.activeSessions ? pill(`${u.activeSessions} session${u.activeSessions > 1 ? 's' : ''}`, 'blue') : h('span', { class: 'dim' }, '-')),
+        h('td', { class: 'dim' }, u.lastLogin ? ago(u.lastLogin) : 'never'),
+        h('td', {}, me ? null : h('div', { class: 'row-actions' },
           u.authSource === 'local' ? h('button', { class: 'btn btn-sm', onclick: () => resetPassword(u) }, 'Reset password') : null,
           u.mfaEnabled ? h('button', { class: 'btn btn-sm', title: 'For a user who lost their phone', onclick: async () => {
             if (!(await confirmBox('Reset two-factor sign-in', `${u.username} will sign in with the password only, and can set up a new device.`, 'Reset'))) return;
@@ -61,58 +55,29 @@ export async function usersTab(out, ctx) {
     }));
   };
   filter.addEventListener('input', draw);
-  let onlyMissing = false;
-  const missing = data.users.filter((u) => !u.email);
-  const banner = missing.length ? h('div', { class: 'error-box warn', style: { marginBottom: '12px' } }, icon('alert', 16),
-    h('span', {}, `${missing.length} user${missing.length > 1 ? 's have' : ' has'} no e-mail address, so ${missing.length > 1 ? 'they get' : 'they get'} no alert or incident notifications. New users always need one.`),
-    h('button', { class: 'btn btn-sm', style: { marginLeft: 'auto' }, onclick: (e) => { onlyMissing = !onlyMissing; e.target.textContent = onlyMissing ? 'Show all users' : 'Show them'; draw(); } }, 'Show them')) : null;
   clear(out).append(
-    banner,
     h('div', { class: 'toolbar' }, filter, h('div', { class: 'grow' }),
       h('button', { class: 'btn btn-primary', onclick: () => addUser(data.roles) }, icon('plus', 15), 'Add user')),
     h('div', { class: 'table-wrap' }, h('table', { class: 'tbl' },
-      h('thead', {}, h('tr', {}, ['User', 'Role', 'Signs in with', '2FA', 'Teams', 'Status', 'Signed in now', 'Last sign-in', h('span', { class: 'sr-only' }, 'Actions')].map((x, i) => h('th', { class: [2, 3, 4, 5, 6, 7].includes(i) ? 'col-phone-hide' : '' }, x)))), body)),
+      h('thead', {}, h('tr', {}, ['User', 'Role', 'Signs in with', '2FA', 'Teams', 'Status', 'Signed in now', 'Last sign-in', ''].map((x) => h('th', {}, x)))), body)),
     h('p', { class: 'muted', style: { marginTop: '10px', fontSize: '12px' } }, 'LDAP and SSO users are created automatically the first time they sign in. Their role comes from their groups when a group mapping is set.'));
   draw();
 
   function addUser(roles) {
     const name = h('input', { class: 'input', autocomplete: 'off' });
     const display = h('input', { class: 'input' });
-    const email = h('input', { class: 'input', type: 'email', required: true, placeholder: 'name@company.com', autocomplete: 'off' });
+    const email = h('input', { class: 'input', type: 'email' });
     const pass = h('input', { class: 'input', type: 'password', autocomplete: 'new-password' });
     let role = roles.includes('viewer') ? 'viewer' : roles[0];
     modal('Add user', h('div', {},
       h('div', { class: 'form-row' }, field('Username', name, 'Letters, numbers, dot, dash, underscore, @.'), field('Display name', display)),
-      field('E-mail (required)', email, 'Used for alert and incident notifications and password help.'),
+      field('E-mail', email),
       field('Temporary password', pass, '12+ characters with upper, lower, number and symbol. Ask the user to change it.'),
       field('Role', select(roles.map((r) => [r, r]), role, (v) => { role = v; }))), [
       { label: 'Cancel' },
       { label: 'Add user', primary: true, onclick: async () => {
-        const mail = email.value.trim();
-        if (!mail) { email.focus(); throw new Error('E-mail is required.'); }
-        if (!EMAIL_OK.test(mail)) { email.focus(); throw new Error(`"${mail}" is not a valid e-mail address.`); }
         await api('/users', { method: 'POST', body: { username: name.value.trim(), displayName: display.value.trim(), email: email.value.trim(), password: pass.value, role } });
         toast('User added');
-        reload();
-      } },
-    ]);
-  }
-
-  function editUser(u) {
-    const display = h('input', { class: 'input', value: u.displayName || '' });
-    const email = h('input', { class: 'input', type: 'email', value: u.email || '', placeholder: 'name@company.com', required: u.authSource === 'local' });
-    const phone = h('input', { class: 'input', type: 'tel', value: u.phone || '', placeholder: '+91 98450 00000' });
-    modal(`Edit ${u.username}`, h('div', {},
-      field('Display name', display),
-      field(u.authSource === 'local' ? 'E-mail (required)' : 'E-mail', email, u.authSource === 'local' ? 'Used for alert and incident notifications.' : 'Filled from the company directory at each sign-in when it has one.'),
-      field('Mobile number', phone, 'For on-call paging, with country code.')), [
-      { label: 'Cancel' },
-      { label: 'Save', primary: true, onclick: async () => {
-        const mail = email.value.trim();
-        if (u.authSource === 'local' && !mail) { email.focus(); throw new Error('E-mail is required.'); }
-        if (mail && !EMAIL_OK.test(mail)) { email.focus(); throw new Error(`"${mail}" is not a valid e-mail address.`); }
-        await api(`/users/${encodeURIComponent(u.username)}`, { method: 'PUT', body: { displayName: display.value.trim(), email: mail, phone: phone.value.trim() } });
-        toast('User saved');
         reload();
       } },
     ]);
@@ -132,9 +97,9 @@ export async function usersTab(out, ctx) {
 
 // ---------------- Roles ----------------
 export async function rolesTab(out, ctx) {
-  out.append(h('div', { class: 'table-wrap skeleton', style: { height: '280px' } }));
+  out.append(stateView('loading', { skeleton: 'table' }));
   let d;
-  try { d = await api('/roles'); } catch (e) { clear(out).append(errorState(e.message, () => ctx.navigate(location.pathname + location.search, true), 'This section could not load')); return; }
+  try { d = await api('/roles'); } catch (e) { clear(out).append(h('div', { class: 'table-wrap' }, stateFromError(e, 'Settings'))); return; }
   const reload = () => { clear(out); rolesTab(out, ctx); };
   const permKeys = Object.keys(d.permissions);
   clear(out).append(
@@ -154,52 +119,6 @@ export async function rolesTab(out, ctx) {
         h('td', {}, h('div', { class: 'mono', style: { fontSize: '12px' } }, p), h('div', { class: 'dim', style: { fontSize: '11.5px' } }, d.permissions[p])),
         d.roles.map((r) => h('td', { class: 'center' }, r.permissions.includes('*') || r.permissions.includes(p) ? h('span', { class: 'c-green' }, icon('check', 15)) : h('span', { class: 'dim' }, '·')))))))));
 
-  // ---- which dashboards each role sees, and where its users land after sign-in ----
-  const dashIds = d.dashboards || [];
-  if (dashIds.length && d.roles[0]?.dashboards) {
-    const label = (id) => PERSONAS.find((p) => p.id === id)?.label || id;
-    const draft = Object.fromEntries(d.roles.map((r) => [r.name, { dashboards: new Set(r.dashboards || []), landing: r.landing || '' }]));
-    const changed = new Set();
-    const saveBtn = h('button', { class: 'btn btn-primary', disabled: true, onclick: async (e) => {
-      e.target.disabled = true;
-      try {
-        for (const name of changed) {
-          const x = draft[name];
-          await api(`/roles/${encodeURIComponent(name)}/dashboards`, { method: 'PUT', body: { dashboards: [...x.dashboards], landing: x.landing || null } });
-        }
-        toast(`Dashboards saved for ${[...changed].join(', ')}. Users see the change on their next page load.`);
-        changed.clear();
-        await ctx.reloadMe?.();
-      } catch (err) { toast(err.message, 'err'); e.target.disabled = false; }
-    } }, icon('check', 14), 'Save dashboards');
-    const landingSel = {};
-    const markDirty = (name) => { changed.add(name); saveBtn.disabled = false; };
-    const landingOptions = (name) => [['', 'Default'], ['overview', 'Overview'], ...dashIds.filter((id) => draft[name].dashboards.has(id)).map((id) => [id, label(id)])];
-    const drawLanding = (name) => {
-      const x = draft[name];
-      if (x.landing && x.landing !== 'overview' && !x.dashboards.has(x.landing)) x.landing = '';
-      const sel = select(landingOptions(name), x.landing, (v) => { x.landing = v; markDirty(name); }, { class: 'select select-sm', 'aria-label': `Landing dashboard for ${name}` });
-      landingSel[name].replaceChildren(sel);
-    };
-    out.append(
-      h('div', { class: 'toolbar', style: { marginTop: '22px' } },
-        h('div', { class: 'grow' }, h('h3', { style: { margin: '0 0 2px', fontSize: '15px' } }, 'Dashboards for each role'),
-          h('div', { class: 'muted', style: { fontSize: '12.5px' } }, 'Tick the role dashboards each role can open. Users only see these in the dashboard selector and on Home. "Opens after sign-in" is where they land.')),
-        saveBtn),
-      h('div', { class: 'table-wrap' }, h('table', { class: 'tbl perm-matrix dash-matrix' },
-        h('thead', {}, h('tr', {}, h('th', {}, 'Dashboard'), d.roles.map((r) => h('th', { class: 'center' }, r.name)))),
-        h('tbody', {},
-          dashIds.map((id) => h('tr', {},
-            h('td', {}, h('b', {}, label(id)), h('div', { class: 'dim', style: { fontSize: '11.5px' } }, PERSONAS.find((p) => p.id === id)?.desc || '')),
-            d.roles.map((r) => h('td', { class: 'center' }, h('input', {
-              type: 'checkbox', checked: draft[r.name].dashboards.has(id), 'aria-label': `${label(id)} for ${r.name}`,
-              onchange: (e) => { const set = draft[r.name].dashboards; e.target.checked ? set.add(id) : set.delete(id); markDirty(r.name); drawLanding(r.name); },
-            }))))),
-          h('tr', { class: 'landing-row' }, h('td', {}, h('b', {}, 'Opens after sign-in')),
-            d.roles.map((r) => { landingSel[r.name] = h('td', { class: 'center' }); return landingSel[r.name]; }))))));
-    d.roles.forEach((r) => drawLanding(r.name));
-  }
-
   function edit(role) {
     const name = h('input', { class: 'input', value: role?.name || '', disabled: !!role, placeholder: 'e.g. sre' });
     const desc = h('input', { class: 'input', value: role?.description || '' });
@@ -210,8 +129,7 @@ export async function rolesTab(out, ctx) {
     modal(role ? `Edit role ${role.name}` : 'New role', h('div', {},
       h('div', { class: 'form-row' }, field('Name', name, 'lower-case, e.g. sre or noc'), field('Description', desc)),
       h('div', { class: 'field-label', style: { margin: '6px 0' } }, 'Permissions'),
-      h('div', { class: 'perm-list' }, boxes),
-      role ? null : h('div', { class: 'dim', style: { fontSize: '12px', marginTop: '8px' } }, 'Dashboards for the new role start from its permissions. Change them below under "Dashboards for each role".')), [
+      h('div', { class: 'perm-list' }, boxes)), [
       { label: 'Cancel' },
       { label: role ? 'Save' : 'Create', primary: true, onclick: async () => {
         const body = { name: name.value.trim(), description: desc.value.trim(), permissions: [...chosen] };
@@ -226,9 +144,9 @@ export async function rolesTab(out, ctx) {
 
 // ---------------- Teams ----------------
 export async function teamsTab(out, ctx) {
-  out.append(h('div', { class: 'table-wrap skeleton', style: { height: '280px' } }));
+  out.append(stateView('loading', { skeleton: 'table' }));
   let teams, users;
-  try { [teams, users] = await Promise.all([api('/teams'), api('/users/names')]); } catch (e) { clear(out).append(errorState(e.message, () => ctx.navigate(location.pathname + location.search, true), 'This section could not load')); return; }
+  try { [teams, users] = await Promise.all([api('/teams'), api('/users/names')]); } catch (e) { clear(out).append(h('div', { class: 'table-wrap' }, stateFromError(e, 'Settings'))); return; }
   const reload = () => { clear(out); teamsTab(out, ctx); };
   const canEdit = ctx.can('users.manage');
   clear(out).append(
@@ -268,9 +186,9 @@ export async function teamsTab(out, ctx) {
 
 // ---------------- Security policy ----------------
 export async function securityTab(out, ctx) {
-  out.append(h('div', { class: 'table-wrap skeleton', style: { height: '280px' } }));
+  out.append(stateView('loading', { skeleton: 'table' }));
   let s, roles;
-  try { [s, roles] = await Promise.all([api('/settings/security'), api('/roles')]); } catch (e) { clear(out).append(errorState(e.message, () => ctx.navigate(location.pathname + location.search, true), 'This section could not load')); return; }
+  try { [s, roles] = await Promise.all([api('/settings/security'), api('/roles')]); } catch (e) { clear(out).append(h('div', { class: 'table-wrap' }, stateFromError(e, 'Settings'))); return; }
   const required = new Set(s.mfaRequiredRoles || []);
   const ldapUser = h('input', { class: 'input', placeholder: 'username to look up (optional)', style: { width: '240px' } });
   const ldapOut = h('div');
@@ -305,30 +223,88 @@ export async function securityTab(out, ctx) {
       ] : h('p', { class: 'muted' }, 'LDAP is not set up. Set LDAP_URL, LDAP_BASE_DN, LDAP_BIND_DN and LDAP_BIND_PASSWORD in .env.'))));
 }
 
+// ---------------- Modules ----------------
+// Which product modules this deployment uses. Users see only enabled modules (and only those
+// their role allows). Turning a module off hides it everywhere and its API answers 404; saved
+// dashboards, queries and preferences are kept and come back when it is turned on again.
+export async function modulesTab(out, ctx) {
+  out.append(stateView('loading', { skeleton: 'table' }));
+  let data;
+  try { data = await api('/modules'); } catch (e) { clear(out).append(h('div', { class: 'table-wrap' }, stateFromError(e, 'Settings'))); return; }
+  const on = new Set(data.enabled);
+  const saveBtn = h('button', { class: 'btn btn-primary', disabled: true }, 'Save');
+  const dirty = () => { saveBtn.disabled = [...on].sort().join() === [...data.enabled].sort().join(); };
+  const rows = data.catalog.map((m) => {
+    const box = h('input', { type: 'checkbox', checked: on.has(m.id), id: `mod-${m.id}`, onchange: (e) => { if (e.target.checked) on.add(m.id); else on.delete(m.id); dirty(); } });
+    return h('label', { class: 'module-row', for: `mod-${m.id}` },
+      box,
+      h('div', { class: 'grow' },
+        h('div', { class: 'module-name' }, m.name),
+        h('div', { class: 'module-desc' }, m.description),
+        h('div', { class: 'module-source' }, `Data source: ${m.source}`)));
+  });
+  saveBtn.onclick = async () => {
+    const turnedOff = data.catalog.filter((m) => data.enabled.includes(m.id) && !on.has(m.id)).map((m) => m.name);
+    if (turnedOff.length && !(await confirmBox('Turn off modules?',
+      `${turnedOff.join(', ')} will disappear for every user, and their API will stop answering. Saved dashboards, queries and settings are kept.`, 'Turn off'))) return;
+    saveBtn.disabled = true;
+    try {
+      data = await api('/modules', { method: 'PUT', body: { enabled: [...on] } });
+      toast('Modules saved');
+      await ctx.reloadShell(); // rebuild the menu, search and bell for the new selection
+    } catch (e) {
+      toast(e.message, 'err');
+      dirty();
+    }
+  };
+  clear(out).append(
+    h('section', { class: 'panel' },
+      h('div', { class: 'panel-head' }, h('h3', {}, 'Modules for this deployment'), h('div', { class: 'right' }, saveBtn)),
+      h('p', { class: 'muted', style: { marginTop: 0 } },
+        'Users see only the modules turned on here, and within those only what their role allows. Overview, Data Sources and Settings are always available. ',
+        'Turning a module on does not connect its data source: if the source is not reachable, its pages say so.'),
+      data.configured ? null : h('div', { class: 'info-box', style: { marginBottom: '12px' } }, icon('alert', 16),
+        h('span', {}, 'No selection has been saved yet, so every module is on. Untick the ones this deployment does not use and save.')),
+      h('div', { class: 'module-list' }, rows)));
+}
+
 // ---------------- Audit log ----------------
 const auditFilter = { user: '', action: '' };
 export async function auditTab(out) {
-  const userIn = h('input', { class: 'input', placeholder: 'User', value: auditFilter.user, style: { width: '160px' } });
-  const box = h('div', {}, spinner());
+  const userIn = h('input', { class: 'input', placeholder: 'User', 'aria-label': 'Filter by user', value: auditFilter.user, style: { width: '160px' } });
+  const box = h('div', {}, h('div', { class: 'table-wrap' }, stateView('loading', { skeleton: 'table' })));
   const reload = () => { clear(out); auditTab(out); };
+  const LIMIT = 300;
   const actIn = select([['', 'All actions'], ['login', 'Sign-ins'], ['login.failed', 'Failed sign-ins'], ['mfa.', 'Two-factor'], ['user.', 'User changes'], ['role.', 'Roles'], ['team.', 'Teams'], ['apikey.', 'API keys'], ['session.', 'Sessions'],
-    ['dashboard.', 'Dashboards'], ['rule.', 'Alert rules'], ['silence.', 'Silences'], ['incident.', 'Incidents'], ['channel.', 'Notification channels'], ['datasource.', 'Data sources'], ['settings.', 'Settings'], ['access.denied', 'Access denied']],
-  auditFilter.action, (v) => { auditFilter.action = v; reload(); }, { class: 'select' });
+    ['dashboard.', 'Dashboards'], ['rule.', 'Alert rules'], ['silence.', 'Silences'], ['incident.', 'Incidents'], ['channel.', 'Notification channels'], ['datasource.', 'Data sources'], ['settings.', 'Settings'], ['modules.', 'Modules'], ['access.denied', 'Access denied']],
+  auditFilter.action, (v) => { auditFilter.action = v; reload(); }, { class: 'select', 'aria-label': 'Filter by action' });
   userIn.addEventListener('keydown', (e) => { if (e.key === 'Enter') { auditFilter.user = userIn.value.trim(); reload(); } });
   out.append(h('div', { class: 'toolbar' }, userIn, actIn, h('button', { class: 'btn', onclick: () => { auditFilter.user = userIn.value.trim(); reload(); } }, 'Filter'),
     h('div', { class: 'grow' }), h('span', { class: 'muted' }, 'Stored in the database')), box);
   try {
-    const rows = await api('/audit', { query: { limit: 300, user: auditFilter.user, action: auditFilter.action } });
+    const rows = await api('/audit', { query: { limit: LIMIT, user: auditFilter.user, action: auditFilter.action } });
     const tone = (a) => (a.includes('failed') || a.includes('denied') || a.includes('locked') ? 'red' : a.startsWith('login') ? 'green' : 'blue');
-    if (!rows.length) { clear(box).append(h('div', { class: 'table-wrap' }, h('div', { class: 'empty' }, 'No entries match.'))); return; }
-    clear(box).append(h('div', { class: 'table-wrap', style: { maxHeight: 'calc(100vh - 290px)' } }, h('table', { class: 'tbl' },
-      h('thead', {}, h('tr', {}, ['Time', 'User', 'IP', 'Action', 'Details'].map((x, i) => h('th', { class: i === 2 ? 'col-phone-hide' : '' }, x)))),
-      h('tbody', {}, rows.map((r) => {
+    if (!rows.length) {
+      clear(box).append(h('div', { class: 'table-wrap' }, stateView('empty', { title: 'No audit entries match', text: auditFilter.user || auditFilter.action ? 'Clear the user or action filter.' : 'Nothing has been recorded yet.' })));
+      return;
+    }
+    let page = 0;
+    const draw = () => {
+      const pg = paginate(rows, { page, pageSize: 100, noun: 'entries', onPage: (p) => { page = p; draw(); }, note: rows.length >= LIMIT ? `(newest ${LIMIT} only)` : null });
+      page = pg.page;
+      clear(box).append(
+        // the API returns the newest LIMIT entries: say so instead of implying this is everything
+        rows.length >= LIMIT ? stateBanner('partial', `Showing the newest ${LIMIT} entries. Filter by user or action to find older ones.`) : '',
+        h('div', { class: 'table-wrap', tabindex: 0, role: 'region', 'aria-label': 'Audit log entries', style: { maxHeight: 'calc(100vh - 330px)' } }, h('table', { class: 'tbl' },
+      h('thead', {}, h('tr', {}, [timeHeader(), 'User', 'IP', 'Action', 'Details'].map((x) => h('th', {}, x)))),
+      h('tbody', {}, pg.rows.map((r) => {
         const { id, time, user, ip, action, ...rest } = r;
-        return h('tr', {}, h('td', { class: 'mono ts' }, dateTime(Date.parse(time))), h('td', {}, user), h('td', { class: 'mono dim col-phone-hide' }, ip),
-          h('td', { class: 'wrap-any' }, pill(action, tone(action))), h('td', { class: 'mono dim msg', style: { fontSize: '11.5px' }, title: JSON.stringify(rest) }, Object.keys(rest).length ? JSON.stringify(rest) : ''));
-      })))));
+        return h('tr', {}, h('td', { class: 'mono', style: { whiteSpace: 'nowrap' } }, timeEl(Date.parse(time))), h('td', {}, user), h('td', { class: 'mono dim' }, ip),
+          h('td', {}, pill(action, tone(action))), h('td', { class: 'mono dim msg', style: { fontSize: '11.5px' }, title: JSON.stringify(rest) }, Object.keys(rest).length ? JSON.stringify(rest) : ''));
+      }))), pg.foot));
+    };
+    draw();
   } catch (e) {
-    clear(box).append(errorState(e.message, () => ctx.navigate(location.pathname + location.search, true), 'The audit log could not load'));
+    clear(box).append(h('div', { class: 'table-wrap' }, stateFromError(e, 'Audit log')));
   }
 }

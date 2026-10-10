@@ -1,8 +1,5 @@
 // Agents: the fleet of ObservaOne Agents, an install wizard for each platform, and enrollment tokens.
-import { h, api, clear, icon, fmt, ago, pill, emptyState, tabs, modal, field, toast, confirmBox, select } from '../ui.js';
-import { errorState, staleNotice } from '../personas/widgets.js';
-
-const skel = (height) => h('div', { class: 'table-wrap skeleton', style: { height } });
+import { h, api, clear, icon, fmt, ago, pill, tabs, modal, field, toast, confirmBox, select, stateView, timeEl, stateFromError } from '../ui.js';
 
 const PLATFORM = {
   linux: { label: 'Linux', hint: 'Ubuntu, RHEL, Debian, SUSE, Amazon Linux (systemd)' },
@@ -15,26 +12,21 @@ const STATUS_TONE = { online: 'solid-green', offline: 'solid-red', blocked: 'mut
 export function agentsPage(main, ctx) {
   const canManage = ctx.can('integrations.manage');
   let tab = ctx.params.get('tab') || 'fleet';
-  let data = null, info = null, filter = ctx.params.get('q') || '', platformFilter = ctx.params.get('platformFilter') || 'all', okAt = 0;
+  let data = null, info = null, filter = '', platformFilter = 'all';
   const wiz = { platform: ctx.params.get('platform') || 'linux', token: '', env: '', role: '', logs: '', cluster: '', securityLog: false };
 
   const stats = h('div', { class: 'grid cards-4', style: { marginBottom: '16px' } });
   const tabsEl = h('div', { style: { marginBottom: '14px' } });
-  const out = h('div', {}, skel('320px'));
-  const stale = h('div');
+  const out = h('div', {}, stateView('loading', { skeleton: 'table' }));
   main.append(
     h('div', { class: 'page-head' },
       h('div', {}, h('h1', {}, 'Agents'), h('p', {}, 'One agent per server sends metrics, logs and traces to ObservaOne')),
       canManage ? h('div', { class: 'actions' }, h('button', { class: 'btn btn-primary', onclick: () => go('install') }, icon('plus', 15), 'Install agent')) : null),
-    stale, stats, tabsEl, out);
+    stats, tabsEl, out);
 
-  // tab and fleet filters live in the URL (with env and range)
-  function syncUrl() {
-    history.replaceState({}, '', ctx.link('/agents', { tab: tab === 'fleet' ? '' : tab, q: tab === 'fleet' ? filter : '', platformFilter: tab === 'fleet' && platformFilter !== 'all' ? platformFilter : '', platform: tab === 'install' ? wiz.platform : '' }));
-  }
   function go(t) {
     tab = t;
-    syncUrl();
+    history.replaceState({}, '', `/agents?tab=${t}`);
     drawTabs();
     draw();
   }
@@ -64,14 +56,11 @@ export function agentsPage(main, ctx) {
     try {
       const firstLoad = !info;
       [data, info] = await Promise.all([api('/agents'), info ? Promise.resolve(info) : api('/agents/install-info')]);
-      okAt = Date.now(); clear(stale);
       drawStats();
       drawTabs();
       if (tab === 'fleet' || (tab === 'install' && firstLoad)) draw();
     } catch (e) {
-      if (data) clear(stale).append(staleNotice({ okAt, message: e.message, retry: () => ctx.refreshNow() }));
-      else clear(out).append(errorState(e.message, () => ctx.refreshNow(), 'Agents could not load'));
-      throw e;
+      clear(out).append(h('div', { class: 'table-wrap' }, stateFromError(e, 'Agents')));
     }
   }
 
@@ -83,53 +72,55 @@ export function agentsPage(main, ctx) {
 
   // ------------------------------------------------------------ fleet
   function drawFleet() {
-    if (!data) return clear(out).append(skel('320px'));
+    if (!data) return clear(out).append(h('div', { class: 'table-wrap' }, stateView('loading', { skeleton: 'table' })));
     if (!data.agents.length) {
-      return clear(out).append(h('div', { class: 'table-wrap' }, emptyState('No agents yet',
-        'Install the agent on a server and it shows up here within a minute.',
-        canManage ? h('button', { class: 'btn btn-primary', style: { marginTop: '12px' }, onclick: () => go('install') }, 'Install your first agent') : null)));
+      return clear(out).append(h('div', { class: 'table-wrap' }, stateView('empty', {
+        title: 'No agents enrolled',
+        text: canManage ? 'Install the agent on a server and it shows up here within a minute.' : 'No agent has reported yet. An administrator can install agents from this page.',
+        action: canManage ? h('button', { class: 'btn btn-primary', onclick: () => go('install') }, 'Install your first agent') : null,
+      })));
     }
     const q = filter.toLowerCase();
     const list = data.agents.filter((a) => (platformFilter === 'all' || a.platform === platformFilter)
       && (!q || [a.host, a.os, a.env, a.role, a.ip, a.cluster, a.token].join(' ').toLowerCase().includes(q)));
     const tone = (v, hi = true) => (v === null ? 'dim' : hi ? (v >= 90 ? 'c-red' : v >= 80 ? 'c-orange' : '') : (v < 10 ? 'c-red' : v < 20 ? 'c-orange' : 'c-green'));
     const toolbar = h('div', { class: 'toolbar', style: { marginBottom: '12px' } },
-      h('input', { class: 'input', type: 'search', 'aria-label': 'Filter agents', placeholder: 'Filter by host, OS, env, role, IP...', value: filter, style: { width: '280px' },
-        oninput: (e) => { filter = e.target.value; const pos = e.target.selectionStart; syncUrl(); drawFleet(); const i = out.querySelector('input'); i.focus(); i.setSelectionRange(pos, pos); } }),
-      select([['all', 'All platforms'], ...Object.entries(PLATFORM).map(([k, v]) => [k, v.label])], platformFilter, (v) => { platformFilter = v; syncUrl(); drawFleet(); }, { style: { width: '170px' }, 'aria-label': 'Platform' }),
+      h('input', { class: 'input', placeholder: 'Filter by host, OS, env, role, IP...', value: filter, style: { width: '280px' },
+        oninput: (e) => { filter = e.target.value; const pos = e.target.selectionStart; drawFleet(); const i = out.querySelector('input'); i.focus(); i.setSelectionRange(pos, pos); } }),
+      select([['all', 'All platforms'], ...Object.entries(PLATFORM).map(([k, v]) => [k, v.label])], platformFilter, (v) => { platformFilter = v; drawFleet(); }, { style: { width: '170px' }, 'aria-label': 'Filter by platform' }),
       h('div', { class: 'grow' }),
       h('span', { class: 'dim', style: { fontSize: '12px' } }, `Latest agent version: ${data.latest}`));
     const rows = list.map((a) => h('tr', {},
       h('td', {}, h('b', { style: { fontWeight: 600 } }, a.host),
         h('div', { class: 'dim', style: { fontSize: '11px' } }, [a.ip, a.cluster && `cluster ${a.cluster}`].filter(Boolean).join(' · ') || a.id)),
-      h('td', { class: 'col-phone-hide' }, PLATFORM[a.platform]?.label || a.platform, h('div', { class: 'dim', style: { fontSize: '11px' } }, [a.os, a.arch].filter(Boolean).join(' · '))),
-      h('td', { class: 'col-phone-hide' }, [a.env, a.role].filter(Boolean).join(' / ') || h('span', { class: 'dim' }, '—')),
-      h('td', { class: 'col-phone-hide' }, a.version ? (a.outdated ? h('span', { class: 'pill pill-orange', title: `Latest is ${data.latest}. Run the install command again to update.` }, `${a.version} ↑`) : a.version) : '—'),
+      h('td', {}, PLATFORM[a.platform]?.label || a.platform, h('div', { class: 'dim', style: { fontSize: '11px' } }, [a.os, a.arch].filter(Boolean).join(' · '))),
+      h('td', {}, [a.env, a.role].filter(Boolean).join(' / ') || h('span', { class: 'dim' }, '-')),
+      h('td', {}, a.version ? (a.outdated ? h('span', { class: 'pill pill-orange', title: `Latest is ${data.latest}. Run the install command again to update.` }, `${a.version} ↑`) : a.version) : '-'),
       h('td', {}, pill(a.status === 'online' ? 'Online' : a.status === 'offline' ? 'Offline' : 'Blocked', STATUS_TONE[a.status])),
-      h('td', { class: `num col-phone-hide ${tone(a.cpu)}` }, a.cpu === null ? '—' : fmt(a.cpu, 'percent')),
-      h('td', { class: `num col-phone-hide ${tone(a.mem)}` }, a.mem === null ? '—' : fmt(a.mem, 'percent')),
-      h('td', { class: `num col-phone-hide ${tone(a.diskFree, false)}` }, a.diskFree === null ? '—' : fmt(a.diskFree, 'percent')),
-      h('td', { class: 'col-phone-hide' }, a.sendFailures > 0
+      h('td', { class: `num ${tone(a.cpu)}` }, a.cpu === null ? '-' : fmt(a.cpu, 'percent')),
+      h('td', { class: `num ${tone(a.mem)}` }, a.mem === null ? '-' : fmt(a.mem, 'percent')),
+      h('td', { class: `num ${tone(a.diskFree, false)}` }, a.diskFree === null ? '-' : fmt(a.diskFree, 'percent')),
+      h('td', {}, a.sendFailures > 0
         ? h('span', { class: 'c-red', title: 'Items that failed to upload in the last 15 minutes' }, `${fmt(a.sendFailures, 'short')} failed`)
         : a.queue > 0 ? h('span', { class: 'c-orange', title: 'Items waiting to be sent' }, `${fmt(a.queue, 'short')} queued`) : h('span', { class: 'c-green' }, 'OK')),
-      h('td', { class: 'dim col-phone-hide', title: new Date(a.lastSeen).toLocaleString() }, ago(a.lastSeen)),
+      h('td', { class: 'dim' }, timeEl(Date.parse(a.lastSeen), ago(a.lastSeen))),
       h('td', { class: 'num', style: { whiteSpace: 'nowrap' } }, canManage ? [
         a.status === 'blocked'
           ? h('button', { class: 'btn btn-sm', onclick: () => act(`/agents/${encodeURIComponent(a.id)}/unblock`, 'POST', `${a.host} can send data again`) }, 'Allow')
           : h('button', { class: 'btn btn-sm', title: 'Refuse all data from this agent', onclick: async () => {
             if (await confirmBox(`Block ${a.host}?`, 'The agent keeps running but ObservaOne refuses everything it sends until you allow it again.', 'Block')) act(`/agents/${encodeURIComponent(a.id)}/block`, 'POST', `${a.host} blocked`);
           } }, 'Block'),
-        a.status !== 'online' ? h('button', { class: 'icon-btn', title: 'Forget this agent (after you uninstalled it)', 'aria-label': `Forget ${a.host}`, style: { marginLeft: '4px' }, onclick: async () => {
+        a.status !== 'online' ? h('button', { class: 'icon-btn', title: 'Forget this agent (after you uninstalled it)', style: { marginLeft: '4px' }, onclick: async () => {
           if (await confirmBox(`Forget ${a.host}?`, 'Removes it from this list. If the agent is still installed and its token is valid, it comes back the next time it sends data.', 'Forget')) act(`/agents/${encodeURIComponent(a.id)}`, 'DELETE', `${a.host} removed`);
         } }, icon('trash', 15)) : null,
       ] : null)));
     clear(out).append(toolbar, h('div', { class: 'table-wrap' }, h('table', { class: 'tbl' },
-      h('thead', {}, h('tr', {}, ['Host', 'Platform', 'Env / role', 'Version', 'Status', 'CPU', 'Memory', 'Disk free', 'Uploads', 'Last seen', h('span', { class: 'sr-only' }, 'Actions')].map((x, i) => h('th', { class: `${i >= 5 && i <= 7 ? 'num' : ''} ${[1, 2, 3, 5, 6, 7, 8, 9].includes(i) ? 'col-phone-hide' : ''}` }, x)))),
-      h('tbody', {}, rows.length ? rows : h('tr', {}, h('td', { colspan: 11, class: 'dim' }, 'No agent matches the filter. ', h('button', { class: 'linkish', onclick: () => { filter = ''; platformFilter = 'all'; syncUrl(); drawFleet(); } }, 'Clear filter')))))));
+      h('thead', {}, h('tr', {}, ['Host', 'Platform', 'Env / role', 'Version', 'Status', 'CPU', 'Memory', 'Disk free', 'Uploads', 'Last seen', ''].map((x, i) => h('th', { class: i >= 5 && i <= 7 ? 'num' : '' }, x)))),
+      h('tbody', {}, rows.length ? rows : h('tr', {}, h('td', { colspan: 11, class: 'dim' }, 'No agent matches the filter.'))))));
   }
 
   async function act(path, method, msg) {
-    try { await api(path, { method }); toast(msg); load().catch(() => {}); } catch (e) { toast(e.message, 'err'); }
+    try { await api(path, { method }); toast(msg); load(); } catch (e) { toast(e.message, 'err'); }
   }
 
   // ------------------------------------------------------------ install wizard
@@ -180,7 +171,7 @@ export function agentsPage(main, ctx) {
   }
 
   function drawInstall() {
-    if (!info) return clear(out).append(skel('320px'));
+    if (!info) return clear(out).append(h('div', { class: 'table-wrap' }, stateView('loading', { skeleton: 'table' })));
     const cmdBox = h('pre', { class: 'code', style: { whiteSpace: 'pre', overflowX: 'auto', fontSize: '12.5px', lineHeight: '1.55', margin: 0 } });
     const whereEl = h('div', { class: 'muted', style: { marginBottom: '8px' } });
     const refresh = () => { const c = commandFor(); clear(cmdBox).append(c.text); whereEl.textContent = c.where; };
@@ -192,13 +183,6 @@ export function agentsPage(main, ctx) {
     const tokenInput = h('input', { class: 'input mono', placeholder: 'oat_...', value: wiz.token, oninput: (e) => { wiz.token = e.target.value.trim(); refresh(); } });
     const input = (key, ph) => h('input', { class: 'input', placeholder: ph, value: wiz[key], oninput: (e) => { wiz[key] = e.target.value; refresh(); } });
     const c = info.cert || {};
-    // the address in the command must be on the certificate, or agents refuse to connect
-    const host = (() => { try { return new URL(info.server).hostname; } catch { return ''; } })();
-    const mismatch = c.available && c.matches === false
-      ? h('div', { class: 'error-box warn', role: 'status', style: { marginBottom: '10px' } }, icon('alert', 16),
-        h('span', {}, `The server certificate is not valid for ${host} (it covers ${c.names?.length ? c.names.join(', ') : 'other names'}), so agents will refuse to connect. `,
-          `Set SERVER_NAME=${host} in .env and run "docker compose up -d": the certificate is then re-created for it.`))
-      : null;
     const certNote = !c.available
       ? h('div', { class: 'dim' }, 'Agents trust the server certificate through the normal system certificate store.')
       : c.selfSigned
@@ -238,7 +222,6 @@ export function agentsPage(main, ctx) {
     }[wiz.platform];
 
     clear(out).append(h('div', { class: 'agent-wizard' },
-      mismatch || h('div'),
       h('div', { class: 'panel' }, h('div', { class: 'panel-head' }, h('h3', {}, '1. Where will it run?')), platformCards),
       h('div', { class: 'grid cols-2' },
         h('div', { class: 'panel' }, h('div', { class: 'panel-head' }, h('h3', {}, '2. Agent token')),
@@ -279,14 +262,14 @@ export function agentsPage(main, ctx) {
     modal('Copy the token now', h('div', {},
       h('p', {}, 'This is the only time the token is shown. It goes into the install command; the agent stores it on the server.'),
       h('pre', { class: 'code', style: { wordBreak: 'break-all' } }, token),
-      h('button', { class: 'btn', onclick: () => (navigator.clipboard ? navigator.clipboard.writeText(token).then(() => toast('Copied'), () => toast('Copy is blocked by the browser here. Select the token and copy it instead.', 'err')) : toast('Copy is blocked by the browser here. Select the token and copy it instead.', 'err')) }, 'Copy')), [
+      h('button', { class: 'btn', onclick: () => navigator.clipboard?.writeText(token).then(() => toast('Copied')) }, 'Copy')), [
       onCreated ? { label: 'Use in the install command', primary: true, onclick: () => onCreated(token) } : { label: 'Done', primary: true },
     ]);
     if (tab === 'tokens') drawTokens();
   }
 
   async function drawTokens() {
-    clear(out).append(skel('240px'));
+    clear(out).append(h('div', { class: 'table-wrap' }, stateView('loading', { skeleton: 'table' })));
     try {
       const { tokens } = await api('/agent-tokens');
       const status = (t) => (t.revoked ? pill('Revoked', 'muted') : t.expired ? pill('Expired', 'orange') : pill('Active', 'green'));
@@ -307,17 +290,16 @@ export function agentsPage(main, ctx) {
             h('td', {}, status(t)),
             h('td', { class: 'num' }, t.revoked ? null : h('button', { class: 'btn btn-sm btn-danger', onclick: async () => {
               if (!await confirmBox(`Revoke "${t.name}"?`, `${t.agents} agent(s) use this token. They stop sending data within a minute. This cannot be undone - you would install them again with a new token.`, 'Revoke')) return;
-              try { await api(`/agent-tokens/${t.id}`, { method: 'DELETE' }); toast('Token revoked'); drawTokens(); load().catch(() => {}); } catch (e) { toast(e.message, 'err'); }
-            } }, 'Revoke')))))) : emptyState('No tokens yet', 'Create a token, then use it in the install command.')));
+              try { await api(`/agent-tokens/${t.id}`, { method: 'DELETE' }); toast('Token revoked'); drawTokens(); load(); } catch (e) { toast(e.message, 'err'); }
+            } }, 'Revoke')))))) : stateView('empty', { title: 'No tokens yet', text: 'Create a token, then use it in the install command.' })));
     } catch (e) {
-      clear(out).append(errorState(e.message, () => drawTokens(), 'Tokens could not load'));
+      clear(out).append(h('div', { class: 'table-wrap' }, stateFromError(e, 'Agents')));
     }
   }
 
   drawTabs();
   draw();
-  const ready = load();
-  ready.catch(() => {});
+  load();
   // top-bar refresh and auto-refresh: only reload while looking at the fleet (keeps the wizard inputs)
-  return { refresh: () => (tab === 'fleet' ? load() : null), ready };
+  return { refresh: () => (tab === 'fleet' ? load() : null) };
 }
