@@ -111,3 +111,9 @@ From the UI/UX audit (report: "ObservaOne UI/UX Audit and Improvement Plan (v1.8
 Regression: 17 gate scripts all green (incl. new `signals.mjs` 20/20), controls audit 1,278 controls (15 fewer: the removed selector), 7-width sweep with no sideways scroll, clipped text, stray null text, Grafana link, console or API error.
 
 Still open from the audit: AUD-02 (server swallows failed queries), AUD-07 (landing source), AUD-08, AUD-09 (demo incidents), AUD-10, AUD-11, AUD-12, AUD-14–18.
+
+## Server address for agents (v1.8.5)
+
+- The agent install command used `https://localhost` on a fresh server because `PUBLIC_URL` defaults to `https://${SERVER_NAME:-localhost}`. A PUBLIC_URL pointing at localhost / 127.x / ::1 is now ignored, and the command uses the address the UI was opened with.
+- `scripts/make-cert.sh` (certs-init, now on the host network) puts the server's own IPv4 addresses and, on AWS EC2, its public IPv4 (IMDSv2) on the self-signed certificate, plus SERVER_NAME when set. An old self-signed certificate that covered only localhost, or that misses SERVER_NAME, is re-created; your own certificate is never touched.
+- Agents › Install warns when the address in the command is not on the certificate (agents would refuse to connect) and says what to set.

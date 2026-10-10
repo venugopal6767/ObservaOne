@@ -16,6 +16,9 @@ services:
   certs-init:
     image: alpine/openssl:3.5.9
     entrypoint: ["/bin/sh", "/scripts/make-cert.sh"]
+    # host network: sees the server's own IP addresses (and, on AWS, the instance metadata for the
+    # public IP), so the certificate covers the address agents use even when SERVER_NAME is not set
+    network_mode: host
     environment:
       SERVER_NAME: ${SERVER_NAME:-localhost}
     volumes:
@@ -80,7 +83,7 @@ services:
   # ---- ObservaOne: the main web UI (login, dashboards, logs, traces, alerts) ----
   observa:
     build: ./observa-ui
-    image: observa-ui:1.8.4
+    image: observa-ui:1.8.5
     environment:
       UI_BRAND: ${UI_BRAND:-ObservaOne}
       UI_ADMIN_USER: ${UI_ADMIN_USER:-admin}

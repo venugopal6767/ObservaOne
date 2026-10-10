@@ -192,6 +192,13 @@ export function agentsPage(main, ctx) {
     const tokenInput = h('input', { class: 'input mono', placeholder: 'oat_...', value: wiz.token, oninput: (e) => { wiz.token = e.target.value.trim(); refresh(); } });
     const input = (key, ph) => h('input', { class: 'input', placeholder: ph, value: wiz[key], oninput: (e) => { wiz[key] = e.target.value; refresh(); } });
     const c = info.cert || {};
+    // the address in the command must be on the certificate, or agents refuse to connect
+    const host = (() => { try { return new URL(info.server).hostname; } catch { return ''; } })();
+    const mismatch = c.available && c.matches === false
+      ? h('div', { class: 'error-box warn', role: 'status', style: { marginBottom: '10px' } }, icon('alert', 16),
+        h('span', {}, `The server certificate is not valid for ${host} (it covers ${c.names?.length ? c.names.join(', ') : 'other names'}), so agents will refuse to connect. `,
+          `Set SERVER_NAME=${host} in .env and run "docker compose up -d": the certificate is then re-created for it.`))
+      : null;
     const certNote = !c.available
       ? h('div', { class: 'dim' }, 'Agents trust the server certificate through the normal system certificate store.')
       : c.selfSigned
@@ -231,6 +238,7 @@ export function agentsPage(main, ctx) {
     }[wiz.platform];
 
     clear(out).append(h('div', { class: 'agent-wizard' },
+      mismatch || h('div'),
       h('div', { class: 'panel' }, h('div', { class: 'panel-head' }, h('h3', {}, '1. Where will it run?')), platformCards),
       h('div', { class: 'grid cols-2' },
         h('div', { class: 'panel' }, h('div', { class: 'panel-head' }, h('h3', {}, '2. Agent token')),

@@ -77,11 +77,16 @@ export async function verifyAgent(req, res) {
 }
 
 // ---------------- helpers ----------------
-function certInfo() {
+function certInfo(host = '') {
   try {
     const pem = fs.readFileSync(config.agent.serverCertFile);
     const x = new crypto.X509Certificate(pem);
+    const bare = host.replace(/^\[|\]$/g, '');
     return {
+      // names on the certificate, and whether the address in the install command is one of them
+      // (agents check this; a mismatch makes the install fail with a certificate error)
+      names: (x.subjectAltName || '').split(/,\s*/).filter(Boolean).map((s) => s.replace(/^(DNS|IP Address):/, '')),
+      matches: !bare ? null : /^[\d.]+$|:/.test(bare) ? !!x.checkIP(bare) : !!x.checkHost(bare),
       available: true,
       sha256: x.fingerprint256.replace(/:/g, '').toLowerCase(), // SHA-256 of the DER certificate (what browsers show)
       // curl --pinnedpubkey value: checked even with -k, so the installer download is safe with a self-signed cert
@@ -96,9 +101,12 @@ function certInfo() {
   }
 }
 
-// The HTTPS address agents use. PUBLIC_URL when it is https, otherwise the address the browser used (through Nginx).
+// The HTTPS address agents use. PUBLIC_URL when it is a real https address; otherwise the address
+// the browser used (through Nginx). A PUBLIC_URL pointing at localhost / 127.x / ::1 (the default when
+// SERVER_NAME is not set) is ignored, so a server opened as https://10.0.0.5/ hands out https://10.0.0.5.
+const LOOPBACK = /^https?:\/\/(localhost|127(?:\.\d+){3}|\[::1\])(?::\d+)?(?:\/|$)/i;
 function serverUrl(req) {
-  if (/^https:\/\//.test(config.publicUrl)) return config.publicUrl.replace(/:443$/, '');
+  if (/^https:\/\//.test(config.publicUrl) && !LOOPBACK.test(config.publicUrl)) return config.publicUrl.replace(/:443$/, '');
   const proto = req.get('x-forwarded-proto') || req.protocol;
   const host = req.get('x-forwarded-host') || req.get('host');
   return `${proto}://${host}`.replace(/^https:\/\/([^/]+):443$/, 'https://$1');
@@ -153,7 +161,10 @@ agentsRouter.get('/agents', requirePerm('view'), wrap(async (req, res) => {
 }));
 
 agentsRouter.get('/agents/install-info', requirePerm('view'), wrap(async (req, res) => {
-  res.json({ server: serverUrl(req), cert: certInfo(), versions: AGENT_VERSIONS, platforms: PLATFORMS });
+  const server = serverUrl(req);
+  let host = '';
+  try { host = new URL(server).hostname; } catch { /* leave empty */ }
+  res.json({ server, cert: certInfo(host), versions: AGENT_VERSIONS, platforms: PLATFORMS });
 }));
 
 agentsRouter.post('/agents/:id/block', requirePerm('integrations.manage'), wrap(async (req, res) => {

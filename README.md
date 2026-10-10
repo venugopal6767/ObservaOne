@@ -43,7 +43,10 @@ One Docker setup that gives you a monitoring website with login:
    ```
    - Passwords need 12+ characters with upper case, lower case, a number and a symbol.
    - Don't use `$ " ' \ #` or spaces.
-   - Set `SERVER_NAME` to the name or IP people will type in the browser.
+   - Set `SERVER_NAME` to the name or IP people will type in the browser. If you leave it as `localhost`, the
+     self-signed certificate still covers the server's own IP addresses (and, on AWS EC2, its public IP), and the
+     Agents page uses the address you opened the UI with. A DNS name or an Elastic IP is still best: an EC2 public IP
+     changes when the instance is stopped and started.
 3. Start everything:
    ```bash
    docker compose up -d --build
