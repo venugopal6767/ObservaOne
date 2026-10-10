@@ -93,7 +93,7 @@ func (c *Client) PostMetrics(ctx context.Context, secret, text string, collected
 	_ = zw.Close()
 	h := map[string]string{
 		// lets the server correct for a wrong clock on this host (it compares with its own time)
-		"X-Agent-Time": strconv.FormatInt(time.Now().UnixMilli(), 10),
+		"X-Agent-Time":   strconv.FormatInt(time.Now().UnixMilli(), 10),
 		"X-Collected-At": strconv.FormatInt(collectedAtMs, 10),
 	}
 	return c.do(ctx, "/api/agent/v1/metrics", secret, "text/plain; version=0.0.4", "gzip", buf.Bytes(), h, nil)
