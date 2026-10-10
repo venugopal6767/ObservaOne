@@ -1,0 +1,408 @@
+# Monitoring stack: Nginx (HTTPS) -> ObservaOne UI / Grafana / Prometheus / Alertmanager / Loki / Tempo
+# Start:  docker compose up -d --build        Stop: docker compose down
+# Only Nginx is reachable from outside. Everything else listens on the internal
+# Docker network only.
+
+name: monitoring
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  # ---- One-time setup jobs (run, finish, exit) ----------------------------
+  certs-init:
+    image: alpine/openssl:3.5.9
+    entrypoint: ["/bin/sh", "/scripts/make-cert.sh"]
+    environment:
+      SERVER_NAME: ${SERVER_NAME:-localhost}
+    volumes:
+      - ./scripts/make-cert.sh:/scripts/make-cert.sh:ro
+      - ./nginx/certs:/certs
+    restart: "no"
+
+  auth-init:
+    image: httpd:2.4-alpine
+    entrypoint: ["/bin/sh", "/scripts/make-htpasswd.sh"]
+    environment:
+      WEB_ADMIN_USER: ${WEB_ADMIN_USER:?set WEB_ADMIN_USER in .env}
+      WEB_ADMIN_PASSWORD: ${WEB_ADMIN_PASSWORD:?set WEB_ADMIN_PASSWORD in .env}
+      INGEST_USER: ${INGEST_USER:?set INGEST_USER in .env}
+      INGEST_PASSWORD: ${INGEST_PASSWORD:?set INGEST_PASSWORD in .env}
+    volumes:
+      - ./scripts/make-htpasswd.sh:/scripts/make-htpasswd.sh:ro
+      - nginx-auth:/auth
+    restart: "no"
+
+  grafana-users:
+    image: curlimages/curl:8.22.0
+    entrypoint: ["/bin/sh", "/scripts/create-users.sh"]
+    environment:
+      GRAFANA_URL: http://grafana:3000
+      GRAFANA_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GRAFANA_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env}
+      GRAFANA_OPERATOR_USER: ${GRAFANA_OPERATOR_USER:-operator}
+      GRAFANA_OPERATOR_PASSWORD: ${GRAFANA_OPERATOR_PASSWORD:?set GRAFANA_OPERATOR_PASSWORD in .env}
+      GRAFANA_VIEWER_USER: ${GRAFANA_VIEWER_USER:-viewer}
+      GRAFANA_VIEWER_PASSWORD: ${GRAFANA_VIEWER_PASSWORD:?set GRAFANA_VIEWER_PASSWORD in .env}
+    volumes:
+      - ./scripts/create-users.sh:/scripts/create-users.sh:ro
+    depends_on:
+      grafana:
+        condition: service_healthy
+    restart: "no"
+
+  # ---- Long-running services ---------------------------------------------
+  nginx:
+    image: nginx:1.30-alpine
+    ports:
+      - "${HTTPS_PORT:-443}:443"
+      - "${HTTP_PORT:-80}:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+      - nginx-auth:/etc/nginx/auth:ro
+      - ./agent:/usr/share/nginx/agent:ro   # ObservaOne Agent installers (+ binaries from scripts/fetch-agent-files.sh)
+    depends_on:
+      certs-init:
+        condition: service_completed_successfully
+      auth-init:
+        condition: service_completed_successfully
+      observa:
+        condition: service_healthy
+      grafana:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *logging
+
+  # ---- ObservaOne: the main web UI (login, dashboards, logs, traces, alerts) ----
+  observa:
+    build: ./observa-ui
+    image: observa-ui:1.8.2
+    environment:
+      UI_BRAND: ${UI_BRAND:-ObservaOne}
+      UI_ADMIN_USER: ${UI_ADMIN_USER:-admin}
+      UI_ADMIN_EMAIL: ${UI_ADMIN_EMAIL:-}
+      UI_ADMIN_PASSWORD: ${UI_ADMIN_PASSWORD:?set UI_ADMIN_PASSWORD in .env}
+      UI_OPERATOR_USER: ${UI_OPERATOR_USER:-operator}
+      UI_OPERATOR_EMAIL: ${UI_OPERATOR_EMAIL:-}
+      UI_OPERATOR_PASSWORD: ${UI_OPERATOR_PASSWORD:-}
+      UI_VIEWER_USER: ${UI_VIEWER_USER:-viewer}
+      UI_VIEWER_EMAIL: ${UI_VIEWER_EMAIL:-}
+      UI_VIEWER_PASSWORD: ${UI_VIEWER_PASSWORD:-}
+      SESSION_IDLE_MINUTES: ${SESSION_IDLE_MINUTES:-30}
+      SESSION_MAX_HOURS: ${SESSION_MAX_HOURS:-8}
+      PROMETHEUS_URL: http://prometheus:9090/prometheus
+      ALERTMANAGER_URL: http://alertmanager:9093/alertmanager
+      LOKI_URL: http://loki:3100
+      LOKI_MODE: ${LOKI_MODE:-demo}
+      TEMPO_URL: http://tempo:3200
+      TEMPO_MODE: ${TEMPO_MODE:-demo}
+      SERVICES_MODE: ${SERVICES_MODE:-demo}
+      GRAFANA_URL: http://grafana:3000
+      GRAFANA_PUBLIC_URL: /grafana/
+      UI_RULES_FILE: /etc/prometheus-ui/ui-rules.yml
+      AUDIT_RETENTION_DAYS: ${AUDIT_RETENTION_DAYS:-365}
+      DB_HOST: observa-db
+      DB_NAME: observa
+      DB_USER: observa
+      DB_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+      # ---- wave 1: sign-in and access ----
+      PUBLIC_URL: ${PUBLIC_URL:-https://${SERVER_NAME:-localhost}:${HTTPS_PORT:-443}}
+      APP_SECRET: ${APP_SECRET:-}           # empty = generated once and kept in /data/app-secret
+      # Company SSO (any OpenID Connect provider: Entra ID, Okta, Keycloak, Auth0, ...)
+      OIDC_LABEL: ${OIDC_LABEL:-Company SSO}
+      OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:-}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
+      OIDC_SCOPES: ${OIDC_SCOPES:-openid profile email}
+      OIDC_USERNAME_CLAIM: ${OIDC_USERNAME_CLAIM:-preferred_username}
+      OIDC_GROUPS_CLAIM: ${OIDC_GROUPS_CLAIM:-groups}
+      OIDC_ROLE_MAP: ${OIDC_ROLE_MAP:-}
+      OIDC_DEFAULT_ROLE: ${OIDC_DEFAULT_ROLE-viewer}   # set to empty to refuse users without a mapped group
+      # Google
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GOOGLE_ALLOWED_DOMAINS: ${GOOGLE_ALLOWED_DOMAINS:-}
+      GOOGLE_ROLE_MAP: ${GOOGLE_ROLE_MAP:-}
+      GOOGLE_DEFAULT_ROLE: ${GOOGLE_DEFAULT_ROLE-viewer}
+      # GitHub / GitHub Enterprise
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
+      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
+      GITHUB_URL: ${GITHUB_URL:-https://github.com}
+      GITHUB_API_URL: ${GITHUB_API_URL:-https://api.github.com}
+      GITHUB_ALLOWED_ORGS: ${GITHUB_ALLOWED_ORGS:-}
+      GITHUB_ROLE_MAP: ${GITHUB_ROLE_MAP:-}
+      GITHUB_DEFAULT_ROLE: ${GITHUB_DEFAULT_ROLE-viewer}
+      # LDAP / Active Directory
+      LDAP_URL: ${LDAP_URL:-}
+      LDAP_BIND_DN: ${LDAP_BIND_DN:-}
+      LDAP_BIND_PASSWORD: ${LDAP_BIND_PASSWORD:-}
+      LDAP_BASE_DN: ${LDAP_BASE_DN:-}
+      LDAP_USER_FILTER: ${LDAP_USER_FILTER:-}
+      LDAP_GROUP_ATTR: ${LDAP_GROUP_ATTR:-memberOf}
+      LDAP_ROLE_MAP: ${LDAP_ROLE_MAP:-}
+      LDAP_DEFAULT_ROLE: ${LDAP_DEFAULT_ROLE:-}
+      LDAP_START_TLS: ${LDAP_START_TLS:-false}
+      LDAP_CA_FILE: ${LDAP_CA_FILE:-}
+      LDAP_TLS_INSECURE: ${LDAP_TLS_INSECURE:-false}
+    volumes:
+      - observa-data:/data            # app secret (MFA encryption key) + one-time import of the old JSON data
+      - ./observa-ui/config:/app/config:ro
+      - ./nginx/certs/server.crt:/certs/server.crt:ro   # fingerprint for agent install commands
+      - ui-rules:/etc/prometheus-ui
+    depends_on:
+      certs-init:
+        condition: service_completed_successfully
+      observa-db:
+        condition: service_healthy
+      prometheus:
+        condition: service_healthy
+      alertmanager:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *logging
+
+  # ---- PostgreSQL: the UI's database (users, sessions, dashboards, settings, audit log) ----
+  observa-db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: observa
+      POSTGRES_USER: observa
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+    volumes:
+      - observa-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U observa -d observa"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+    logging: *logging
+
+  grafana:
+    image: grafana/grafana:12.4.12
+    environment:
+      GF_SERVER_DOMAIN: ${SERVER_NAME:-localhost}
+      GF_SERVER_ROOT_URL: https://${SERVER_NAME:-localhost}/grafana/
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env}
+      GF_SECURITY_COOKIE_SECURE: "true"
+      GF_SECURITY_COOKIE_SAMESITE: "strict"
+      GF_SECURITY_DISABLE_GRAVATAR: "true"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_USERS_ALLOW_ORG_CREATE: "false"
+      GF_USERS_DEFAULT_THEME: "dark"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_AUTH_BASIC_PASSWORD_POLICY: "true"
+      GF_AUTH_LOGIN_MAXIMUM_INACTIVE_LIFETIME_DURATION: "30m"
+      GF_AUTH_LOGIN_MAXIMUM_LIFETIME_DURATION: "8h"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/overview.json
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/etc/grafana/dashboards:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health >/dev/null 2>&1 || curl -fsS http://localhost:3000/api/health >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+    logging: *logging
+
+  prometheus:
+    image: prom/prometheus:v3.15.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROM_RETENTION:-30d}
+      - --web.external-url=https://${SERVER_NAME:-localhost}/prometheus/
+      - --web.enable-lifecycle
+      - --web.enable-remote-write-receiver   # ObservaOne Agents push metrics (through Nginx, token checked)
+    volumes:
+      - ./prometheus:/etc/prometheus:ro
+      - ui-rules:/etc/prometheus-ui:ro
+      - prometheus-data:/prometheus
+    extra_hosts:
+      # lets the lab scrape windows_exporter on the Docker host itself
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/prometheus/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+    logging: *logging
+
+  alertmanager:
+    image: prom/alertmanager:v0.34.1
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+      - --web.external-url=https://${SERVER_NAME:-localhost}/alertmanager/
+    volumes:
+      - ./alertmanager:/etc/alertmanager:ro
+      - alertmanager-data:/alertmanager
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9093/alertmanager/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+    logging: *logging
+
+  # ---- Loki: logs (servers push to https://SERVER/loki/api/v1/push) ----
+  loki:
+    image: grafana/loki:3.7.8
+    command: ["-config.file=/etc/loki/loki.yml"]
+    volumes:
+      - ./loki/loki.yml:/etc/loki/loki.yml:ro
+      - loki-data:/loki
+    restart: unless-stopped
+    logging: *logging
+
+  # ---- Tempo: traces (apps send OTLP to https://SERVER/otlp/v1/traces) ----
+  tempo-init:
+    image: alpine/openssl:3.5.9          # the Tempo image has no shell tools; this small one does
+    user: root
+    entrypoint: ["/bin/sh", "-c", "chown -R 10001:10001 /var/tempo"]
+    volumes:
+      - tempo-data:/var/tempo
+    restart: "no"
+
+  tempo:
+    image: grafana/tempo:2.10.8
+    command: ["-config.file=/etc/tempo.yml"]
+    volumes:
+      - ./tempo/tempo.yml:/etc/tempo.yml:ro
+      - tempo-data:/var/tempo
+    depends_on:
+      tempo-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    logging: *logging
+
+  # Monitors the machine that runs this stack (Linux host, or the Docker Desktop VM on Windows)
+  node-exporter:
+    image: prom/node-exporter:v1.12.1
+    command:
+      - --path.rootfs=/host
+    pid: host
+    volumes:
+      - /:/host:ro
+    restart: unless-stopped
+    logging: *logging
+
+  # ---- ObservaOne Agent for THIS Docker host (optional, lab / single machine) ----
+  # Watches the machine Docker runs on (Docker Desktop: its Linux VM) and every container.
+  # 1) Agents page -> Tokens -> New token, put it in .env as AGENT_TOKEN
+  # 2) docker compose --profile agent up -d
+  # Other servers: use the install command from the Agents page instead.
+  agent:
+    image: otel/opentelemetry-collector-contrib:0.162.0
+    profiles: [agent]
+    command: ["--config=/etc/observaone-agent/config.yaml"]
+    user: "0"                       # reads container log files (read-only)
+    environment:
+      OBSERVA_SERVER: https://nginx                       # inside Docker: straight to Nginx
+      OBSERVA_TLS_SERVER_NAME: ${SERVER_NAME:-localhost}  # the name on the server certificate
+      OBSERVA_CA_FILE: /etc/observaone-agent/ca.crt
+      OBSERVA_TOKEN_FILE: /etc/observaone-agent-token/token
+      OBSERVA_HOST: ${AGENT_HOST:-docker-host}
+      OBSERVA_AGENT_ID: ${AGENT_HOST:-docker-host}
+      OBSERVA_ENV: ${AGENT_ENV:-lab}
+      OBSERVA_ROLE: monitoring
+      OBSERVA_OS: Docker host
+      OBSERVA_ARCH: ""
+      OBSERVA_AGENT_VERSION: 1.0.0
+      OBSERVA_NODE_EXPORTER: agent-node-exporter:9101
+      OBSERVA_CADVISOR: agent-cadvisor:9338
+      OBSERVA_OTLP_BIND: 0.0.0.0
+      OBSERVA_LOG_FILES: '["/var/log/syslog", "/var/log/messages"]'
+    ports:
+      - "127.0.0.1:4317:4317"       # apps on this machine send traces here (gRPC)
+      - "127.0.0.1:4318:4318"       # ... or here (HTTP)
+    volumes:
+      - ./agent/configs/docker.yaml:/etc/observaone-agent/config.yaml:ro
+      - ./nginx/certs/server.crt:/etc/observaone-agent/ca.crt:ro
+      - agent-data:/var/lib/observaone-agent
+      - agent-token:/etc/observaone-agent-token:ro
+      - /var/log:/var/log:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [DAC_READ_SEARCH]
+    security_opt: ["no-new-privileges:true"]
+    depends_on:
+      agent-token-init:
+        condition: service_completed_successfully
+      nginx:
+        condition: service_started
+      agent-node-exporter:
+        condition: service_started
+    restart: unless-stopped
+    logging: *logging
+
+  # writes AGENT_TOKEN from .env into a file only the agent reads
+  agent-token-init:
+    image: alpine/openssl:3.5.9
+    profiles: [agent]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        case "$$AGENT_TOKEN" in oat_*) ;; *) echo "Set AGENT_TOKEN in .env (Agents page -> Tokens -> New token)"; exit 1 ;; esac
+        printf '%s' "$$AGENT_TOKEN" > /token/token && chmod 0400 /token/token && echo "agent token saved"
+    environment:
+      AGENT_TOKEN: ${AGENT_TOKEN:-}
+    volumes:
+      - agent-token:/token
+    restart: "no"
+
+  agent-node-exporter:
+    image: prom/node-exporter:v1.12.1
+    profiles: [agent]
+    command:
+      - --path.rootfs=/host
+      - --web.listen-address=:9101
+      - --collector.filesystem.mount-points-exclude=^/(dev|proc|sys|run|var/lib/docker/.+)($$|/)
+    pid: host
+    volumes:
+      - /:/host:ro,rslave
+    read_only: true
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    logging: *logging
+
+  agent-cadvisor:
+    image: ghcr.io/google/cadvisor:v0.60.6
+    profiles: [agent]
+    command: ["--port=9338", "--docker_only=true", "--housekeeping_interval=30s", "--store_container_labels=false", "--enable_metrics=cpu,memory,network,diskIO,oom_event"]
+    privileged: true                # cAdvisor needs this to read container statistics
+    devices: ["/dev/kmsg"]
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    restart: unless-stopped
+    logging: *logging
+
+volumes:
+  grafana-data:
+  prometheus-data:
+  alertmanager-data:
+  nginx-auth:
+  observa-data:
+  observa-db-data:
+  ui-rules:
+  loki-data:
+  tempo-data:
+  agent-data:
+  agent-token:

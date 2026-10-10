@@ -1,0 +1,76 @@
+{
+  "id": "infrastructure-overview",
+  "title": "Infrastructure Overview",
+  "description": "All Windows and Linux servers: health, CPU, memory, disk",
+  "tags": [
+    "system"
+  ],
+  "grafanaUid": "server-overview",
+  "variables": [],
+  "panels": [
+    {
+      "title": "Servers UP",
+      "type": "stat",
+      "query": "sum(up{job=~\"windows|linux\"})",
+      "unit": "none",
+      "legend": "",
+      "w": 3
+    },
+    {
+      "title": "Servers DOWN",
+      "type": "stat",
+      "query": "count(up{job=~\"windows|linux\"} == 0) or vector(0)",
+      "unit": "none",
+      "legend": "",
+      "w": 3
+    },
+    {
+      "title": "Average CPU",
+      "type": "stat",
+      "query": "avg(clamp(max by (host) (100 - avg by (instance, host) (rate(windows_cpu_time_total{mode=\"idle\"}[5m])) * 100), 0, 100) or clamp(max by (host) (100 - avg by (instance, host) (rate(node_cpu_seconds_total{mode=\"idle\"}[5m])) * 100), 0, 100))",
+      "unit": "percent",
+      "legend": "",
+      "w": 3
+    },
+    {
+      "title": "Average memory",
+      "type": "stat",
+      "query": "avg(max by (host) (100 * (1 - windows_memory_available_bytes / windows_memory_physical_total_bytes)) or max by (host) (100 * (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)))",
+      "unit": "percent",
+      "legend": "",
+      "w": 3
+    },
+    {
+      "title": "CPU used by server",
+      "type": "line",
+      "query": "clamp(max by (host) (100 - avg by (instance, host) (rate(windows_cpu_time_total{mode=\"idle\"}[5m])) * 100), 0, 100) or clamp(max by (host) (100 - avg by (instance, host) (rate(node_cpu_seconds_total{mode=\"idle\"}[5m])) * 100), 0, 100)",
+      "unit": "percent",
+      "legend": "{{host}}",
+      "w": 6
+    },
+    {
+      "title": "Memory used by server",
+      "type": "area",
+      "query": "max by (host) (100 * (1 - windows_memory_available_bytes / windows_memory_physical_total_bytes)) or max by (host) (100 * (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes))",
+      "unit": "percent",
+      "legend": "{{host}}",
+      "w": 6
+    },
+    {
+      "title": "Lowest disk free by server",
+      "type": "bar",
+      "query": "min by (host) (100 * windows_logical_disk_free_bytes{volume!~\"HarddiskVolume.*\"} / windows_logical_disk_size_bytes{volume!~\"HarddiskVolume.*\"}) or min by (host) (100 * node_filesystem_avail_bytes{fstype!~\"tmpfs|overlay|squashfs|ramfs|nsfs|fuse.*\"} / node_filesystem_size_bytes{fstype!~\"tmpfs|overlay|squashfs|ramfs|nsfs|fuse.*\"})",
+      "unit": "percent",
+      "legend": "{{host}}",
+      "w": 6
+    },
+    {
+      "title": "Server status",
+      "type": "table",
+      "query": "up{job=~\"windows|linux\"}",
+      "unit": "none",
+      "legend": "{{host}}",
+      "w": 6
+    }
+  ]
+}

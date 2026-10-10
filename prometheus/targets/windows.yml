@@ -1,0 +1,24 @@
+# Windows servers to monitor. One entry per server: "name-or-ip:9182".
+# Prometheus re-reads this file every minute. No restart needed.
+# Labels are free text; they show in dashboards and alert emails.
+
+# LAB: windows_exporter running on the same PC as Docker Desktop
+- targets:
+    - "host.docker.internal:9182"
+  labels:
+    env: lab
+    role: test
+
+# REAL SERVERS: remove the "#" and put your server names
+# - targets:
+#     - "winapp01.example.local:9182"
+#     - "winapp02.example.local:9182"
+#   labels:
+#     env: prod
+#     role: app
+#
+# - targets:
+#     - "winsql01.example.local:9182"
+#   labels:
+#     env: prod
+#     role: database

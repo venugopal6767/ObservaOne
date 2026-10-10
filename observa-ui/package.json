@@ -1,0 +1,25 @@
+{
+  "name": "observa-ui",
+  "version": "1.8.2",
+  "description": "ObservaOne - monitoring UI with login on top of Prometheus, Alertmanager, Loki and Tempo",
+  "private": true,
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@fontsource/inter": "5.3.0",
+    "bcryptjs": "3.0.3",
+    "chart.js": "4.5.1",
+    "express": "5.2.1",
+    "ldapts": "9.2.0",
+    "openid-client": "6.8.8",
+    "pg": "8.23.1",
+    "qrcode": "1.5.4",
+    "yaml": "2.9.1"
+  }
+}

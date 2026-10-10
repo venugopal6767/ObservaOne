@@ -1,0 +1,107 @@
+{
+  "id": "linux-servers",
+  "title": "Linux Servers",
+  "description": "node_exporter: CPU, memory, disk and network per server",
+  "tags": [
+    "system"
+  ],
+  "grafanaUid": "linux-servers",
+  "variables": [
+    {
+      "name": "host",
+      "label": "Server",
+      "label_name": "host",
+      "match": "up{job=\"linux\"}"
+    }
+  ],
+  "panels": [
+    {
+      "title": "Status",
+      "type": "stat",
+      "query": "up{job=\"linux\",host=\"$host\"}",
+      "unit": "none",
+      "legend": "",
+      "w": 3
+    },
+    {
+      "title": "CPU used",
+      "type": "stat",
+      "query": "clamp(100 - (avg(rate(node_cpu_seconds_total{host=\"$host\",mode=\"idle\"}[5m])) * 100), 0, 100)",
+      "unit": "percent",
+      "legend": "",
+      "w": 3
+    },
+    {
+      "title": "Memory used",
+      "type": "stat",
+      "query": "100 * (1 - node_memory_MemAvailable_bytes{host=\"$host\"} / node_memory_MemTotal_bytes{host=\"$host\"})",
+      "unit": "percent",
+      "legend": "",
+      "w": 3
+    },
+    {
+      "title": "Uptime",
+      "type": "stat",
+      "query": "time() - node_boot_time_seconds{host=\"$host\"}",
+      "unit": "s",
+      "legend": "",
+      "w": 3
+    },
+    {
+      "title": "CPU used %",
+      "type": "line",
+      "query": "clamp(100 - (avg(rate(node_cpu_seconds_total{host=\"$host\",mode=\"idle\"}[5m])) * 100), 0, 100)",
+      "unit": "percent",
+      "legend": "CPU",
+      "w": 6
+    },
+    {
+      "title": "Memory in use",
+      "type": "area",
+      "query": "node_memory_MemTotal_bytes{host=\"$host\"} - node_memory_MemAvailable_bytes{host=\"$host\"}",
+      "unit": "bytes",
+      "legend": "In use",
+      "w": 6
+    },
+    {
+      "title": "Filesystem free %",
+      "type": "bar",
+      "query": "100 * node_filesystem_avail_bytes{host=\"$host\",fstype!~\"tmpfs|overlay|squashfs|ramfs|nsfs|fuse.*\"} / node_filesystem_size_bytes{host=\"$host\",fstype!~\"tmpfs|overlay|squashfs|ramfs|nsfs|fuse.*\"}",
+      "unit": "percent",
+      "legend": "{{mountpoint}}",
+      "w": 4
+    },
+    {
+      "title": "Load average (1m)",
+      "type": "line",
+      "query": "node_load1{host=\"$host\"}",
+      "unit": "none",
+      "legend": "load1",
+      "w": 4
+    },
+    {
+      "title": "Disk IOPS",
+      "type": "line",
+      "query": "rate(node_disk_reads_completed_total{host=\"$host\"}[5m]) + rate(node_disk_writes_completed_total{host=\"$host\"}[5m])",
+      "unit": "iops",
+      "legend": "{{device}}",
+      "w": 4
+    },
+    {
+      "title": "Network in",
+      "type": "area",
+      "query": "rate(node_network_receive_bytes_total{host=\"$host\",device!~\"lo|veth.*|docker.*|br-.*\"}[5m]) * 8",
+      "unit": "bps",
+      "legend": "{{device}}",
+      "w": 6
+    },
+    {
+      "title": "Network out",
+      "type": "area",
+      "query": "rate(node_network_transmit_bytes_total{host=\"$host\",device!~\"lo|veth.*|docker.*|br-.*\"}[5m]) * 8",
+      "unit": "bps",
+      "legend": "{{device}}",
+      "w": 6
+    }
+  ]
+}

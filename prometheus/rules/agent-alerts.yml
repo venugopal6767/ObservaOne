@@ -1,0 +1,38 @@
+# Alerts for servers that send data through the ObservaOne Agent.
+# Pushed data has no "scrape failed" signal, so "agent stopped" = we saw it in the last 24 h but not in the last 3 minutes.
+# After editing: docker compose restart prometheus
+
+groups:
+  - name: observaone-agent
+    rules:
+      - alert: AgentNotReporting
+        expr: |
+          max by (host, job) (max_over_time(up{agent="observaone", job=~"linux|windows"}[24h]))
+          unless on (host, job)
+          max by (host, job) (max_over_time(up{agent="observaone", job=~"linux|windows"}[3m]))
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Server {{ $labels.host }} stopped sending data"
+          description: "The ObservaOne Agent on {{ $labels.host }} has sent nothing for 5 minutes. The server is down, the agent service stopped, or the network to the monitoring server is blocked. If the server was removed on purpose, forget it on the Agents page."
+
+      - alert: AgentSendFailures
+        expr: |
+          sum by (host) (rate({__name__=~"otelcol_exporter_send_failed_(metric_points|log_records|spans)_total", agent="observaone"}[10m])) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "ObservaOne Agent on {{ $labels.host }} cannot upload all data"
+          description: "Uploads are being refused or failing for 15 minutes. Check the token on the Agents page and the agent log (journalctl -u observaone-agent, or the Windows event log)."
+
+      - alert: AgentQueueFilling
+        expr: |
+          max by (host) (otelcol_exporter_queue_size{agent="observaone"} / otelcol_exporter_queue_capacity{agent="observaone"}) > 0.8
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "ObservaOne Agent queue on {{ $labels.host }} is over 80% full"
+          description: "The agent is holding data it could not send yet. If the queue fills up, new data is dropped."

@@ -1,0 +1,128 @@
+# Alert rules. Thresholds are starting points - tune them to your servers.
+# After editing: docker compose restart prometheus
+
+groups:
+  - name: availability
+    rules:
+      - alert: ServerDown
+        expr: up{job=~"windows|linux"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Server {{ $labels.host }} is not reachable"
+          description: "Prometheus cannot read metrics from {{ $labels.instance }} ({{ $labels.os }}) for 2 minutes. The server or its exporter is down, or the firewall blocks it."
+
+      - alert: ExporterCollectorFailing
+        expr: windows_exporter_collector_success == 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "windows_exporter collector '{{ $labels.collector }}' fails on {{ $labels.host }}"
+          description: "Some metrics from {{ $labels.instance }} are missing. Check the windows_exporter service log."
+
+  - name: windows
+    rules:
+      - alert: WindowsHighCPU
+        expr: 100 - (avg by (instance, host, env, role) (rate(windows_cpu_time_total{mode="idle"}[5m])) * 100) > 90
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High CPU on {{ $labels.host }}: {{ $value | printf \"%.0f\" }}%"
+          description: "CPU has been above 90% for 10 minutes."
+
+      - alert: WindowsHighMemory
+        expr: 100 * (1 - windows_memory_available_bytes / windows_memory_physical_total_bytes) > 90
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High memory on {{ $labels.host }}: {{ $value | printf \"%.0f\" }}%"
+          description: "Memory in use has been above 90% for 10 minutes."
+
+      - alert: WindowsDiskSpaceLow
+        expr: 100 * windows_logical_disk_free_bytes{volume!~"HarddiskVolume.*"} / windows_logical_disk_size_bytes{volume!~"HarddiskVolume.*"} < 20
+        for: 15m   # disk size/free values update only every 10-15 minutes
+        labels:
+          severity: warning
+        annotations:
+          summary: "Disk {{ $labels.volume }} on {{ $labels.host }} has {{ $value | printf \"%.0f\" }}% free"
+          description: "Free space is below 20%."
+
+      - alert: WindowsDiskSpaceCritical
+        expr: 100 * windows_logical_disk_free_bytes{volume!~"HarddiskVolume.*"} / windows_logical_disk_size_bytes{volume!~"HarddiskVolume.*"} < 10
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Disk {{ $labels.volume }} on {{ $labels.host }} has only {{ $value | printf \"%.0f\" }}% free"
+          description: "Free space is below 10%. Clean up or extend the disk now."
+
+      - alert: WindowsNetworkErrors
+        expr: rate(windows_net_packets_received_errors_total[5m]) + rate(windows_net_packets_outbound_errors_total[5m]) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Network errors on {{ $labels.host }} ({{ $labels.nic }})"
+          description: "More than 1 packet error per second for 10 minutes."
+
+  - name: linux
+    rules:
+      - alert: LinuxHighCPU
+        expr: 100 - (avg by (instance, host, env, role) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 90
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High CPU on {{ $labels.host }}: {{ $value | printf \"%.0f\" }}%"
+          description: "CPU has been above 90% for 10 minutes."
+
+      - alert: LinuxHighMemory
+        expr: 100 * (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) > 90
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High memory on {{ $labels.host }}: {{ $value | printf \"%.0f\" }}%"
+          description: "Memory in use has been above 90% for 10 minutes."
+
+      - alert: LinuxDiskSpaceLow
+        expr: 100 * node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs|nsfs|fuse.*"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs|nsfs|fuse.*"} < 20
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Filesystem {{ $labels.mountpoint }} on {{ $labels.host }} has {{ $value | printf \"%.0f\" }}% free"
+          description: "Free space is below 20%."
+
+      - alert: LinuxDiskSpaceCritical
+        expr: 100 * node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs|nsfs|fuse.*"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs|nsfs|fuse.*"} < 10
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Filesystem {{ $labels.mountpoint }} on {{ $labels.host }} has only {{ $value | printf \"%.0f\" }}% free"
+          description: "Free space is below 10%. Clean up or extend the disk now."
+
+  - name: monitoring-stack
+    rules:
+      - alert: PrometheusConfigReloadFailed
+        expr: prometheus_config_last_reload_successful == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Prometheus config reload failed"
+          description: "Your last change to prometheus.yml or a rules file has an error. Check: docker compose logs prometheus"
+
+      - alert: AlertmanagerNotificationsFailing
+        expr: rate(alertmanager_notifications_failed_total[10m]) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Alertmanager cannot send {{ $labels.integration }} notifications"
+          description: "Check the SMTP settings in alertmanager/alertmanager.yml."

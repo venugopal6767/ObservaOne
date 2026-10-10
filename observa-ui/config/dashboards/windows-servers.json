@@ -1,0 +1,107 @@
+{
+  "id": "windows-servers",
+  "title": "Windows Servers",
+  "description": "windows_exporter: CPU, memory, disk and network per server",
+  "tags": [
+    "system"
+  ],
+  "grafanaUid": "windows-servers",
+  "variables": [
+    {
+      "name": "host",
+      "label": "Server",
+      "label_name": "host",
+      "match": "up{job=\"windows\"}"
+    }
+  ],
+  "panels": [
+    {
+      "title": "Status",
+      "type": "stat",
+      "query": "up{job=\"windows\",host=\"$host\"}",
+      "unit": "none",
+      "legend": "",
+      "w": 3
+    },
+    {
+      "title": "CPU used",
+      "type": "stat",
+      "query": "clamp(100 - (avg(rate(windows_cpu_time_total{host=\"$host\",mode=\"idle\"}[5m])) * 100), 0, 100)",
+      "unit": "percent",
+      "legend": "",
+      "w": 3
+    },
+    {
+      "title": "Memory used",
+      "type": "stat",
+      "query": "100 * (1 - windows_memory_available_bytes{host=\"$host\"} / windows_memory_physical_total_bytes{host=\"$host\"})",
+      "unit": "percent",
+      "legend": "",
+      "w": 3
+    },
+    {
+      "title": "Uptime",
+      "type": "stat",
+      "query": "time() - windows_system_boot_time_timestamp{host=\"$host\"}",
+      "unit": "s",
+      "legend": "",
+      "w": 3
+    },
+    {
+      "title": "CPU used %",
+      "type": "line",
+      "query": "clamp(100 - (avg(rate(windows_cpu_time_total{host=\"$host\",mode=\"idle\"}[5m])) * 100), 0, 100)",
+      "unit": "percent",
+      "legend": "CPU",
+      "w": 6
+    },
+    {
+      "title": "Memory in use",
+      "type": "area",
+      "query": "windows_memory_physical_total_bytes{host=\"$host\"} - windows_memory_available_bytes{host=\"$host\"}",
+      "unit": "bytes",
+      "legend": "In use",
+      "w": 6
+    },
+    {
+      "title": "Disk free % per volume",
+      "type": "bar",
+      "query": "100 * windows_logical_disk_free_bytes{host=\"$host\",volume!~\"HarddiskVolume.*\"} / windows_logical_disk_size_bytes{host=\"$host\",volume!~\"HarddiskVolume.*\"}",
+      "unit": "percent",
+      "legend": "{{volume}}",
+      "w": 4
+    },
+    {
+      "title": "Disk IOPS",
+      "type": "line",
+      "query": "rate(windows_logical_disk_reads_total{host=\"$host\",volume!~\"HarddiskVolume.*\"}[5m]) + rate(windows_logical_disk_writes_total{host=\"$host\",volume!~\"HarddiskVolume.*\"}[5m])",
+      "unit": "iops",
+      "legend": "{{volume}}",
+      "w": 4
+    },
+    {
+      "title": "Disk read latency",
+      "type": "line",
+      "query": "rate(windows_logical_disk_read_seconds_total{host=\"$host\",volume!~\"HarddiskVolume.*\"}[5m]) / rate(windows_logical_disk_reads_total{host=\"$host\",volume!~\"HarddiskVolume.*\"}[5m])",
+      "unit": "s",
+      "legend": "{{volume}}",
+      "w": 4
+    },
+    {
+      "title": "Network in",
+      "type": "area",
+      "query": "rate(windows_net_bytes_received_total{host=\"$host\"}[5m]) * 8",
+      "unit": "bps",
+      "legend": "{{nic}}",
+      "w": 6
+    },
+    {
+      "title": "Network out",
+      "type": "area",
+      "query": "rate(windows_net_bytes_sent_total{host=\"$host\"}[5m]) * 8",
+      "unit": "bps",
+      "legend": "{{nic}}",
+      "w": 6
+    }
+  ]
+}

@@ -1,0 +1,70 @@
+# ObservaOne Agent for Docker hosts. Installed by:  install.sh --docker  (into /opt/observaone-agent)
+# Settings: /opt/observaone-agent/.env    Token/CA: /etc/observaone-agent/
+#   docker compose up -d        start / update
+#   docker compose logs agent   see what the agent is doing
+name: observaone-agent
+
+x-logging: &logging
+  driver: json-file
+  options: { max-size: "10m", max-file: "3" }
+
+services:
+  agent:
+    image: otel/opentelemetry-collector-contrib:${OTEL_VERSION:-0.162.0}
+    command: ["--config=/etc/observaone-agent/config.yaml"]
+    user: "0"                       # needed to read /var/lib/docker/containers/*/ logs (read-only mounts)
+    network_mode: host              # sees node_exporter/cAdvisor on 127.0.0.1, apps send traces to this host
+    env_file: .env
+    environment:
+      OBSERVA_OTLP_BIND: ${OBSERVA_OTLP_BIND:-127.0.0.1}
+    volumes:
+      - /etc/observaone-agent:/etc/observaone-agent:ro
+      - agent-data:/var/lib/observaone-agent
+      - /var/log:/var/log:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [DAC_READ_SEARCH]
+    security_opt: ["no-new-privileges:true"]
+    depends_on: [node-exporter, cadvisor]
+    restart: unless-stopped
+    logging: *logging
+
+  node-exporter:
+    image: prom/node-exporter:v${NODE_EXPORTER_VERSION:-1.12.1}
+    command:
+      - --path.rootfs=/host
+      - --web.listen-address=127.0.0.1:9101
+      - --collector.filesystem.mount-points-exclude=^/(dev|proc|sys|run|var/lib/docker/.+)($|/)
+    network_mode: host
+    pid: host
+    volumes:
+      - /:/host:ro,rslave
+    read_only: true
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    logging: *logging
+
+  cadvisor:
+    image: ghcr.io/google/cadvisor:v${CADVISOR_VERSION:-0.60.6}
+    command:
+      - --listen_ip=127.0.0.1
+      - --port=9338
+      - --docker_only=true
+      - --housekeeping_interval=30s
+      - --store_container_labels=false
+      - --enable_metrics=cpu,memory,network,diskIO,oom_event
+    network_mode: host
+    privileged: true                # cAdvisor needs this to read container statistics
+    devices: ["/dev/kmsg"]
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    restart: unless-stopped
+    logging: *logging
+
+volumes:
+  agent-data:

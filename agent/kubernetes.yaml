@@ -1,0 +1,592 @@
+# ObservaOne Agent for Kubernetes / OpenShift
+#
+# 1) Create the namespace and the secret (the Agents page shows this command with your values):
+#      kubectl create namespace observaone
+#      kubectl -n observaone create secret generic observaone-agent \
+#        --from-literal=server=https://monitor.example.local \
+#        --from-literal=token=oat_xxx \
+#        --from-literal=cluster=prod-cluster \
+#        [--from-file=ca.crt=server.crt --from-literal=caFile=/etc/observaone-agent/ca.crt]
+# 2) kubectl apply -f kubernetes.yaml
+#
+# What runs:
+#   DaemonSet  observaone-agent          one per node: node metrics, container metrics (kubelet/cAdvisor),
+#                                        pod logs, and an OpenTelemetry endpoint for traces on the node IP
+#   Deployment observaone-cluster-agent  one per cluster: Kubernetes events + kube-state-metrics
+#   Deployment kube-state-metrics        object state (deployments, pods, restarts, ...)
+# OpenShift: also run  oc adm policy add-scc-to-user privileged -z observaone-agent -n observaone
+# Apps send traces to $(NODE_IP):4317 (gRPC) or http://$(NODE_IP):4318 - set NODE_IP from status.hostIP.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: observaone
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: observaone-agent
+  namespace: observaone
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: observaone-agent
+rules:
+  - apiGroups: [""]
+    resources: [nodes, nodes/metrics, nodes/stats, nodes/proxy]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [pods, namespaces, nodes]
+    verbs: [get, list, watch]
+  - apiGroups: [apps]
+    resources: [replicasets]
+    verbs: [get, list, watch]
+  - apiGroups: [events.k8s.io]
+    resources: [events]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: observaone-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: observaone-agent
+subjects:
+  - kind: ServiceAccount
+    name: observaone-agent
+    namespace: observaone
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: observaone-agent-node
+  namespace: observaone
+data:
+  config.yaml: |
+    extensions:
+      bearertokenauth:
+        filename: /etc/observaone-agent/token
+      file_storage:
+        directory: /var/lib/observaone-agent/queue
+        create_directory: true
+      health_check:
+        endpoint: 0.0.0.0:13133
+    receivers:
+      prometheus:
+        config:
+          scrape_configs:
+            - job_name: linux
+              scrape_interval: 30s
+              scrape_timeout: 20s
+              static_configs:
+                - targets: ["127.0.0.1:9101"]
+                  labels:
+                    host: "${env:K8S_NODE_NAME}"
+                    os: linux
+                    env: "${env:OBSERVA_ENV}"
+                    role: kubernetes-node
+                    cluster: "${env:OBSERVA_CLUSTER}"
+                    platform: kubernetes
+                    agent: observaone
+            - job_name: kubernetes-cadvisor
+              scrape_interval: 30s
+              scrape_timeout: 20s
+              scheme: https
+              metrics_path: /metrics/cadvisor
+              authorization:
+                credentials_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+              tls_config:
+                insecure_skip_verify: true      # kubelet serving certificates are usually self-signed
+              static_configs:
+                - targets: ["${env:K8S_NODE_IP}:10250"]
+                  labels:
+                    host: "${env:K8S_NODE_NAME}"
+                    cluster: "${env:OBSERVA_CLUSTER}"
+                    env: "${env:OBSERVA_ENV}"
+                    platform: kubernetes
+                    agent: observaone
+              metric_relabel_configs:
+                - source_labels: [__name__]
+                  regex: "container_(cpu_usage_seconds_total|cpu_cfs_throttled_periods_total|cpu_cfs_periods_total|memory_working_set_bytes|spec_memory_limit_bytes|network_(receive|transmit)_bytes_total|fs_(reads|writes)_bytes_total|oom_events_total)"
+                  action: keep
+                - source_labels: [container]
+                  regex: ""
+                  action: drop
+                - regex: "id|image|name"
+                  action: labeldrop
+            - job_name: observaone-agent
+              scrape_interval: 60s
+              static_configs:
+                - targets: ["127.0.0.1:8888"]
+                  labels:
+                    host: "${env:K8S_NODE_NAME}"
+                    cluster: "${env:OBSERVA_CLUSTER}"
+                    platform: kubernetes
+                    agent: observaone
+      file_log:
+        include: [/var/log/pods/*/*/*.log]
+        exclude: [/var/log/pods/observaone_*/*/*.log]
+        start_at: end
+        include_file_path: true
+        max_log_size: 64KiB
+        storage: file_storage
+        operators:
+          - type: container
+            id: container-parser
+      otlp:
+        protocols:
+          grpc:
+            endpoint: ${env:K8S_NODE_IP}:4317
+          http:
+            endpoint: ${env:K8S_NODE_IP}:4318
+    processors:
+      memory_limiter:
+        check_interval: 2s
+        limit_mib: 400
+        spike_limit_mib: 100
+      transform/metrics:
+        metric_statements:
+          - set(scope.name, "")
+          - set(scope.version, "")
+      resource/metrics:
+        attributes:
+          - { key: service.instance.id, value: "${env:K8S_NODE_NAME}", action: upsert }
+      resource/logs:
+        attributes:
+          - { key: service.name, from_attribute: k8s.container.name, action: insert }
+      resource/host:
+        attributes:
+          - { key: host.name, value: "${env:K8S_NODE_NAME}", action: upsert }
+          - { key: os.type, value: linux, action: upsert }
+          - { key: k8s.node.name, value: "${env:K8S_NODE_NAME}", action: upsert }
+          - { key: k8s.cluster.name, value: "${env:OBSERVA_CLUSTER}", action: upsert }
+      k8s_attributes:
+        auth_type: serviceAccount
+        filter:
+          node_from_env_var: K8S_NODE_NAME
+        extract:
+          metadata: [k8s.namespace.name, k8s.pod.name, k8s.deployment.name, k8s.container.name]
+        pod_association:
+          - sources: [{ from: resource_attribute, name: k8s.pod.ip }]
+          - sources: [{ from: connection }]
+      batch:
+        send_batch_size: 2000
+        timeout: 5s
+    exporters:
+      prometheus_remote_write:
+        endpoint: ${env:OBSERVA_SERVER}/ingest/agent/metrics
+        auth:
+          authenticator: bearertokenauth
+        headers: &headers
+          X-Agent-Id: "k8s:${env:OBSERVA_CLUSTER}:${env:K8S_NODE_NAME}"
+          X-Agent-Host: "${env:K8S_NODE_NAME}"
+          X-Agent-Platform: kubernetes
+          X-Agent-Os: "Kubernetes node"
+          X-Agent-Arch: "${env:OBSERVA_ARCH}"
+          X-Agent-Version: "1.0.0"
+          X-Agent-Env: "${env:OBSERVA_ENV}"
+          X-Agent-Role: kubernetes-node
+          X-Agent-Cluster: "${env:OBSERVA_CLUSTER}"
+        tls: &tls
+          ca_file: "${env:OBSERVA_CA_FILE}"
+        target_info:
+          enabled: false
+        remote_write_queue:
+          queue_size: 20000        # kept in memory while the server is unreachable (logs/traces queue on disk)
+      otlp_http/logs:
+        logs_endpoint: ${env:OBSERVA_SERVER}/ingest/agent/v1/logs
+        auth:
+          authenticator: bearertokenauth
+        headers: *headers
+        tls: *tls
+        sending_queue:
+          storage: file_storage
+      otlp_http/traces:
+        traces_endpoint: ${env:OBSERVA_SERVER}/ingest/agent/v1/traces
+        auth:
+          authenticator: bearertokenauth
+        headers: *headers
+        tls: *tls
+        sending_queue:
+          storage: file_storage
+    service:
+      extensions: [bearertokenauth, file_storage, health_check]
+      telemetry:
+        resource:
+          attributes:
+            - name: service.name
+              value: observaone-agent
+        logs:
+          level: warn
+        metrics:
+          level: normal
+          readers:
+            - pull:
+                exporter:
+                  prometheus:
+                    host: 127.0.0.1
+                    port: 8888
+      pipelines:
+        metrics:
+          receivers: [prometheus]
+          processors: [memory_limiter, transform/metrics, resource/metrics, batch]
+          exporters: [prometheus_remote_write]
+        logs:
+          receivers: [file_log]
+          processors: [memory_limiter, resource/logs, resource/host, batch]
+          exporters: [otlp_http/logs]
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, k8s_attributes, resource/host, batch]
+          exporters: [otlp_http/traces]
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: observaone-agent
+  namespace: observaone
+  labels: { app.kubernetes.io/name: observaone-agent }
+spec:
+  selector:
+    matchLabels: { app.kubernetes.io/name: observaone-agent }
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate: { maxUnavailable: 10% }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: observaone-agent }
+    spec:
+      serviceAccountName: observaone-agent
+      hostNetwork: true                  # node_exporter sees the node's network; traces on the node IP
+      hostPID: true
+      dnsPolicy: ClusterFirstWithHostNet
+      priorityClassName: system-node-critical
+      tolerations:
+        - operator: Exists               # run on every node, control plane included
+      containers:
+        - name: agent
+          image: otel/opentelemetry-collector-contrib:0.162.0
+          args: ["--config=/conf/config.yaml"]
+          env:
+            - { name: K8S_NODE_NAME, valueFrom: { fieldRef: { fieldPath: spec.nodeName } } }
+            - { name: K8S_NODE_IP, valueFrom: { fieldRef: { fieldPath: status.hostIP } } }
+            - { name: OBSERVA_SERVER, valueFrom: { secretKeyRef: { name: observaone-agent, key: server } } }
+            - { name: OBSERVA_CLUSTER, valueFrom: { secretKeyRef: { name: observaone-agent, key: cluster, optional: true } } }
+            - { name: OBSERVA_ENV, valueFrom: { secretKeyRef: { name: observaone-agent, key: env, optional: true } } }
+            - { name: OBSERVA_CA_FILE, valueFrom: { secretKeyRef: { name: observaone-agent, key: caFile, optional: true } } }
+            - { name: OBSERVA_ARCH, value: "" }
+            - { name: GOMEMLIMIT, value: "400MiB" }
+          ports:
+            - { name: otlp-grpc, containerPort: 4317, hostPort: 4317 }
+            - { name: otlp-http, containerPort: 4318, hostPort: 4318 }
+          resources:
+            requests: { cpu: 100m, memory: 200Mi }
+            limits: { memory: 500Mi }
+          securityContext:
+            runAsUser: 0                 # pod log files are owned by root
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          livenessProbe:
+            httpGet: { path: /, port: 13133 }
+            initialDelaySeconds: 20
+          volumeMounts:
+            - { name: conf, mountPath: /conf }
+            - { name: secret, mountPath: /etc/observaone-agent, readOnly: true }
+            - { name: data, mountPath: /var/lib/observaone-agent }
+            - { name: podlogs, mountPath: /var/log/pods, readOnly: true }
+        - name: node-exporter
+          image: quay.io/prometheus/node-exporter:v1.12.1
+          args:
+            - --path.rootfs=/host
+            - --web.listen-address=127.0.0.1:9101
+            - --collector.filesystem.mount-points-exclude=^/(dev|proc|sys|run|var/lib/(docker|kubelet|containers)/.+)($|/)
+          resources:
+            requests: { cpu: 20m, memory: 30Mi }
+            limits: { memory: 100Mi }
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: rootfs, mountPath: /host, readOnly: true, mountPropagation: HostToContainer }
+      volumes:
+        - name: conf
+          configMap: { name: observaone-agent-node }
+        - name: secret
+          secret:
+            secretName: observaone-agent
+            defaultMode: 0400
+        - name: data
+          hostPath: { path: /var/lib/observaone-agent, type: DirectoryOrCreate }
+        - name: podlogs
+          hostPath: { path: /var/log/pods }
+        - name: rootfs
+          hostPath: { path: / }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: observaone-agent-cluster
+  namespace: observaone
+data:
+  config.yaml: |
+    extensions:
+      bearertokenauth:
+        filename: /etc/observaone-agent/token
+      health_check:
+        endpoint: 0.0.0.0:13133
+    receivers:
+      prometheus:
+        config:
+          scrape_configs:
+            - job_name: kube-state-metrics
+              scrape_interval: 30s
+              scrape_timeout: 25s
+              static_configs:
+                - targets: ["kube-state-metrics.observaone.svc:8080"]
+                  labels:
+                    cluster: "${env:OBSERVA_CLUSTER}"
+                    env: "${env:OBSERVA_ENV}"
+                    platform: kubernetes
+                    agent: observaone
+            - job_name: observaone-agent
+              scrape_interval: 60s
+              static_configs:
+                - targets: ["127.0.0.1:8888"]
+                  labels:
+                    host: "${env:OBSERVA_CLUSTER}-cluster-agent"
+                    cluster: "${env:OBSERVA_CLUSTER}"
+                    platform: kubernetes
+                    agent: observaone
+      k8s_objects:
+        auth_type: serviceAccount
+        objects:
+          - name: events
+            group: events.k8s.io
+            mode: watch
+    processors:
+      memory_limiter:
+        check_interval: 2s
+        limit_mib: 200
+        spike_limit_mib: 50
+      transform/metrics:
+        metric_statements:
+          - set(scope.name, "")
+          - set(scope.version, "")
+      # Kubernetes events -> readable log lines
+      resource/metrics:
+        attributes:
+          - { key: service.instance.id, value: "${env:OBSERVA_CLUSTER}-cluster-agent", action: upsert }
+      transform/events:
+        log_statements:
+          - set(log.attributes["k8s.namespace.name"], log.body["object"]["metadata"]["namespace"]) where IsMap(log.body) and log.body["object"] != nil
+          - set(log.attributes["reason"], log.body["object"]["reason"]) where IsMap(log.body) and log.body["object"] != nil
+          - set(log.attributes["object"], Concat([log.body["object"]["regarding"]["kind"], log.body["object"]["regarding"]["name"]], "/")) where IsMap(log.body) and log.body["object"] != nil and log.body["object"]["regarding"] != nil
+          - set(log.severity_number, 13) where IsMap(log.body) and log.body["object"] != nil and log.body["object"]["type"] == "Warning"
+          - set(log.severity_text, "WARN") where log.severity_number == 13
+          - set(log.severity_number, 9) where log.severity_number == 0
+          - set(log.severity_text, "INFO") where log.severity_number == 9
+          - set(log.body, Concat([log.attributes["object"], log.attributes["reason"], log.body["object"]["note"]], " ")) where IsMap(log.body) and log.body["object"] != nil
+      groupbyattrs/ns:
+        keys: [k8s.namespace.name]
+      resource/events:
+        attributes:
+          - { key: service.name, value: kubernetes-events, action: upsert }
+          - { key: k8s.cluster.name, value: "${env:OBSERVA_CLUSTER}", action: upsert }
+          - { key: host.name, value: "${env:OBSERVA_CLUSTER}-cluster-agent", action: upsert }
+      batch: {}
+    exporters:
+      prometheus_remote_write:
+        endpoint: ${env:OBSERVA_SERVER}/ingest/agent/metrics
+        auth:
+          authenticator: bearertokenauth
+        headers: &headers
+          X-Agent-Id: "k8s:${env:OBSERVA_CLUSTER}:cluster-agent"
+          X-Agent-Host: "${env:OBSERVA_CLUSTER}-cluster-agent"
+          X-Agent-Platform: kubernetes
+          X-Agent-Os: "Kubernetes cluster agent"
+          X-Agent-Version: "1.0.0"
+          X-Agent-Env: "${env:OBSERVA_ENV}"
+          X-Agent-Role: cluster-agent
+          X-Agent-Cluster: "${env:OBSERVA_CLUSTER}"
+        tls: &tls
+          ca_file: "${env:OBSERVA_CA_FILE}"
+        target_info:
+          enabled: false
+      otlp_http/logs:
+        logs_endpoint: ${env:OBSERVA_SERVER}/ingest/agent/v1/logs
+        auth:
+          authenticator: bearertokenauth
+        headers: *headers
+        tls: *tls
+    service:
+      extensions: [bearertokenauth, health_check]
+      telemetry:
+        resource:
+          attributes:
+            - name: service.name
+              value: observaone-agent
+        logs:
+          level: warn
+        metrics:
+          level: normal
+          readers:
+            - pull:
+                exporter:
+                  prometheus:
+                    host: 127.0.0.1
+                    port: 8888
+      pipelines:
+        metrics:
+          receivers: [prometheus]
+          processors: [memory_limiter, transform/metrics, resource/metrics, batch]
+          exporters: [prometheus_remote_write]
+        logs:
+          receivers: [k8s_objects]
+          processors: [memory_limiter, transform/events, groupbyattrs/ns, resource/events, batch]
+          exporters: [otlp_http/logs]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: observaone-cluster-agent
+  namespace: observaone
+  labels: { app.kubernetes.io/name: observaone-cluster-agent }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: observaone-cluster-agent }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: observaone-cluster-agent }
+    spec:
+      serviceAccountName: observaone-agent
+      containers:
+        - name: agent
+          image: otel/opentelemetry-collector-contrib:0.162.0
+          args: ["--config=/conf/config.yaml"]
+          env:
+            - { name: OBSERVA_SERVER, valueFrom: { secretKeyRef: { name: observaone-agent, key: server } } }
+            - { name: OBSERVA_CLUSTER, valueFrom: { secretKeyRef: { name: observaone-agent, key: cluster, optional: true } } }
+            - { name: OBSERVA_ENV, valueFrom: { secretKeyRef: { name: observaone-agent, key: env, optional: true } } }
+            - { name: OBSERVA_CA_FILE, valueFrom: { secretKeyRef: { name: observaone-agent, key: caFile, optional: true } } }
+            - { name: GOMEMLIMIT, value: "200MiB" }
+          resources:
+            requests: { cpu: 50m, memory: 100Mi }
+            limits: { memory: 300Mi }
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          livenessProbe:
+            httpGet: { path: /, port: 13133 }
+            initialDelaySeconds: 20
+          volumeMounts:
+            - { name: conf, mountPath: /conf }
+            - { name: secret, mountPath: /etc/observaone-agent, readOnly: true }
+      volumes:
+        - name: conf
+          configMap: { name: observaone-agent-cluster }
+        - name: secret
+          secret: { secretName: observaone-agent, defaultMode: 0444 }
+---
+# ---- kube-state-metrics (state of deployments, pods, nodes, jobs, ...) ----
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kube-state-metrics
+  namespace: observaone
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: observaone-kube-state-metrics
+rules:
+  - apiGroups: [""]
+    resources: [nodes, pods, services, namespaces, persistentvolumeclaims, persistentvolumes, resourcequotas, limitranges, replicationcontrollers, endpoints]
+    verbs: [list, watch]
+  - apiGroups: [apps]
+    resources: [daemonsets, deployments, replicasets, statefulsets]
+    verbs: [list, watch]
+  - apiGroups: [batch]
+    resources: [cronjobs, jobs]
+    verbs: [list, watch]
+  - apiGroups: [autoscaling]
+    resources: [horizontalpodautoscalers]
+    verbs: [list, watch]
+  - apiGroups: [policy]
+    resources: [poddisruptionbudgets]
+    verbs: [list, watch]
+  - apiGroups: [networking.k8s.io]
+    resources: [ingresses]
+    verbs: [list, watch]
+  - apiGroups: [storage.k8s.io]
+    resources: [storageclasses]
+    verbs: [list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: observaone-kube-state-metrics
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: observaone-kube-state-metrics
+subjects:
+  - kind: ServiceAccount
+    name: kube-state-metrics
+    namespace: observaone
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kube-state-metrics
+  namespace: observaone
+  labels: { app.kubernetes.io/name: kube-state-metrics }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: kube-state-metrics }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: kube-state-metrics }
+    spec:
+      serviceAccountName: kube-state-metrics
+      containers:
+        - name: kube-state-metrics
+          image: registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.20.0
+          args:
+            - --resources=nodes,pods,services,namespaces,persistentvolumeclaims,persistentvolumes,resourcequotas,limitranges,replicationcontrollers,endpoints,daemonsets,deployments,replicasets,statefulsets,cronjobs,jobs,horizontalpodautoscalers,poddisruptionbudgets,ingresses,storageclasses
+          ports:
+            - { name: http, containerPort: 8080 }
+          resources:
+            requests: { cpu: 20m, memory: 64Mi }
+            limits: { memory: 256Mi }
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8081 }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kube-state-metrics
+  namespace: observaone
+spec:
+  selector: { app.kubernetes.io/name: kube-state-metrics }
+  ports:
+    - { name: http, port: 8080, targetPort: 8080 }

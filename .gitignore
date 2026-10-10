@@ -1,0 +1,13 @@
+# secrets and local data - never commit
+.env
+nginx/certs/*
+!nginx/certs/.gitkeep
+observa-ui/node_modules/
+observa-ui/data/
+**/data/
+# agent binaries mirrored by scripts/fetch-agent-files.sh (large, downloaded on the server)
+agent/files/*
+!agent/files/README.txt
+*.log
+.DS_Store
+observa-ui/preview/dist/

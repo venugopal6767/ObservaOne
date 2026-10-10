@@ -1,0 +1,87 @@
+# Prometheus main config.
+# To add servers, edit the files in prometheus/targets/ (no restart needed).
+# After editing THIS file, reload:  docker compose restart prometheus
+
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+  external_labels:
+    site: dc1            # change to your data-centre name
+
+# Agents push metrics; accept samples that arrive up to 30 min late (after a network outage)
+storage:
+  tsdb:
+    out_of_order_time_window: 30m
+
+rule_files:
+  - /etc/prometheus/rules/*.yml
+  - /etc/prometheus-ui/*.yml      # rules created in the ObservaOne UI
+
+alerting:
+  alertmanagers:
+    - path_prefix: /alertmanager
+      static_configs:
+        - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  # ---- Windows servers (windows_exporter on port 9182) ----
+  - job_name: windows
+    scrape_interval: 60s
+    scrape_timeout: 30s
+    file_sd_configs:
+      - files: ["/etc/prometheus/targets/windows*.yml"]
+        refresh_interval: 1m
+    relabel_configs:
+      - target_label: os
+        replacement: windows
+      # "host" = server name without the port, used in dashboards and alerts
+      - source_labels: [__address__]
+        regex: "([^:]+)(?::\\d+)?"
+        target_label: host
+        replacement: "$1"
+    # Production: use HTTPS + client certificate (see README, "Hardening")
+    # scheme: https
+    # tls_config:
+    #   ca_file: /etc/prometheus/tls/my-ca.pem
+    #   cert_file: /etc/prometheus/tls/prometheus.crt
+    #   key_file: /etc/prometheus/tls/prometheus.key
+
+  # ---- Linux servers (node_exporter on port 9100) ----
+  - job_name: linux
+    static_configs:
+      - targets: ["node-exporter:9100"]   # the monitoring server itself
+        labels:
+          role: monitoring
+    file_sd_configs:
+      - files: ["/etc/prometheus/targets/linux*.yml"]
+        refresh_interval: 1m
+    relabel_configs:
+      - target_label: os
+        replacement: linux
+      - source_labels: [__address__]
+        regex: "([^:]+)(?::\\d+)?"
+        target_label: host
+        replacement: "$1"
+      - source_labels: [__address__]
+        regex: "node-exporter:9100"
+        target_label: host
+        replacement: "monitoring-server"
+
+  # ---- The monitoring stack watches itself ----
+  - job_name: prometheus
+    metrics_path: /prometheus/metrics
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  - job_name: alertmanager
+    metrics_path: /alertmanager/metrics
+    static_configs:
+      - targets: ["alertmanager:9093"]
+
+  - job_name: grafana
+    static_configs:
+      - targets: ["grafana:3000"]
+
+  - job_name: observa-stack
+    static_configs:
+      - targets: ["loki:3100", "tempo:3200"]

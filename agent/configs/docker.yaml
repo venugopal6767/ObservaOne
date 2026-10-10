@@ -1,0 +1,226 @@
+# ObservaOne Agent - Docker host (runs as containers, see agent/docker-compose.yml)
+# Settings come from /opt/observaone-agent/.env.
+# What it does:
+#   metrics : node_exporter (host) + cAdvisor (every container) every 30 s
+#   logs    : host log files + every container's stdout/stderr
+#   traces  : apps send OpenTelemetry traces to <this host>:4317 (gRPC) / 4318 (HTTP)
+# Everything is sent over HTTPS to ${OBSERVA_SERVER}/ingest/agent/... with the agent token.
+# If the server is unreachable, data waits in /var/lib/observaone-agent and is sent later.
+
+extensions:
+  bearertokenauth:
+    filename: ${env:OBSERVA_TOKEN_FILE:-/etc/observaone-agent/token}
+  file_storage:
+    directory: /var/lib/observaone-agent/queue
+    create_directory: true
+  health_check:
+    endpoint: 127.0.0.1:13133
+
+receivers:
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: linux
+          scrape_interval: 30s
+          scrape_timeout: 20s
+          static_configs:
+            - targets: ["${env:OBSERVA_NODE_EXPORTER:-127.0.0.1:9101}"]
+              labels:
+                host: "${env:OBSERVA_HOST}"
+                os: linux
+                env: "${env:OBSERVA_ENV}"
+                role: "${env:OBSERVA_ROLE}"
+                platform: docker
+                agent: observaone
+        - job_name: docker
+          scrape_interval: 30s
+          scrape_timeout: 20s
+          static_configs:
+            - targets: ["${env:OBSERVA_CADVISOR:-127.0.0.1:9338}"]
+              labels:
+                host: "${env:OBSERVA_HOST}"
+                env: "${env:OBSERVA_ENV}"
+                platform: docker
+                agent: observaone
+          metric_relabel_configs:
+            # keep the useful container series, drop cAdvisor's per-cgroup noise
+            - source_labels: [__name__]
+              regex: "container_(cpu_usage_seconds_total|memory_working_set_bytes|memory_usage_bytes|spec_memory_limit_bytes|network_(receive|transmit)_bytes_total|fs_(reads|writes)_bytes_total|last_seen|start_time_seconds|oom_events_total)|machine_.*"
+              action: keep
+            - source_labels: [name]
+              regex: ""
+              action: drop
+        - job_name: observaone-agent
+          scrape_interval: 60s
+          static_configs:
+            - targets: ["127.0.0.1:8888"]
+              labels:
+                host: "${env:OBSERVA_HOST}"
+                os: linux
+                env: "${env:OBSERVA_ENV}"
+                platform: docker
+                agent: observaone
+
+  file_log:
+    include: ${env:OBSERVA_LOG_FILES}
+    exclude: [/var/log/observaone-agent/*, "/var/log/*.gz", "/var/log/*.[0-9]"]
+    start_at: end
+    include_file_name: true
+    include_file_path: true
+    max_log_size: 64KiB
+    storage: file_storage
+
+  # stdout/stderr of every container (json-file log driver, the Docker default)
+  file_log/containers:
+    include: [/var/lib/docker/containers/*/*-json.log]
+    start_at: end
+    include_file_path: true
+    max_log_size: 64KiB
+    storage: file_storage
+    operators:
+      - type: json_parser
+        timestamp:
+          parse_from: attributes.time
+          layout_type: gotime
+          layout: "2006-01-02T15:04:05.999999999Z07:00"
+      - type: move
+        from: attributes.log
+        to: body
+      - type: move
+        if: 'attributes.stream != nil'
+        from: attributes.stream
+        to: attributes["log.iostream"]
+      - type: regex_parser
+        parse_from: attributes["log.file.path"]
+        regex: '^/var/lib/docker/containers/(?P<container_id>[0-9a-f]{12})'
+
+  otlp:
+    protocols:
+      grpc:
+        endpoint: "${env:OBSERVA_OTLP_BIND}:4317"
+      http:
+        endpoint: "${env:OBSERVA_OTLP_BIND}:4318"
+
+processors:
+  memory_limiter:
+    check_interval: 2s
+    limit_mib: 300
+    spike_limit_mib: 80
+
+  # Prometheus label noise from the collector itself
+  transform/metrics:
+    metric_statements:
+      - set(scope.name, "")
+      - set(scope.version, "")
+
+  # Turn journal entries and syslog lines into "service + message"
+  transform/logs:
+    log_statements:
+      - set(log.attributes["service"], log.body["SYSLOG_IDENTIFIER"]) where IsMap(log.body) and log.body["SYSLOG_IDENTIFIER"] != nil
+      - set(log.attributes["systemd_unit"], log.body["_SYSTEMD_UNIT"]) where IsMap(log.body) and log.body["_SYSTEMD_UNIT"] != nil
+      - set(log.severity_number, 17) where IsMap(log.body) and log.body["PRIORITY"] != nil and Int(log.body["PRIORITY"]) <= 3
+      - set(log.severity_number, 13) where IsMap(log.body) and log.body["PRIORITY"] != nil and Int(log.body["PRIORITY"]) == 4
+      - set(log.severity_number, 9) where log.severity_number == 0 and IsMap(log.body) and log.body["PRIORITY"] != nil
+      - set(log.body, log.body["MESSAGE"]) where IsMap(log.body) and log.body["MESSAGE"] != nil
+      - merge_maps(log.attributes, ExtractPatterns(log.body, "^(?:\\w{3}\\s+\\d+\\s[\\d:]+|\\d{4}-\\d\\d-\\d\\dT\\S+)\\s\\S+\\s(?P<service>[^\\[:\\s]+)"), "insert") where log.attributes["service"] == nil and IsString(log.body) and log.attributes["log.file.name"] != nil and IsMatch(log.attributes["log.file.name"], "^(syslog|messages|secure|auth\\.log|kern\\.log|cron|maillog)$")
+      # containers: the "tag" log option if you set one ({{.Name}}), else the short container id
+      - set(log.attributes["service"], log.attributes["attrs"]["tag"]) where log.attributes["service"] == nil and log.attributes["attrs"] != nil and log.attributes["attrs"]["tag"] != nil
+      - set(log.attributes["service"], Concat(["container", log.attributes["container_id"]], "-")) where log.attributes["service"] == nil and log.attributes["container_id"] != nil
+      - set(log.attributes["service"], log.attributes["log.file.name"]) where log.attributes["service"] == nil and log.attributes["log.file.name"] != nil
+      - replace_pattern(log.attributes["service"], "\\.log$", "")
+
+  groupbyattrs/service:
+    keys: [service]
+
+  resource/logs:
+    attributes:
+      - { key: service.name, from_attribute: service, action: upsert }
+      - { key: service, action: delete }
+      - { key: service.name, value: system, action: insert }
+
+  resource/host:
+    attributes:
+      - { key: host.name, value: "${env:OBSERVA_HOST}", action: upsert }
+      - { key: os.type, value: linux, action: upsert }
+      - { key: observaone.agent.id, value: "${env:OBSERVA_AGENT_ID}", action: upsert }
+
+  # stable "instance" label (= host name) instead of a new random id after every restart
+  resource/metrics:
+    attributes:
+      - { key: service.instance.id, value: "${env:OBSERVA_HOST}", action: upsert }
+
+  batch:
+    send_batch_size: 2000
+    timeout: 5s
+
+exporters:
+  prometheus_remote_write:
+    endpoint: ${env:OBSERVA_SERVER}/ingest/agent/metrics
+    auth:
+      authenticator: bearertokenauth
+    headers: &headers
+      X-Agent-Id: "${env:OBSERVA_AGENT_ID}"
+      X-Agent-Host: "${env:OBSERVA_HOST}"
+      X-Agent-Platform: docker
+      X-Agent-Os: "${env:OBSERVA_OS}"
+      X-Agent-Arch: "${env:OBSERVA_ARCH}"
+      X-Agent-Version: "${env:OBSERVA_AGENT_VERSION}"
+      X-Agent-Env: "${env:OBSERVA_ENV}"
+      X-Agent-Role: "${env:OBSERVA_ROLE}"
+    tls: &tls
+      ca_file: "${env:OBSERVA_CA_FILE}"
+      # name on the server certificate, when it differs from the address used (lab: https://nginx -> "localhost")
+      server_name_override: "${env:OBSERVA_TLS_SERVER_NAME:-}"
+    target_info:
+      enabled: false
+    remote_write_queue:
+      queue_size: 20000        # kept in memory while the server is unreachable (logs/traces queue on disk)
+
+  otlp_http/logs:
+    logs_endpoint: ${env:OBSERVA_SERVER}/ingest/agent/v1/logs
+    auth:
+      authenticator: bearertokenauth
+    headers: *headers
+    tls: *tls
+    sending_queue:
+      storage: file_storage
+
+  otlp_http/traces:
+    traces_endpoint: ${env:OBSERVA_SERVER}/ingest/agent/v1/traces
+    auth:
+      authenticator: bearertokenauth
+    headers: *headers
+    tls: *tls
+    sending_queue:
+      storage: file_storage
+
+service:
+  extensions: [bearertokenauth, file_storage, health_check]
+  telemetry:
+    resource:
+      attributes:
+        - name: service.name
+          value: observaone-agent
+    logs:
+      level: warn
+    metrics:
+      level: normal
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 127.0.0.1
+                port: 8888
+  pipelines:
+    metrics:
+      receivers: [prometheus]
+      processors: [memory_limiter, transform/metrics, resource/metrics, batch]
+      exporters: [prometheus_remote_write]
+    logs:
+      receivers: [file_log, file_log/containers]
+      processors: [memory_limiter, transform/logs, groupbyattrs/service, resource/logs, resource/host, batch]
+      exporters: [otlp_http/logs]
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resource/host, batch]
+      exporters: [otlp_http/traces]

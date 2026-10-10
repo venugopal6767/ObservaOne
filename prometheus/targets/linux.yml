@@ -1,0 +1,12 @@
+# Linux servers to monitor. One entry per server: "name-or-ip:9100" (node_exporter).
+# Prometheus re-reads this file every minute. No restart needed.
+# The monitoring server itself is already included (see prometheus.yml).
+
+[]
+
+# Example (replace the [] above with this):
+# - targets:
+#     - "lnxapp01.example.local:9100"
+#   labels:
+#     env: prod
+#     role: app

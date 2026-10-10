@@ -1,0 +1,39 @@
+# Alertmanager: decides who gets which alert, and how.
+# Out of the box alerts are only SHOWN (Grafana + Alertmanager page), not emailed.
+# To turn on email: fill the smtp_* lines and the email_configs block, then
+#   docker compose restart alertmanager
+
+global:
+  resolve_timeout: 5m
+  # smtp_smarthost: "smtp.example.local:587"
+  # smtp_from: "monitoring@example.local"
+  # smtp_auth_username: "monitoring@example.local"
+  # smtp_auth_password: "CHANGE-ME"
+  # smtp_require_tls: true
+
+route:
+  receiver: platform-team
+  group_by: ["alertname", "host"]
+  group_wait: 30s        # wait to batch alerts that start together
+  group_interval: 5m
+  repeat_interval: 4h    # re-send if still firing
+  routes:
+    - matchers: ['severity="critical"']
+      receiver: platform-team
+      repeat_interval: 1h
+
+receivers:
+  - name: platform-team
+    # email_configs:
+    #   - to: "platform-team@example.local"
+    #     send_resolved: true
+
+# If a server is down, don't also send its CPU/disk warnings
+inhibit_rules:
+  - source_matchers: ['alertname="ServerDown"']
+    target_matchers: ['severity="warning"']
+    equal: ["instance"]
+  # Disk "critical" hides the "low" warning for the same disk
+  - source_matchers: ['severity="critical"']
+    target_matchers: ['severity="warning"']
+    equal: ["instance", "volume", "mountpoint"]

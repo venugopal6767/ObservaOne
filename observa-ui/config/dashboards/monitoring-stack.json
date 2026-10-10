@@ -1,0 +1,75 @@
+{
+  "id": "monitoring-stack",
+  "title": "Monitoring Stack Health",
+  "description": "Prometheus, Alertmanager and scrape health of this platform",
+  "tags": [
+    "system"
+  ],
+  "variables": [],
+  "panels": [
+    {
+      "title": "Targets UP",
+      "type": "stat",
+      "query": "sum(up)",
+      "unit": "none",
+      "legend": "",
+      "w": 3
+    },
+    {
+      "title": "Targets DOWN",
+      "type": "stat",
+      "query": "count(up == 0) or vector(0)",
+      "unit": "none",
+      "legend": "",
+      "w": 3
+    },
+    {
+      "title": "Active series",
+      "type": "stat",
+      "query": "prometheus_tsdb_head_series",
+      "unit": "short",
+      "legend": "",
+      "w": 3
+    },
+    {
+      "title": "Samples / sec",
+      "type": "stat",
+      "query": "sum(rate(prometheus_tsdb_head_samples_appended_total[5m]))",
+      "unit": "short",
+      "legend": "",
+      "w": 3
+    },
+    {
+      "title": "Scrape duration by job",
+      "type": "line",
+      "query": "max by (job) (scrape_duration_seconds)",
+      "unit": "s",
+      "legend": "{{job}}",
+      "w": 6
+    },
+    {
+      "title": "Samples ingested / sec",
+      "type": "area",
+      "query": "sum(rate(prometheus_tsdb_head_samples_appended_total[5m]))",
+      "unit": "short",
+      "legend": "samples/s",
+      "w": 6
+    },
+    {
+      "title": "Rule evaluation time",
+      "type": "line",
+      "query": "max by (rule_group) (prometheus_rule_group_last_duration_seconds)",
+      "unit": "s",
+      "legend": "{{rule_group}}",
+      "w": 6
+    },
+    {
+      "title": "Alert notifications sent",
+      "type": "bar",
+      "query": "sum by (integration) (increase(alertmanager_notifications_total[1h]))",
+      "unit": "short",
+      "legend": "{{integration}}",
+      "w": 6
+    }
+  ]
+}

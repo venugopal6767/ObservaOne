@@ -1,0 +1,13 @@
+{
+  "_help": "PromQL used for the Services page when the 'Service metrics' data source is set to live. Each query must return one series per service with a label named by 'serviceLabel'. The defaults follow the OpenTelemetry HTTP server metric names; change them to match your applications (Micrometer, MuleSoft, etc.).",
+  "serviceLabel": "service_name",
+  "rps": "sum by (service_name) (rate(http_server_request_duration_seconds_count[5m]))",
+  "errorRate": "100 * sum by (service_name) (rate(http_server_request_duration_seconds_count{http_response_status_code=~\"5..\"}[5m])) / sum by (service_name) (rate(http_server_request_duration_seconds_count[5m]))",
+  "p95": "1000 * histogram_quantile(0.95, sum by (service_name, le) (rate(http_server_request_duration_seconds_bucket[5m])))",
+  "thresholds": {
+    "degradedErrorRate": 1,
+    "downErrorRate": 10,
+    "degradedP95Ms": 1000,
+    "downP95Ms": 5000
+  }
+}

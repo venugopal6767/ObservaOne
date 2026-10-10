@@ -1,0 +1,42 @@
+{
+  "id": "kubernetes-workloads",
+  "title": "Kubernetes Workloads",
+  "description": "Pods and containers per namespace: CPU, memory vs limits, restarts, crash loops, OOM kills, throttling",
+  "tags": ["system", "kubernetes"],
+  "variables": [
+    { "name": "cluster", "label": "Cluster", "label_name": "cluster", "match": "kube_namespace_status_phase" },
+    { "name": "namespace", "label": "Namespace", "label_name": "namespace", "match": "kube_namespace_status_phase" }
+  ],
+  "panels": [
+    { "title": "Pods", "type": "stat", "unit": "none", "legend": "", "w": 3,
+      "query": "count(kube_pod_info{cluster=\"$cluster\",namespace=\"$namespace\"})" },
+    { "title": "Crash-looping containers", "type": "stat", "unit": "none", "legend": "", "w": 3,
+      "query": "sum(kube_pod_container_status_waiting_reason{cluster=\"$cluster\",namespace=\"$namespace\",reason=\"CrashLoopBackOff\"}) or vector(0)" },
+    { "title": "Restarts (1 h)", "type": "stat", "unit": "none", "legend": "", "w": 3,
+      "query": "round(sum(increase(kube_pod_container_status_restarts_total{cluster=\"$cluster\",namespace=\"$namespace\"}[1h]))) or vector(0)" },
+    { "title": "OOM kills (1 h)", "type": "stat", "unit": "none", "legend": "", "w": 3,
+      "query": "round(sum(increase(container_oom_events_total{cluster=\"$cluster\",namespace=\"$namespace\"}[1h]))) or vector(0)" },
+
+    { "title": "CPU used by pod (cores)", "type": "line", "unit": "short", "legend": "{{pod}}", "w": 6,
+      "query": "topk(10, sum by (pod) (rate(container_cpu_usage_seconds_total{cluster=\"$cluster\",namespace=\"$namespace\",container!=\"\"}[5m])))" },
+    { "title": "Memory used by pod", "type": "line", "unit": "bytes", "legend": "{{pod}}", "w": 6,
+      "query": "topk(10, sum by (pod) (container_memory_working_set_bytes{cluster=\"$cluster\",namespace=\"$namespace\",container!=\"\"}))" },
+
+    { "title": "Memory used vs limit", "type": "bar", "unit": "percent", "legend": "{{pod}}/{{container}}", "w": 6,
+      "query": "topk(10, 100 * sum by (pod, container) (container_memory_working_set_bytes{cluster=\"$cluster\",namespace=\"$namespace\",container!=\"\"}) / sum by (pod, container) (kube_pod_container_resource_limits{cluster=\"$cluster\",namespace=\"$namespace\",resource=\"memory\"}))" },
+    { "title": "CPU throttled (% of periods)", "type": "bar", "unit": "percent", "legend": "{{pod}}/{{container}}", "w": 6,
+      "query": "topk(10, 100 * sum by (pod, container) (rate(container_cpu_cfs_throttled_periods_total{cluster=\"$cluster\",namespace=\"$namespace\"}[5m])) / sum by (pod, container) (rate(container_cpu_cfs_periods_total{cluster=\"$cluster\",namespace=\"$namespace\"}[5m])) > 0)" },
+
+    { "title": "Restarts by container (1 h)", "type": "table", "unit": "none", "legend": "{{pod}}/{{container}}", "w": 4,
+      "query": "sort_desc(round(increase(kube_pod_container_status_restarts_total{cluster=\"$cluster\",namespace=\"$namespace\"}[1h])) > 0)" },
+    { "title": "Containers waiting (reason)", "type": "table", "unit": "none", "legend": "{{pod}}/{{container}}: {{reason}}", "w": 4,
+      "query": "kube_pod_container_status_waiting_reason{cluster=\"$cluster\",namespace=\"$namespace\"} == 1" },
+    { "title": "Last termination reason", "type": "table", "unit": "none", "legend": "{{pod}}/{{container}}: {{reason}}", "w": 4,
+      "query": "kube_pod_container_status_last_terminated_reason{cluster=\"$cluster\",namespace=\"$namespace\",reason!=\"Completed\"} == 1" },
+
+    { "title": "Deployment replicas: desired vs available", "type": "table", "unit": "none", "legend": "{{deployment}} {{kind}}", "w": 6,
+      "query": "label_replace(kube_deployment_spec_replicas{cluster=\"$cluster\",namespace=\"$namespace\"}, \"kind\", \"desired\", \"\", \"\") or label_replace(kube_deployment_status_replicas_available{cluster=\"$cluster\",namespace=\"$namespace\"}, \"kind\", \"available\", \"\", \"\")" },
+    { "title": "Network received by pod (bytes/s)", "type": "line", "unit": "Bps", "legend": "{{pod}}", "w": 6,
+      "query": "topk(10, sum by (pod) (rate(container_network_receive_bytes_total{cluster=\"$cluster\",namespace=\"$namespace\"}[5m])))" }
+  ]
+}

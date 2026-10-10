@@ -1,0 +1,188 @@
+# ObservaOne Agent - Windows
+# install.ps1 puts this file in C:\ProgramData\ObservaOne\Agent\config.yaml. The settings
+# (server, host name, env, log files) are environment variables of the "ObservaOneAgent" service.
+# What it does:
+#   metrics : reads windows_exporter on 127.0.0.1:9182 (installed with the agent) every 30 s
+#   logs    : Application and System event logs (+ Security if you chose it) and extra log files
+#   traces  : apps on this server send OpenTelemetry traces to 127.0.0.1:4317 (gRPC) / 4318 (HTTP)
+# If the server is unreachable, data waits in C:\ProgramData\ObservaOne\Agent\queue and is sent later.
+
+extensions:
+  bearertokenauth:
+    filename: C:/ProgramData/ObservaOne/Agent/token
+  file_storage:
+    directory: C:/ProgramData/ObservaOne/Agent/queue
+    create_directory: true
+  health_check:
+    endpoint: 127.0.0.1:13133
+
+receivers:
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: windows
+          scrape_interval: 30s
+          scrape_timeout: 25s
+          static_configs:
+            - targets: ["${env:OBSERVA_WINDOWS_EXPORTER}"]
+              labels:
+                host: "${env:OBSERVA_HOST}"
+                os: windows
+                env: "${env:OBSERVA_ENV}"
+                role: "${env:OBSERVA_ROLE}"
+                platform: windows
+                agent: observaone
+        - job_name: observaone-agent
+          scrape_interval: 60s
+          static_configs:
+            - targets: ["127.0.0.1:8888"]
+              labels:
+                host: "${env:OBSERVA_HOST}"
+                os: windows
+                env: "${env:OBSERVA_ENV}"
+                platform: windows
+                agent: observaone
+
+  windows_event_log/application:
+    channel: Application
+    start_at: end
+    storage: file_storage
+  windows_event_log/system:
+    channel: System
+    start_at: end
+    storage: file_storage
+  windows_event_log/security:
+    channel: Security
+    start_at: end
+    storage: file_storage
+
+  file_log:
+    include: ${env:OBSERVA_LOG_FILES}
+    start_at: end
+    include_file_name: true
+    include_file_path: true
+    max_log_size: 64KiB
+    storage: file_storage
+
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 127.0.0.1:4317
+      http:
+        endpoint: 127.0.0.1:4318
+
+processors:
+  memory_limiter:
+    check_interval: 2s
+    limit_mib: 300
+    spike_limit_mib: 80
+
+  transform/metrics:
+    metric_statements:
+      - set(scope.name, "")
+      - set(scope.version, "")
+
+  # Event log entries -> "service (event source) + message"
+  transform/logs:
+    log_statements:
+      - set(log.attributes["service"], log.body["provider"]["name"]) where IsMap(log.body) and log.body["provider"] != nil
+      - set(log.attributes["event_id"], log.body["event_id"]["id"]) where IsMap(log.body) and log.body["event_id"] != nil
+      - set(log.attributes["channel"], log.body["channel"]) where IsMap(log.body) and log.body["channel"] != nil
+      - set(log.attributes["level"], log.body["level"]) where IsMap(log.body) and log.body["level"] != nil
+      - set(log.body, log.body["message"]) where IsMap(log.body) and log.body["message"] != nil
+      - set(log.attributes["service"], log.attributes["log.file.name"]) where log.attributes["service"] == nil and log.attributes["log.file.name"] != nil
+      - replace_pattern(log.attributes["service"], "\\.log$", "")
+
+  groupbyattrs/service:
+    keys: [service]
+
+  resource/logs:
+    attributes:
+      - { key: service.name, from_attribute: service, action: upsert }
+      - { key: service, action: delete }
+      - { key: service.name, value: windows, action: insert }
+
+  resource/host:
+    attributes:
+      - { key: host.name, value: "${env:OBSERVA_HOST}", action: upsert }
+      - { key: os.type, value: windows, action: upsert }
+      - { key: observaone.agent.id, value: "${env:OBSERVA_AGENT_ID}", action: upsert }
+
+  # stable "instance" label (= host name) instead of a new random id after every restart
+  resource/metrics:
+    attributes:
+      - { key: service.instance.id, value: "${env:OBSERVA_HOST}", action: upsert }
+
+  batch:
+    send_batch_size: 2000
+    timeout: 5s
+
+exporters:
+  prometheus_remote_write:
+    endpoint: ${env:OBSERVA_SERVER}/ingest/agent/metrics
+    auth:
+      authenticator: bearertokenauth
+    headers: &headers
+      X-Agent-Id: "${env:OBSERVA_AGENT_ID}"
+      X-Agent-Host: "${env:OBSERVA_HOST}"
+      X-Agent-Platform: windows
+      X-Agent-Os: "${env:OBSERVA_OS}"
+      X-Agent-Arch: "${env:OBSERVA_ARCH}"
+      X-Agent-Version: "${env:OBSERVA_AGENT_VERSION}"
+      X-Agent-Env: "${env:OBSERVA_ENV}"
+      X-Agent-Role: "${env:OBSERVA_ROLE}"
+    tls: &tls
+      ca_file: "${env:OBSERVA_CA_FILE}"
+    target_info:
+      enabled: false
+    remote_write_queue:
+      queue_size: 20000        # kept in memory while the server is unreachable (logs/traces queue on disk)
+
+  otlp_http/logs:
+    logs_endpoint: ${env:OBSERVA_SERVER}/ingest/agent/v1/logs
+    auth:
+      authenticator: bearertokenauth
+    headers: *headers
+    tls: *tls
+    sending_queue:
+      storage: file_storage
+
+  otlp_http/traces:
+    traces_endpoint: ${env:OBSERVA_SERVER}/ingest/agent/v1/traces
+    auth:
+      authenticator: bearertokenauth
+    headers: *headers
+    tls: *tls
+    sending_queue:
+      storage: file_storage
+
+service:
+  extensions: [bearertokenauth, file_storage, health_check]
+  telemetry:
+    resource:
+      attributes:
+        - name: service.name
+          value: observaone-agent
+    logs:
+      level: warn
+    metrics:
+      level: normal
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 127.0.0.1
+                port: 8888
+  pipelines:
+    metrics:
+      receivers: [prometheus]
+      processors: [memory_limiter, transform/metrics, resource/metrics, batch]
+      exporters: [prometheus_remote_write]
+    logs:
+      receivers: ${env:OBSERVA_LOG_RECEIVERS}
+      processors: [memory_limiter, transform/logs, groupbyattrs/service, resource/logs, resource/host, batch]
+      exporters: [otlp_http/logs]
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resource/host, batch]
+      exporters: [otlp_http/traces]
