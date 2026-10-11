@@ -1,8 +1,9 @@
 import { h, api, clear, icon, fmt, ago, pill, stateView, stateFromError, healthPill, paginate, stateBanner, timeEl, color } from '../ui.js';
 
-const CPU = 'clamp(max by (host) (100 - avg by (instance, host) (rate(windows_cpu_time_total{mode="idle"}[5m])) * 100), 0, 100) or clamp(max by (host) (100 - avg by (instance, host) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100), 0, 100)';
-const MEM = 'max by (host) (100 * (1 - windows_memory_available_bytes / windows_memory_physical_total_bytes)) or max by (host) (100 * (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes))';
-const DISK = 'min by (host) (100 * windows_logical_disk_free_bytes{volume!~"HarddiskVolume.*"} / windows_logical_disk_size_bytes{volume!~"HarddiskVolume.*"}) or min by (host) (100 * node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs|nsfs|fuse.*"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs|nsfs|fuse.*"})';
+// same queries as the server (src/queries.js): agent values only when fresh, so a stopped agent shows "-"
+const CPU = "clamp(max by (host) (last_over_time(observaone_cpu_utilization_ratio[1m])) * 100, 0, 100) or clamp(max by (host) (100 - avg by (instance, host) (rate(windows_cpu_time_total{mode=\"idle\"}[5m])) * 100), 0, 100) or clamp(max by (host) (100 - avg by (instance, host) (rate(node_cpu_seconds_total{mode=\"idle\",agent!=\"observaone\"}[5m])) * 100), 0, 100)";
+const MEM = "max by (host) (100 * last_over_time(observaone_memory_utilization_ratio[1m])) or max by (host) (100 * (1 - windows_memory_available_bytes / windows_memory_physical_total_bytes)) or max by (host) (100 * (1 - node_memory_MemAvailable_bytes{agent!=\"observaone\"} / node_memory_MemTotal_bytes{agent!=\"observaone\"}))";
+const DISK = "min by (host) (100 * (1 - last_over_time(observaone_filesystem_utilization_ratio{fstype!~\"tmpfs|overlay|squashfs|ramfs|nsfs|fuse.*\"}[1m]))) or min by (host) (100 * windows_logical_disk_free_bytes{volume!~\"HarddiskVolume.*\"} / windows_logical_disk_size_bytes{volume!~\"HarddiskVolume.*\"}) or min by (host) (100 * node_filesystem_avail_bytes{fstype!~\"tmpfs|overlay|squashfs|ramfs|nsfs|fuse.*\",agent!=\"observaone\"} / node_filesystem_size_bytes{fstype!~\"tmpfs|overlay|squashfs|ramfs|nsfs|fuse.*\",agent!=\"observaone\"})";
 
 export function infrastructurePage(main, ctx) {
   ctx.setDsChip('Prometheus', color('ok'));

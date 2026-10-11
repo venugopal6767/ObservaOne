@@ -1,7 +1,10 @@
 import { h, api, clear, short, timeChart, barChart, doughnut, legendRow, legendName, stateView, stateFromError, ApiError, skeleton, statusColor, thresholdColor } from '../ui.js';
-import { chartSlots, statCard, pctChange } from './common.js';
+import { chartSlots, statCard } from './common.js';
 
 // Every value here is real or shown as unavailable with its reason. Nothing is filled in.
+// CPU and memory are already percentages: compare them in percentage points (27% vs 1.6% = +25.4 pts)
+const ptsChange = (now, before) => (now === null || before === null || before === undefined || !Number.isFinite(before) ? null : now - before);
+
 export function overviewPage(main, ctx) {
   const setChart = chartSlots(ctx);
   const cards = h('div', { class: 'grid cards-6' });
@@ -62,11 +65,11 @@ export function overviewPage(main, ctx) {
       }));
     if (M.infrastructure) tiles.push(
       statCard('CPU Usage', d.cpu.now === null ? '-' : d.cpu.now.toFixed(1), {
-        unit: d.cpu.now === null ? '' : '%', trend: pctChange(d.cpu.now, d.cpu.before), tone: d.cpu.now >= 90 ? 'red' : '',
+        unit: d.cpu.now === null ? '' : '%', trend: ptsChange(d.cpu.now, d.cpu.before), trendUnit: 'pts', trendTitle: 'Change in percentage points vs 1 hour ago', tone: d.cpu.now >= 90 ? 'red' : '',
         extra: d.cpu.now === null ? reason(d.cpu.error ? `Unavailable: ${d.cpu.error}` : 'No CPU data from any server') : null,
       }),
       statCard('Memory Usage', d.mem.now === null ? '-' : d.mem.now.toFixed(1), {
-        unit: d.mem.now === null ? '' : '%', trend: pctChange(d.mem.now, d.mem.before), tone: d.mem.now >= 90 ? 'red' : '',
+        unit: d.mem.now === null ? '' : '%', trend: ptsChange(d.mem.now, d.mem.before), trendUnit: 'pts', trendTitle: 'Change in percentage points vs 1 hour ago', tone: d.mem.now >= 90 ? 'red' : '',
         extra: d.mem.now === null ? reason(d.mem.error ? `Unavailable: ${d.mem.error}` : 'No memory data from any server') : null,
       }));
     if (M.services) tiles.push(

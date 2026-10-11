@@ -12,13 +12,13 @@ export function chartSlots(ctx) {
   };
 }
 
-export function statCard(label, value, { unit, trend, trendGoodWhen = 'down', extra, tone, iconName } = {}) {
+export function statCard(label, value, { unit, trend, trendUnit = '%', trendTitle, trendGoodWhen = 'down', extra, tone, iconName } = {}) {
   let trendEl = null;
   if (trend !== null && trend !== undefined && Number.isFinite(trend)) {
     const up = trend >= 0;
     const good = trendGoodWhen === 'up' ? up : !up;
     const cls = Math.abs(trend) < 0.5 ? 'flat' : good ? 'up' : 'bad';
-    trendEl = h('span', { class: `trend ${cls}` }, `${up ? '↑' : '↓'} ${Math.abs(trend).toFixed(1)}%`);
+    trendEl = h('span', { class: `trend ${cls}`, title: trendTitle || '' }, `${up ? '↑' : '↓'} ${Math.abs(trend).toFixed(1)}${trendUnit === 'pts' ? ' pts' : '%'}`);
   }
   return h('div', { class: 'stat-card' },
     h('div', { class: 'label' }, label),

@@ -199,6 +199,12 @@ function buildShell() {
     state.current?.refresh?.();
   }, { class: 'select', 'aria-label': 'Time range', id: 'range' });
   const rangeWrap = h('div', { class: 'range-wrap' }, icon('clock', 15, 'dim'), rangeSel);
+  // auto-refresh: every page with live data reloads itself at this pace (only while the tab is visible)
+  const autoSel = select(AUTO_REFRESH, autoRefreshMs(), (v) => {
+    savePref('autoRefresh', Number(v));
+    flushPrefs();
+    startAutoRefresh();
+  }, { class: 'select', style: { width: '78px' }, 'aria-label': 'Auto-refresh', title: 'Auto-refresh', id: 'auto-refresh' });
 
   const u = state.me.user;
   const initials = (u.displayName || u.username).slice(0, 1).toUpperCase();
@@ -221,7 +227,7 @@ function buildShell() {
 
   app.append(h('div', { class: 'shell' },
     h('div', { class: 'brand' }, logo(28), h('span', { class: 'brand-name' }, first, rest.length ? h('b', {}, rest.join('')) : null)),
-    h('header', { class: 'topbar' }, searchBox, h('div', { class: 'top-spacer' }), dsChip, rangeWrap, refreshBtn, bell, userBtn),
+    h('header', { class: 'topbar' }, searchBox, h('div', { class: 'top-spacer' }), dsChip, rangeWrap, refreshBtn, autoSel, bell, userBtn),
     sidebar,
     h('main', { class: 'main', id: 'main' })));
 }
@@ -385,8 +391,20 @@ function route() {
     console.error(e);
     main.append(h('div', { class: 'error-box' }, `This page failed to load: ${e.message}`));
   }
-  if (state.current?.refresh && state.current.autoRefresh !== false) {
-    state.timer = setInterval(() => document.visibilityState === 'visible' && state.current?.refresh?.(), state.current.refreshMs || 30_000);
+  startAutoRefresh();
+}
+
+const AUTO_REFRESH = [[0, 'Off'], [10_000, '10s'], [30_000, '30s'], [60_000, '1m'], [300_000, '5m']];
+function autoRefreshMs() {
+  const v = Number(state.me?.prefs?.autoRefresh);
+  return AUTO_REFRESH.some(([ms]) => ms === v) ? v : 10_000; // default: every 10 seconds
+}
+function startAutoRefresh() {
+  clearInterval(state.timer);
+  state.timer = null;
+  const ms = autoRefreshMs();
+  if (ms && state.current?.refresh && state.current.autoRefresh !== false) {
+    state.timer = setInterval(() => document.visibilityState === 'visible' && state.current?.refresh?.(), ms);
   }
 }
 

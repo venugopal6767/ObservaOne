@@ -558,7 +558,7 @@ export function requireUser(req, res, next) {
 }
 
 // ---------- per-user preferences ----------
-const PREF_KEYS = new Set(['timeRange', 'metricsQuery', 'logsQuery', 'tracesQuery', 'homePage', 'dashboardVars', 'navCollapsed', 'theme']);
+const PREF_KEYS = new Set(['timeRange', 'metricsQuery', 'logsQuery', 'tracesQuery', 'homePage', 'dashboardVars', 'navCollapsed', 'theme', 'autoRefresh']);
 
 export async function getPrefs(userId) {
   if (!userId) return {};

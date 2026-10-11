@@ -27,7 +27,7 @@
     {
       "title": "Average CPU",
       "type": "stat",
-      "query": "avg(clamp(max by (host) (100 - avg by (instance, host) (rate(windows_cpu_time_total{mode=\"idle\"}[5m])) * 100), 0, 100) or clamp(max by (host) (100 - avg by (instance, host) (rate(node_cpu_seconds_total{mode=\"idle\"}[5m])) * 100), 0, 100))",
+      "query": "avg(clamp(max by (host) (last_over_time(observaone_cpu_utilization_ratio[1m])) * 100, 0, 100) or clamp(max by (host) (100 - avg by (instance, host) (rate(windows_cpu_time_total{mode=\"idle\"}[5m])) * 100), 0, 100) or clamp(max by (host) (100 - avg by (instance, host) (rate(node_cpu_seconds_total{mode=\"idle\",agent!=\"observaone\"}[5m])) * 100), 0, 100))",
       "unit": "percent",
       "legend": "",
       "w": 3
@@ -43,7 +43,7 @@
     {
       "title": "CPU used by server",
       "type": "line",
-      "query": "clamp(max by (host) (100 - avg by (instance, host) (rate(windows_cpu_time_total{mode=\"idle\"}[5m])) * 100), 0, 100) or clamp(max by (host) (100 - avg by (instance, host) (rate(node_cpu_seconds_total{mode=\"idle\"}[5m])) * 100), 0, 100)",
+      "query": "clamp(max by (host) (last_over_time(observaone_cpu_utilization_ratio[1m])) * 100, 0, 100) or clamp(max by (host) (100 - avg by (instance, host) (rate(windows_cpu_time_total{mode=\"idle\"}[5m])) * 100), 0, 100) or clamp(max by (host) (100 - avg by (instance, host) (rate(node_cpu_seconds_total{mode=\"idle\",agent!=\"observaone\"}[5m])) * 100), 0, 100)",
       "unit": "percent",
       "legend": "{{host}}",
       "w": 6
