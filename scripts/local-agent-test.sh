@@ -11,6 +11,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 NAME="${OO_NAME:-observaone.local}"
+NEWCERT=0
 say() { printf '\n\033[1;34m==>\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 
@@ -31,10 +32,14 @@ sed -i 's|^PUBLIC_URL=.*|# &  (disabled by local-agent-test.sh)|' .env
 if [ -s nginx/certs/server.crt ] && ! openssl x509 -in nginx/certs/server.crt -noout -ext subjectAltName 2>/dev/null | grep -q "DNS:$NAME"; then
   echo "existing certificate is not for $NAME: making a new one"
   rm -f nginx/certs/server.crt nginx/certs/server.key
+  NEWCERT=1
 fi
 
 say "3/6  starting the stack (first time: builds the agent, ~1-3 min)"
 docker compose up -d --build
+# The UI container mounts the certificate as a single file: after the file is replaced it still sees the OLD one
+# (and shows an old fingerprint in the install command). Recreate it so it reads the new certificate.
+docker compose up -d --force-recreate observa nginx
 for i in $(seq 1 90); do
   curl -fsS --cacert nginx/certs/server.crt "https://$NAME/api/health" >/dev/null 2>&1 && break
   sleep 2

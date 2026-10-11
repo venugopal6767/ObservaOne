@@ -229,6 +229,7 @@ and are judged by their last upload.
 | Symptom | Check |
 |---|---|
 | Installer: "Cannot reach … over HTTPS" | DNS, security group (inbound 443 on the ObservaOne server), `--ca-sha256` value |
+| `curl: (90) public key does not match pinned public key` right after the certificate was replaced | the UI still shows the old certificate (it mounts the file, and a replaced file is not seen): `docker compose up -d --force-recreate observa nginx`, reload the Agents page, copy the command again |
 | Installer: "fingerprint does not match" | you are not talking to your server, or it has a new certificate: copy the new command from the Agents page |
 | `token_expired` / `token_revoked` / `token_used_up` | create a new token |
 | Agent **Not reporting** | `sudo observaone-agent status`; `journalctl -u observaone-agent -n 50`; outbound 443 open? |
