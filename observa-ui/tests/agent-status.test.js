@@ -52,24 +52,25 @@ test('legacy agents without heartbeats are judged by their last data upload', ()
 test('problems: unsupported version, stopped collectors, upload failures, agent error', () => {
   const p = agentProblems({
     version: '0.9.0', minVersion: '1.0.0', nowMs: NOW, lastHeartbeatMs: at(5), lastDataMs: at(5), onlineSeconds: 150,
-    diag: { collectors: { forwarder: 'stopped', exporter: 'running' }, uploadFailures: 12, lastError: 'disk full' },
+    diag: { collectors: { cpu: 'ok', disk: 'error', filesystem: 'unavailable' }, collectorErrors: { disk: 'bad counters' }, uploadFailures: 12, lastError: 'disk full' },
   });
   assert.equal(p.length, 4);
   assert.match(p.join(' '), /no longer supported/);
-  assert.match(p.join(' '), /forwarder \(otelcol\) is stopped/);
-  assert.match(p.join(' '), /12 metric points failed/);
+  assert.match(p.join(' '), /Collector disk is failing: bad counters/);
+  assert.doesNotMatch(p.join(' '), /filesystem/); // unavailable (e.g. permission) is shown, but is not a fault
+  assert.match(p.join(' '), /12 uploads failed/);
   assert.match(p.join(' '), /disk full/);
 });
 
 test('problems: healthy agent has none', () => {
   const p = agentProblems({ version: '1.1.0', minVersion: '1.0.0', nowMs: NOW, lastHeartbeatMs: at(5), lastDataMs: at(20), onlineSeconds: 150,
-    diag: { collectors: { forwarder: 'running', exporter: 'running' }, uploadFailures: 0 } });
+    diag: { collectors: { cpu: 'ok', memory: 'ok' }, uploadFailures: 0 } });
   assert.deepEqual(p, []);
 });
 
 test('problems: heartbeats arrive but no metrics = data path problem, told apart from agent down', () => {
   const p = agentProblems({ version: '1.1.0', minVersion: '1.0.0', nowMs: NOW, lastHeartbeatMs: at(5), lastDataMs: at(3600), onlineSeconds: 150,
-    diag: { collectors: { forwarder: 'running', exporter: 'running' } } });
+    diag: { collectors: { cpu: 'ok' } } });
   assert.match(p.join(' '), /no metrics have been received/);
 });
 

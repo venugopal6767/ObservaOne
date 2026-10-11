@@ -61,9 +61,12 @@ export function agentProblems({ version, minVersion, diag = {}, nowMs, lastDataM
   const out = [];
   if (version && minVersion && compareVersions(version, minVersion) < 0) out.push(`Agent ${version} is no longer supported (${minVersion} or newer is needed). Re-run the installer.`);
   const c = diag.collectors || {};
-  if (c.forwarder && c.forwarder !== 'running') out.push(`The forwarder (otelcol) is ${c.forwarder}.`);
-  if (c.exporter && c.exporter !== 'running') out.push(`The metrics collector (node_exporter) is ${c.exporter}.`);
-  if (Number(diag.uploadFailures) > 0) out.push(`${diag.uploadFailures} metric points failed to upload since the last heartbeat.`);
+  const errs = diag.collectorErrors || {};
+  // "error" = the collector is broken; "unavailable" (permission, not supported here) is shown but is not a fault
+  const failing = Object.keys(c).filter((k) => c[k] === 'error' || c[k] === 'failed' || c[k] === 'stopped').sort();
+  for (const k of failing) out.push(`Collector ${k} is failing${errs[k] ? `: ${errs[k]}` : ''}.`);
+  if (Number(diag.droppedPayloads) > 0 && Number(diag.bufferedPayloads) > 0) out.push(`Upload backlog: ${diag.bufferedPayloads} collections waiting, ${diag.droppedPayloads} dropped (buffer full).`);
+  if (Number(diag.uploadFailures) > 0) out.push(`${diag.uploadFailures} uploads failed since the last heartbeat.`);
   // heartbeat fine but no data arriving = the data path (Nginx/Prometheus/token) is broken, not the agent
   if (lastHeartbeatMs && nowMs - lastHeartbeatMs <= onlineSeconds * 1000 && diag.collectors && (!lastDataMs || nowMs - lastDataMs > 3 * onlineSeconds * 1000)) {
     out.push('Heartbeats arrive but no metrics have been received recently.');

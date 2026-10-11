@@ -71,6 +71,7 @@ export const config = {
     heartbeatSeconds: Number(env('AGENT_HEARTBEAT_SECONDS', '30')), // told to agents at enrollment / every heartbeat
     minVersion: env('AGENT_MIN_VERSION', '1.0.0'),                // older agents are flagged "Needs attention"
     enrollPerIpPer10Min: Number(env('AGENT_ENROLL_RATE', '20')),
+    remoteWriteUrl: env('PROMETHEUS_REMOTE_WRITE_URL', ''),   // default: <Prometheus data source>/api/v1/write
   },
   dataDir: path.resolve(env('DATA_DIR', './data')),
   configDir: path.resolve(env('CONFIG_DIR', './config')),

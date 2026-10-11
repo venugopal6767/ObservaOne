@@ -15,6 +15,8 @@ import { q, one, tx } from '../db.js';
 import { audit, clientIp } from '../store.js';
 import { sha256, randomToken } from '../secrets.js';
 import { counterDelta, agentStatus, agentProblems } from '../health.js';
+import { ds } from '../datasources.js';
+import { parseExposition, writeToPrometheus } from '../promwrite.js';
 
 export const AGENT_LATEST = '1.1.0';
 export const ENROLL_TOKEN_RE = /^oat_[0-9a-f]{8}_[A-Za-z0-9_-]{20,64}$/;
@@ -73,21 +75,38 @@ function parseEnroll(b) {
   return { v: { hostname, platform, arch, version, env, role, machine, labels, os: text(b.os, 100), kernel: text(b.kernel, 100) } };
 }
 
+const COLLECTOR_STATES = ['ok', 'error', 'unavailable', 'disabled', 'running', 'stopped', 'failed', 'missing', 'unknown'];
+const COLLECTOR_NAME_RE = /^[a-z][a-z0-9_.-]{0,31}$/;
+
 function parseHeartbeat(b) {
   if (b == null) b = {};
   if (typeof b !== 'object' || Array.isArray(b)) return { err: 'Body must be a JSON object.' };
   const version = b.version == null ? null : str(b.version, /^\d{1,3}\.\d{1,3}\.\d{1,3}$/, 16);
   if (b.version != null && !version) return { err: 'version must look like 1.2.3.' };
-  const st = (x) => (['running', 'stopped', 'failed', 'missing', 'unknown'].includes(x) ? x : undefined);
-  const c = b.collectors && typeof b.collectors === 'object' ? b.collectors : {};
   const n = (x, max = 1e15) => (typeof x === 'number' && Number.isFinite(x) && x >= 0 && x <= max ? x : null);
+  // collectors: { cpu: 'ok', filesystem: 'unavailable', ... } (max 32), errors: { filesystem: 'permission denied' }
+  const collectors = {}, collectorErrors = {};
+  if (b.collectors && typeof b.collectors === 'object' && !Array.isArray(b.collectors)) {
+    for (const [k, v] of Object.entries(b.collectors).slice(0, 32)) {
+      if (COLLECTOR_NAME_RE.test(k) && COLLECTOR_STATES.includes(v)) collectors[k] = v;
+    }
+  }
+  if (b.collectorErrors && typeof b.collectorErrors === 'object' && !Array.isArray(b.collectorErrors)) {
+    for (const [k, v] of Object.entries(b.collectorErrors).slice(0, 32)) {
+      if (COLLECTOR_NAME_RE.test(k) && typeof v === 'string') collectorErrors[k] = text(v, 200);
+    }
+  }
+  const hostLocked = Array.isArray(b.hostLocked) ? b.hostLocked.filter((x) => typeof x === 'string' && /^[a-z_.]{1,40}$/.test(x)).slice(0, 30) : [];
   return {
     v: {
       version,
       uptimeSeconds: n(b.uptimeSeconds, 1e10),
       bootTime: n(b.bootTime, 4102444800), // epoch seconds, before 2100
       uploadFailedTotal: n(b.uploadFailedTotal),
-      collectors: { forwarder: st(c.forwarder), exporter: st(c.exporter) },
+      bufferedPayloads: n(b.bufferedPayloads, 1e6),
+      droppedPayloads: n(b.droppedPayloads),
+      lastUploadAgoSeconds: n(b.lastUploadAgoSeconds, 1e9),
+      collectors, collectorErrors, hostLocked,
       lastError: text(b.lastError, 300),
       kernel: text(b.kernel, 100),
     },
@@ -121,7 +140,9 @@ const bearer = (req) => (/^Bearer\s+(\S+)$/i.exec(req.get('authorization') || ''
 // ---------------- router ----------------
 export const agentControlRouter = express.Router();
 // small bodies only (the main API allows 200 kB; nothing here needs more than a few hundred bytes)
-agentControlRouter.use('/agent/v1', express.json({ limit: '8kb', type: () => true }));
+const json8k = express.json({ limit: '8kb', type: () => true });
+agentControlRouter.use('/agent/v1/enroll', json8k);
+agentControlRouter.use('/agent/v1/heartbeat', json8k);
 
 agentControlRouter.post('/agent/v1/enroll', wrap(async (req, res) => {
   const ip = clientIp(req);
@@ -238,8 +259,13 @@ agentControlRouter.post('/agent/v1/heartbeat', wrap(async (req, res) => {
     const failures = counterDelta(Number(prev.uploadFailedTotal), v.uploadFailedTotal ?? NaN);
     const diag = {
       collectors: v.collectors,
+      collectorErrors: v.collectorErrors,
       uploadFailedTotal: v.uploadFailedTotal,
       uploadFailures: failures ?? null,
+      bufferedPayloads: v.bufferedPayloads,
+      droppedPayloads: v.droppedPayloads,
+      lastUploadAgoSeconds: v.lastUploadAgoSeconds,
+      hostLocked: v.hostLocked,
       lastError: v.lastError || '',
       uptimeSeconds: v.uptimeSeconds,
       agentIp: ip,
@@ -258,6 +284,96 @@ agentControlRouter.post('/agent/v1/heartbeat', wrap(async (req, res) => {
     heartbeatSeconds: config.agent.heartbeatSeconds,
     latestVersion: AGENT_LATEST,
   });
+}));
+
+// ---------------- metrics intake ----------------
+// The agent POSTs the Prometheus text format (gzip). The server, not the agent, decides the identity labels:
+// host, agent_id, job, platform, env, role and the agent's custom labels come from the database, so one
+// agent can never write series that look like another host's. Then the samples go to Prometheus
+// (remote write). If Prometheus is down the agent gets 503 and keeps the data in its buffer;
+// heartbeats keep working because they do not depend on Prometheus.
+const IDENTITY_LABELS = new Set(['host', 'agent_id', 'job', 'instance', 'agent', 'os', 'platform', 'env', 'role', 'cluster']);
+const MAX_PAST_MS = 30 * 60_000; // Prometheus accepts out-of-order samples up to 30 min old (prometheus.yml)
+const lastDataWrite = new Map();
+
+export function remoteWriteUrl() {
+  if (config.agent.remoteWriteUrl) return config.agent.remoteWriteUrl;
+  const u = ds('prometheus')?.url;
+  return u ? `${u.replace(/\/+$/, '')}/api/v1/write` : '';
+}
+
+// Pure: turn parsed series into the series written to Prometheus. Exported for tests.
+export function relabel(series, agentRow, { nowMs, skewMs = 0 }) {
+  const fixed = {
+    host: agentRow.host, agent_id: agentRow.id, job: agentRow.platform, platform: agentRow.platform,
+    agent: 'observaone', os: agentRow.platform === 'windows' ? 'windows' : 'linux',
+  };
+  if (agentRow.env) fixed.env = agentRow.env;
+  if (agentRow.role) fixed.role = agentRow.role;
+  const custom = agentRow.labels || {};
+  const out = [];
+  let dropped = 0, newest = 0;
+  for (const s of series) {
+    const ts = s.ts == null ? nowMs : s.ts + skewMs; // correct a wrong host clock
+    if (ts < nowMs - MAX_PAST_MS || ts > nowMs + 60_000) { dropped++; continue; }
+    const labels = { __name__: s.name };
+    for (const [k, v] of Object.entries(s.labels)) if (!IDENTITY_LABELS.has(k) && !k.startsWith('__')) labels[k] = v;
+    for (const [k, v] of Object.entries(custom)) labels[k] = String(v);
+    Object.assign(labels, fixed);
+    out.push({ labels, value: s.value, ts });
+    if (ts > newest) newest = ts;
+  }
+  // "up" = this agent delivered data at that time (what the dashboards and Infrastructure read)
+  if (out.length) out.push({ labels: { __name__: 'up', ...Object.fromEntries(Object.entries(custom).map(([k, v]) => [k, String(v)])), ...fixed }, value: 1, ts: newest });
+  return { out, dropped };
+}
+
+agentControlRouter.post('/agent/v1/metrics', express.raw({ type: () => true, limit: '4mb', inflate: true }), wrap(async (req, res) => {
+  const ip = clientIp(req);
+  const cred = bearer(req);
+  const agent = cred ? await agentForCredential(cred) : null;
+  if (!agent) {
+    if (rateLimited(`mfail:${ip}`, 30, 60_000)) { res.set('Retry-After', '60'); return fail(res, 429, 'rate_limited', 'Too many failed uploads from this address.'); }
+    return fail(res, 401, 'invalid_credential', 'Agent credential missing or not valid.');
+  }
+  if (agent.blocked) return fail(res, 403, 'blocked', 'This agent is blocked on the Agents page.');
+  if (rateLimited(`metrics:${agent.id}`, 120, 60_000)) { res.set('Retry-After', '30'); return fail(res, 429, 'rate_limited', 'Too many uploads; slow down.'); }
+  const body = Buffer.isBuffer(req.body) ? req.body.toString('utf8') : '';
+  if (!body) return fail(res, 400, 'bad_request', 'Empty body.');
+  const parsed = parseExposition(body);
+  if (!parsed.series.length) return fail(res, 400, 'bad_request', `No valid samples${parsed.errors.length ? ` (first problem on line ${parsed.errors[0].line}: ${parsed.errors[0].reason})` : ''}.`);
+
+  const now = Date.now();
+  const agentTime = Number(req.get('x-agent-time'));
+  const skew = Number.isFinite(agentTime) && agentTime > 0 ? now - agentTime : 0;
+  const skewMs = Math.abs(skew) > 5000 ? skew : 0; // small differences are network delay, not clock error
+  const row = await one('SELECT id, host, platform, env, role, labels FROM agents WHERE id = $1', [agent.id]);
+  const { out, dropped } = relabel(parsed.series, row, { nowMs: now, skewMs });
+  if (!out.length) return res.json({ accepted: 0, dropped: dropped + parsed.errors.length, reason: 'all samples too old or in the future' });
+
+  const url = remoteWriteUrl();
+  if (!url) return fail(res, 503, 'not_configured', 'Prometheus is not configured on the server.');
+  let r;
+  try {
+    r = await writeToPrometheus(url, out);
+  } catch (e) {
+    res.set('Retry-After', '30');
+    return fail(res, 503, 'metrics_store_unavailable', 'The metrics store (Prometheus) is not reachable. Keep the data and retry.');
+  }
+  if (r.status >= 500 || r.status === 429) {
+    res.set('Retry-After', '30');
+    return fail(res, 503, 'metrics_store_unavailable', `Prometheus answered ${r.status}. Keep the data and retry.`);
+  }
+  if (now - (lastDataWrite.get(agent.id) || 0) > 30_000) {
+    lastDataWrite.set(agent.id, now);
+    if (lastDataWrite.size > 50_000) lastDataWrite.clear();
+    await q('UPDATE agents SET last_seen = now() WHERE id = $1', [agent.id]);
+  }
+  if (r.status >= 400) {
+    // e.g. out-of-order samples after a long outage: retrying would never succeed, so do not ask for it
+    return res.json({ accepted: 0, dropped: out.length, reason: `Prometheus refused the samples: ${r.text.slice(0, 200)}` });
+  }
+  res.json({ accepted: out.length, dropped: dropped + parsed.errors.length, clockSkewMs: skewMs });
 }));
 
 // Status + problems for one agents row (used by the API and the heartbeat answer)

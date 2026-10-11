@@ -55,17 +55,17 @@ func SaveIdentity(dir string, id *Identity, credential string) error {
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return err
 	}
-	if err := writeAtomic(credentialPath(dir), []byte(credential+"\n"), 0o600); err != nil {
+	if err := WriteFileAtomic(credentialPath(dir), []byte(credential+"\n"), 0o600); err != nil {
 		return fmt.Errorf("saving credential: %w", err)
 	}
 	b, _ := json.MarshalIndent(id, "", "  ")
-	if err := writeAtomic(identityPath(dir), append(b, '\n'), 0o640); err != nil {
+	if err := WriteFileAtomic(identityPath(dir), append(b, '\n'), 0o640); err != nil {
 		return fmt.Errorf("saving identity: %w", err)
 	}
 	return nil
 }
 
-func writeAtomic(path string, data []byte, mode os.FileMode) error {
+func WriteFileAtomic(path string, data []byte, mode os.FileMode) error {
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".tmp-*")
 	if err != nil {
 		return err
