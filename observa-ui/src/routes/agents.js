@@ -244,7 +244,7 @@ agentsRouter.delete('/agents/:id', requirePerm('integrations.manage'), wrap(asyn
 agentsRouter.get('/agent-tokens', requirePerm('integrations.manage'), wrap(async (req, res) => {
   const { rows } = await q(`SELECT t.*, (SELECT count(*) FROM agents a WHERE a.token_id = t.id) AS agents
                         FROM agent_tokens t ORDER BY t.revoked, t.created_at DESC`);
-  res.json({ tokens: rows.map(tokenRow) });
+  res.json({ tokens: rows.map(tokenRow), purgeMinutes: config.agent.tokenPurgeMinutes });
 }));
 
 agentsRouter.post('/agent-tokens', requirePerm('integrations.manage'), wrap(async (req, res) => {
@@ -278,10 +278,26 @@ agentsRouter.delete('/agent-tokens/:id/permanently', requirePerm('integrations.m
 }));
 
 agentsRouter.delete('/agent-tokens/:id', requirePerm('integrations.manage'), wrap(async (req, res) => {
-  const r = await one('UPDATE agent_tokens SET revoked = TRUE WHERE id = $1 AND NOT revoked RETURNING name, prefix', [Number(req.params.id) || 0]);
+  const r = await one('UPDATE agent_tokens SET revoked = TRUE, revoked_at = now() WHERE id = $1 AND NOT revoked RETURNING name, prefix', [Number(req.params.id) || 0]);
   if (!r) throw httpError(404, 'Token not found or already revoked.');
   tokenCache.clear();
   seen.clear();
   audit(req, 'agent.token.revoke', { name: r.name, prefix: r.prefix });
   res.json({ ok: true });
 }));
+
+// Revoked and expired tokens can never be used again: remove them automatically after
+// AGENT_TOKEN_PURGE_MINUTES (default 5; 0 keeps them). Active and used-up tokens are never touched.
+export async function purgeOldTokens() {
+  const min = config.agent.tokenPurgeMinutes;
+  if (!(min > 0)) return 0;
+  const { rows } = await q(`DELETE FROM agent_tokens
+      WHERE (revoked AND revoked_at < now() - make_interval(mins => $1))
+         OR (NOT revoked AND expires_at IS NOT NULL AND expires_at < now() - make_interval(mins => $1))
+      RETURNING name, prefix, revoked`, [min]);
+  if (rows.length) {
+    tokenCache.clear();
+    for (const r of rows) audit(null, 'agent.token.delete', { username: 'system', name: r.name, prefix: r.prefix, reason: r.revoked ? `revoked more than ${min} min ago` : `expired more than ${min} min ago` });
+  }
+  return rows.length;
+}

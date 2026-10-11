@@ -164,4 +164,12 @@ export const EXTRA_MIGRATIONS = [
       CREATE UNIQUE INDEX IF NOT EXISTS agents_enrolled_host_uq ON agents (platform, lower(host)) WHERE credential_hash IS NOT NULL;
     `,
   },
+  {
+    id: 6,
+    name: 'agent tokens: revoked_at, so revoked tokens can be removed automatically',
+    sql: `
+      ALTER TABLE agent_tokens ADD COLUMN IF NOT EXISTS revoked_at TIMESTAMPTZ;
+      UPDATE agent_tokens SET revoked_at = now() WHERE revoked AND revoked_at IS NULL;   -- already revoked: count from now
+    `,
+  },
 ];

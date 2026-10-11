@@ -8,7 +8,7 @@ import { pool, waitForDb, migrate, importLegacyJson } from './db.js';
 import { pruneAudit } from './store.js';
 import { loadDatasourceSettings } from './datasources.js';
 import { api } from './api.js';
-import { verifyAgent } from './routes/agents.js';
+import { verifyAgent, purgeOldTokens } from './routes/agents.js';
 import { agentControlRouter } from './routes/agent-control.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -68,6 +68,7 @@ if (ldapEnabled()) {
 setInterval(() => cleanupSessions().catch((e) => console.error('[db] session cleanup:', e.message)), 60_000).unref();
 setInterval(() => pruneAudit().catch((e) => console.error('[db] audit prune:', e.message)), 6 * 3_600_000).unref();
 pruneAudit().catch(() => {});
+setInterval(() => purgeOldTokens().catch((e) => console.error('[db] token purge:', e.message)), 60_000).unref();
 
 const server = app.listen(config.port, () => console.log(`[observa] ${config.brand} UI listening on :${config.port}`));
 for (const sig of ['SIGTERM', 'SIGINT']) {

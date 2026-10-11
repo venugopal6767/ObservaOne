@@ -463,7 +463,8 @@ export function agentsPage(main, ctx) {
     h('div', {}, h('button', { class: 'btn btn-primary', onclick: () => newToken() }, icon('plus', 15), 'New token'))));
     clear(body).append(h('div', { class: 'table-wrap' }, stateView('loading', { skeleton: 'table' })));
     try {
-      const { tokens: all } = await api('/agent-tokens');
+      const { tokens: all, purgeMinutes } = await api('/agent-tokens');
+      const purgeText = purgeMinutes > 0 ? `Revoked and expired tokens are deleted automatically after ${purgeMinutes} min.` : '';
       const status = (t) => (t.revoked ? pill('Revoked', 'muted') : t.expired ? pill('Expired', 'orange') : t.usedUp ? pill('Used up', 'muted') : pill('Active', 'green'));
       const dead = (t) => t.revoked || t.expired;   // can never be used again
       const old = all.filter(dead);
@@ -481,6 +482,7 @@ export function agentsPage(main, ctx) {
         h('label', { class: 'dim', style: { display: 'inline-flex', gap: '6px', alignItems: 'center', cursor: 'pointer' } },
           h('input', { type: 'checkbox', id: 'show-old-tokens', checked: showOldTokens, onchange: (e) => { showOldTokens = e.target.checked; drawTokens(); } }),
           `Show revoked and expired (${old.length})`),
+        purgeText ? h('span', { class: 'dim', style: { fontSize: '12px' } }, purgeText) : null,
         h('div', { class: 'grow' }),
         h('button', { class: 'btn btn-sm', onclick: () => remove(old) }, icon('trash', 14), `Delete revoked and expired (${old.length})`)) : null;
       const empty = all.length
@@ -500,7 +502,7 @@ export function agentsPage(main, ctx) {
           h('td', { class: 'num' }, dead(t)
             ? h('button', { class: 'btn btn-sm', onclick: () => remove([t]) }, 'Delete')
             : h('button', { class: 'btn btn-sm btn-danger', onclick: async () => {
-              if (!await confirmBox(`Revoke "${t.name}"?`, 'New enrollments with this token are refused at once. Enrolled Linux agents keep their own credentials; previous-generation agents using this token stop sending within a minute. A revoked token is hidden from this list.', 'Revoke')) return;
+              if (!await confirmBox(`Revoke "${t.name}"?`, 'New enrollments with this token are refused at once. Enrolled Linux agents keep their own credentials; previous-generation agents using this token stop sending within a minute. A revoked token is hidden from this list' + (purgeMinutes > 0 ? ` and deleted after ${purgeMinutes} min.` : '.'), 'Revoke')) return;
               try { await api(`/agent-tokens/${t.id}`, { method: 'DELETE' }); toast('Token revoked'); drawTokens(); load(); } catch (e) { toast(e.message, 'err'); }
             } }, 'Revoke')))))) : empty));
     } catch (e) {

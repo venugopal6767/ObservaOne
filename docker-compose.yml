@@ -123,6 +123,7 @@ services:
       AGENT_MIN_VERSION: ${AGENT_MIN_VERSION:-1.0.0}
       AGENT_ENROLL_FAILURES: ${AGENT_ENROLL_FAILURES:-10}
       AGENT_ENROLL_RATE: ${AGENT_ENROLL_RATE:-300}
+      AGENT_TOKEN_PURGE_MINUTES: ${AGENT_TOKEN_PURGE_MINUTES:-5}   # revoked/expired tokens deleted after this; 0 = keep
       DB_HOST: observa-db
       DB_NAME: observa
       DB_USER: observa
