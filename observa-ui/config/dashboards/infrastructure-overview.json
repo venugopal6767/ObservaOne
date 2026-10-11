@@ -11,7 +11,7 @@
     {
       "title": "Servers UP",
       "type": "stat",
-      "query": "sum(up{job=~\"windows|linux\"})",
+      "query": "count((max by (host) (last_over_time(up{agent=\"observaone\",job=~\"windows|linux\"}[120s])) or max by (host) (up{job=~\"windows|linux\",agent!=\"observaone\"})) == 1) or vector(0)",
       "unit": "none",
       "legend": "",
       "w": 3
@@ -19,7 +19,7 @@
     {
       "title": "Servers DOWN",
       "type": "stat",
-      "query": "count(up{job=~\"windows|linux\"} == 0) or vector(0)",
+      "query": "count((max by (host) (last_over_time(up{agent=\"observaone\",job=~\"windows|linux\"}[120s])) or max by (host) (up{job=~\"windows|linux\",agent!=\"observaone\"})) == 0) or vector(0)",
       "unit": "none",
       "legend": "",
       "w": 3
@@ -27,7 +27,7 @@
     {
       "title": "Average CPU",
       "type": "stat",
-      "query": "avg(clamp(max by (host) (last_over_time(observaone_cpu_utilization_ratio[1m])) * 100, 0, 100) or clamp(max by (host) (100 - avg by (instance, host) (rate(windows_cpu_time_total{mode=\"idle\"}[5m])) * 100), 0, 100) or clamp(max by (host) (100 - avg by (instance, host) (rate(node_cpu_seconds_total{mode=\"idle\",agent!=\"observaone\"}[5m])) * 100), 0, 100))",
+      "query": "avg(clamp(max by (host) (last_over_time(observaone_cpu_utilization_ratio[120s])) * 100, 0, 100) or (clamp(100 * (1 - sum by (host) (rate(windows_cpu_time_total{mode=\"idle\",core!=\"\"}[5m])) / sum by (host) (rate(windows_cpu_time_total{core!=\"\"}[5m]))), 0, 100) and on (host) (max by (host) (timestamp(windows_cpu_time_total{mode=\"idle\",core!=\"\"})) > time() - 120)) or (clamp(100 * (1 - sum by (host) (rate(node_cpu_seconds_total{mode=\"idle\",agent_id=\"\"}[5m])) / sum by (host) (rate(node_cpu_seconds_total{agent_id=\"\"}[5m]))), 0, 100) and on (host) (max by (host) (timestamp(node_cpu_seconds_total{mode=\"idle\",agent_id=\"\"})) > time() - 120)))",
       "unit": "percent",
       "legend": "",
       "w": 3
@@ -35,7 +35,7 @@
     {
       "title": "Average memory",
       "type": "stat",
-      "query": "avg(max by (host) (100 * (1 - windows_memory_available_bytes / windows_memory_physical_total_bytes)) or max by (host) (100 * (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)))",
+      "query": "avg(max by (host) (100 * last_over_time(observaone_memory_utilization_ratio[120s])) or (max by (host) (100 * (1 - windows_memory_available_bytes / windows_memory_physical_total_bytes)) and on (host) (max by (host) (timestamp(windows_memory_available_bytes)) > time() - 120)) or (max by (host) (100 * (1 - node_memory_MemAvailable_bytes{agent_id=\"\"} / node_memory_MemTotal_bytes{agent_id=\"\"})) and on (host) (max by (host) (timestamp(node_memory_MemAvailable_bytes{agent_id=\"\"})) > time() - 120)))",
       "unit": "percent",
       "legend": "",
       "w": 3
@@ -43,7 +43,7 @@
     {
       "title": "CPU used by server",
       "type": "line",
-      "query": "clamp(max by (host) (last_over_time(observaone_cpu_utilization_ratio[1m])) * 100, 0, 100) or clamp(max by (host) (100 - avg by (instance, host) (rate(windows_cpu_time_total{mode=\"idle\"}[5m])) * 100), 0, 100) or clamp(max by (host) (100 - avg by (instance, host) (rate(node_cpu_seconds_total{mode=\"idle\",agent!=\"observaone\"}[5m])) * 100), 0, 100)",
+      "query": "clamp(max by (host) (last_over_time(observaone_cpu_utilization_ratio[120s])) * 100, 0, 100) or (clamp(100 * (1 - sum by (host) (rate(windows_cpu_time_total{mode=\"idle\",core!=\"\"}[5m])) / sum by (host) (rate(windows_cpu_time_total{core!=\"\"}[5m]))), 0, 100) and on (host) (max by (host) (timestamp(windows_cpu_time_total{mode=\"idle\",core!=\"\"})) > time() - 120)) or (clamp(100 * (1 - sum by (host) (rate(node_cpu_seconds_total{mode=\"idle\",agent_id=\"\"}[5m])) / sum by (host) (rate(node_cpu_seconds_total{agent_id=\"\"}[5m]))), 0, 100) and on (host) (max by (host) (timestamp(node_cpu_seconds_total{mode=\"idle\",agent_id=\"\"})) > time() - 120))",
       "unit": "percent",
       "legend": "{{host}}",
       "w": 6
@@ -51,7 +51,7 @@
     {
       "title": "Memory used by server",
       "type": "area",
-      "query": "max by (host) (100 * (1 - windows_memory_available_bytes / windows_memory_physical_total_bytes)) or max by (host) (100 * (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes))",
+      "query": "max by (host) (100 * last_over_time(observaone_memory_utilization_ratio[120s])) or (max by (host) (100 * (1 - windows_memory_available_bytes / windows_memory_physical_total_bytes)) and on (host) (max by (host) (timestamp(windows_memory_available_bytes)) > time() - 120)) or (max by (host) (100 * (1 - node_memory_MemAvailable_bytes{agent_id=\"\"} / node_memory_MemTotal_bytes{agent_id=\"\"})) and on (host) (max by (host) (timestamp(node_memory_MemAvailable_bytes{agent_id=\"\"})) > time() - 120))",
       "unit": "percent",
       "legend": "{{host}}",
       "w": 6
@@ -59,7 +59,7 @@
     {
       "title": "Lowest disk free by server",
       "type": "bar",
-      "query": "min by (host) (100 * windows_logical_disk_free_bytes{volume!~\"HarddiskVolume.*\"} / windows_logical_disk_size_bytes{volume!~\"HarddiskVolume.*\"}) or min by (host) (100 * node_filesystem_avail_bytes{fstype!~\"tmpfs|overlay|squashfs|ramfs|nsfs|fuse.*\"} / node_filesystem_size_bytes{fstype!~\"tmpfs|overlay|squashfs|ramfs|nsfs|fuse.*\"})",
+      "query": "min by (host) (100 * (1 - last_over_time(observaone_filesystem_utilization_ratio{fstype!~\"tmpfs|overlay|squashfs|ramfs|nsfs|fuse.*\"}[120s]))) or (min by (host) (100 * windows_logical_disk_free_bytes{volume!~\"HarddiskVolume.*\"} / windows_logical_disk_size_bytes{volume!~\"HarddiskVolume.*\"}) and on (host) (max by (host) (timestamp(windows_logical_disk_size_bytes{volume!~\"HarddiskVolume.*\"})) > time() - 120)) or (min by (host) (100 * node_filesystem_avail_bytes{fstype!~\"tmpfs|overlay|squashfs|ramfs|nsfs|fuse.*\",agent_id=\"\"} / node_filesystem_size_bytes{fstype!~\"tmpfs|overlay|squashfs|ramfs|nsfs|fuse.*\",agent_id=\"\"}) and on (host) (max by (host) (timestamp(node_filesystem_size_bytes{fstype!~\"tmpfs|overlay|squashfs|ramfs|nsfs|fuse.*\",agent_id=\"\"})) > time() - 120))",
       "unit": "percent",
       "legend": "{{host}}",
       "w": 6
@@ -67,7 +67,7 @@
     {
       "title": "Server status",
       "type": "table",
-      "query": "up{job=~\"windows|linux\"}",
+      "query": "(max by (host) (last_over_time(up{agent=\"observaone\",job=~\"windows|linux\"}[120s])) or max by (host) (up{job=~\"windows|linux\",agent!=\"observaone\"}))",
       "unit": "none",
       "legend": "{{host}}",
       "w": 6

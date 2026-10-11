@@ -351,6 +351,7 @@ export function modal(title, body, actions = [], { wide = false } = {}) {
   document.body.append(overlay);
   document.addEventListener('keydown', onKey);
   setTimeout(() => (overlay.querySelector('input,select,textarea') || overlay.querySelector('.modal-foot .btn-primary, .modal-foot .btn-danger, .modal-foot .btn') || overlay.querySelector('.modal-head .icon-btn'))?.focus(), 30);
+  overlay.closeDialog = close; // lets the router close it properly (keyboard handler included)
   return close;
 }
 export function field(label, input, hint) {

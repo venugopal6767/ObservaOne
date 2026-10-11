@@ -18,7 +18,7 @@
     {
       "title": "Status",
       "type": "stat",
-      "query": "max(last_over_time(up{job=~\"linux|windows\",host=\"$host\"}[1m]))",
+      "query": "max(last_over_time(up{job=\"linux\",host=\"$host\"}[120s]))",
       "unit": "none",
       "legend": "",
       "w": 3
@@ -26,7 +26,7 @@
     {
       "title": "CPU used",
       "type": "stat",
-      "query": "clamp(max(last_over_time(observaone_cpu_utilization_ratio{host=\"$host\"}[1m])) * 100, 0, 100) or clamp(100 - (avg(rate(node_cpu_seconds_total{host=\"$host\",mode=\"idle\",agent!=\"observaone\"}[5m])) * 100), 0, 100)",
+      "query": "clamp(max(last_over_time(observaone_cpu_utilization_ratio{host=\"$host\"}[120s])) * 100, 0, 100) or clamp(100 * (1 - sum(rate(node_cpu_seconds_total{host=\"$host\",mode=\"idle\",agent_id=\"\"}[5m])) / sum(rate(node_cpu_seconds_total{host=\"$host\",agent_id=\"\"}[5m]))), 0, 100)",
       "unit": "percent",
       "legend": "",
       "w": 3
@@ -34,7 +34,7 @@
     {
       "title": "Memory used",
       "type": "stat",
-      "query": "100 * (1 - max(last_over_time(node_memory_MemAvailable_bytes{host=\"$host\"}[1m])) / max(last_over_time(node_memory_MemTotal_bytes{host=\"$host\"}[1m])))",
+      "query": "100 * (1 - max(last_over_time(node_memory_MemAvailable_bytes{host=\"$host\"}[120s])) / max(last_over_time(node_memory_MemTotal_bytes{host=\"$host\"}[120s])))",
       "unit": "percent",
       "legend": "",
       "w": 3
@@ -50,7 +50,7 @@
     {
       "title": "CPU used %",
       "type": "line",
-      "query": "clamp(max(last_over_time(observaone_cpu_utilization_ratio{host=\"$host\"}[1m])) * 100, 0, 100) or clamp(100 - (avg(rate(node_cpu_seconds_total{host=\"$host\",mode=\"idle\",agent!=\"observaone\"}[5m])) * 100), 0, 100)",
+      "query": "clamp(max(last_over_time(observaone_cpu_utilization_ratio{host=\"$host\"}[120s])) * 100, 0, 100) or clamp(100 * (1 - sum(rate(node_cpu_seconds_total{host=\"$host\",mode=\"idle\",agent_id=\"\"}[5m])) / sum(rate(node_cpu_seconds_total{host=\"$host\",agent_id=\"\"}[5m]))), 0, 100)",
       "unit": "percent",
       "legend": "CPU",
       "w": 6

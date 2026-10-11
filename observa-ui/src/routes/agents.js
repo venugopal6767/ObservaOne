@@ -210,7 +210,9 @@ agentsRouter.get('/agents/:id', requirePerm('view'), wrap(async (req, res, next)
   if (req.params.id === 'install-info') return next();
   const a = await one(`SELECT a.*, t.name AS token_name FROM agents a LEFT JOIN agent_tokens t ON t.id = a.token_id WHERE a.id = $1`, [req.params.id]);
   if (!a) throw httpError(404, 'Agent not found.', { state: 'not_found' });
-  res.json({ agent: { ...toAgent(a, Date.now(), {}), diag: publicDiag(a.diag) } });
+  // same values as the list: this host's CPU / memory / disk (missing or stale = null, shown as "-")
+  const [cpu, mem, disk] = await Promise.all([safeByHost(cpuByHost()), safeByHost(memByHost()), safeByHost(diskFreeByHost())]);
+  res.json({ agent: { ...toAgent(a, Date.now(), { cpu, mem, disk }), diag: publicDiag(a.diag) } });
 }));
 
 agentsRouter.get('/agents/install-info', requirePerm('view'), wrap(async (req, res) => {

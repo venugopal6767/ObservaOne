@@ -284,8 +284,12 @@ export function agentsPage(main, ctx) {
       Object.keys(coll).length ? h('div', { class: 'panel', style: { marginTop: '14px' } }, h('div', { class: 'panel-head' }, h('h3', {}, 'Collectors')),
         h('table', { class: 'tbl' }, h('thead', {}, h('tr', {}, h('th', {}, 'Collector'), h('th', {}, 'State'), h('th', {}, 'Detail'))),
           h('tbody', {}, Object.keys(coll).sort().map((k) => h('tr', {}, h('td', {}, k), h('td', {}, pill(coll[k], collTone[coll[k]] || 'muted')), h('td', { class: 'dim' }, errs[k] || '')))))) : null,
-      ctx.canOpen('/dashboards/linux-servers') && d.platform === 'linux'
-        ? h('p', { style: { marginTop: '12px' } }, h('a', { href: `/dashboards/linux-servers?host=${encodeURIComponent(d.host)}` }, 'Open the Linux Servers dashboard for this host →')) : null,
+      (() => { // host dashboard: Windows Servers for Windows, Linux Servers for the rest (Docker / Kubernetes hosts are Linux)
+        const dash = d.platform === 'windows' ? ['windows-servers', 'Windows Servers'] : ['linux-servers', 'Linux Servers'];
+        if (!ctx.canOpen(`/dashboards/${dash[0]}`)) return null;
+        return h('p', { style: { marginTop: '12px' } }, h('a', { href: `/dashboards/${dash[0]}`, 'data-link': true,
+          onclick: () => sessionStorage.setItem(`oo.var.${dash[0]}.host`, d.host) }, `Open the ${dash[1]} dashboard for this host →`));
+      })(),
     ].filter(Boolean));
   }
 

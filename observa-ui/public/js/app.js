@@ -330,6 +330,8 @@ tableA11y.observe(document.getElementById('app') || document.body, { childList: 
 // ---------------- router ----------------
 function stopPage() {
   clearInterval(state.timer);
+  // a dialog belongs to the page that opened it: going to another page closes it
+  document.querySelectorAll('.modal-overlay').forEach((o) => (o.closeDialog ? o.closeDialog() : o.remove()));
   state.current?.destroy?.();
   state.charts.forEach((c) => c.destroy());
   state.charts = [];
