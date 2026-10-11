@@ -88,22 +88,27 @@ $os = (Get-CimInstance Win32_OperatingSystem).Caption -replace '^Microsoft ', ''
 
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-function Enable-CertPin([string]$fp) {
-  if (-not ('OOPin' -as [type])) {
+function Enable-CertPin([string]$fp, [string]$pinHost) {
+  # Pinned fingerprint for the ObservaOne server ONLY; every other site (GitHub downloads) keeps the normal
+  # Windows certificate check. Compiled: a script-block callback fails in Windows PowerShell 5.1.
+  if (-not ('ObservaOneCertPin' -as [type])) {
     Add-Type @"
 using System; using System.Net; using System.Net.Security;
 using System.Security.Cryptography; using System.Security.Cryptography.X509Certificates;
-public static class OOPin {
-  static string fp;
+public static class ObservaOneCertPin {
+  static string fp; static string host;
   static bool Check(object s, X509Certificate c, X509Chain ch, SslPolicyErrors e) {
+    var req = s as HttpWebRequest;
+    bool ours = req != null && string.Equals(req.RequestUri.Host, host, StringComparison.OrdinalIgnoreCase);
+    if (!ours) return e == SslPolicyErrors.None;
     if (c == null || fp == null) return false;
     using (var h = SHA256.Create()) return BitConverter.ToString(h.ComputeHash(c.GetRawCertData())).Replace("-", "").ToLower() == fp;
   }
-  public static void Enable(string f) { fp = f; ServicePointManager.ServerCertificateValidationCallback = Check; }
+  public static void Enable(string f, string hst) { fp = f; host = hst; ServicePointManager.ServerCertificateValidationCallback = Check; }
 }
 "@
   }
-  [OOPin]::Enable($fp)
+  [ObservaOneCertPin]::Enable($fp, $pinHost)
 }
 
 function Get-DerSha256([byte[]]$der) {
@@ -125,7 +130,7 @@ try {
     $script:PinnedFingerprint = $want
     # compiled check: a PowerShell script block as the callback fails in Windows PowerShell 5.1
     # ("unexpected error occurred on a send") because it can run on a thread without a runspace
-    Enable-CertPin $want
+    Enable-CertPin $want ([Uri]$Server).Host
     Say 'Fetching the server certificate'
     $crt = Join-Path $tmp 'server.crt'
     Invoke-WebRequest -UseBasicParsing -Uri "$Server/agent/server.crt" -OutFile $crt

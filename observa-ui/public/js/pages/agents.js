@@ -339,14 +339,15 @@ export function agentsPage(main, ctx) {
         if (wiz.securityLog) args.push('-SecurityLog');
         const lines = ["[Net.ServicePointManager]::SecurityProtocol = 'Tls12'"];
         if (pin) {
-          // compiled fingerprint check: a script-block callback fails in Windows PowerShell 5.1
+          // compiled fingerprint check, for this server only (other sites keep the normal check);
+          // a script-block callback fails in Windows PowerShell 5.1
           lines.push('Add-Type @"');
           lines.push('using System; using System.Net; using System.Net.Security; using System.Security.Cryptography; using System.Security.Cryptography.X509Certificates;');
-          lines.push('public static class OOPin { static string fp;');
-          lines.push('  static bool Check(object s, X509Certificate c, X509Chain ch, SslPolicyErrors e) { if (c == null) return false; using (var h = SHA256.Create()) return BitConverter.ToString(h.ComputeHash(c.GetRawCertData())).Replace("-", "").ToLower() == fp; }');
-          lines.push('  public static void Enable(string f) { fp = f; ServicePointManager.ServerCertificateValidationCallback = Check; } }');
+          lines.push('public static class ObservaOneCertPin { static string fp; static string host;');
+          lines.push('  static bool Check(object s, X509Certificate c, X509Chain ch, SslPolicyErrors e) { var r = s as HttpWebRequest; if (r == null || !string.Equals(r.RequestUri.Host, host, StringComparison.OrdinalIgnoreCase)) return e == SslPolicyErrors.None; if (c == null) return false; using (var h = SHA256.Create()) return BitConverter.ToString(h.ComputeHash(c.GetRawCertData())).Replace("-", "").ToLower() == fp; }');
+          lines.push('  public static void Enable(string f, string hst) { fp = f; host = hst; ServicePointManager.ServerCertificateValidationCallback = Check; } }');
           lines.push('"@');
-          lines.push(`[OOPin]::Enable('${c.sha256}')`);
+          lines.push(`[ObservaOneCertPin]::Enable('${c.sha256}', '${new URL(S).hostname}')`);
         }
         lines.push(`& ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing ${S}/agent/install.ps1).Content)) ${args.join(' ')}`);
         return lines.join('\n');
