@@ -126,6 +126,28 @@ api.get('/prom/metric-names', wrap(async (req, res) => {
   res.json(metricNamesCache.names);
 }));
 
+// Every metric seen in the last hour, with its type and description when Prometheus knows them
+// (scraped data has them; pushed data often does not: the type is then guessed from the name).
+let metricCatalogCache = { at: 0, list: [] };
+api.get('/prom/metric-catalog', wrap(async (req, res) => {
+  if (Date.now() - metricCatalogCache.at > 60_000) {
+    const end = nowSec();
+    const [names, meta] = await Promise.all([
+      prom('/api/v1/label/__name__/values', { start: end - 3600, end }),
+      prom('/api/v1/metadata').catch(() => ({})),
+    ]);
+    metricCatalogCache = {
+      at: Date.now(),
+      list: names.map((name) => {
+        const m = meta?.[name]?.[0] || {};
+        return { name, type: m.type || (/_total$/.test(name) ? 'counter' : /_bucket$/.test(name) ? 'histogram' : 'gauge'), help: m.help || '' };
+      }),
+    };
+  }
+  res.set('Cache-Control', 'no-store');
+  res.json(metricCatalogCache.list);
+}));
+
 api.get('/prom/label-values', wrap(async (req, res) => {
   const label = String(req.query.label || '');
   if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(label)) throw httpError(400, 'bad label name');
