@@ -19,6 +19,7 @@ import { getDatasources, ds, requireConfigured, updateDatasource, testDatasource
 import { cpuByHost, memByHost, diskFreeByHost, SERVERS_UP } from './queries.js';
 import { classifyService, summarizeServices, agentHostHealth } from './health.js';
 import { MODULES, enabledModules, moduleSettings, setEnabledModules, requireModule } from './modules.js';
+import { describeAgent } from './routes/agent-control.js';
 
 export const api = express.Router();
 api.use(express.json({ limit: '200kb' }));
@@ -169,7 +170,50 @@ api.get('/prom/targets', wrap(async (req, res) => {
       });
     }
   } catch { /* Prometheus without agent data */ }
-  res.json([...pulled, ...pushed]);
+
+  // One row per server, whatever collects it (Prometheus scrape, ObservaOne Agent, or both).
+  // Enrolled agents also bring their heartbeat state, so "the agent stopped reporting" is told apart
+  // from "Prometheus cannot scrape the host". Agents enrolled but without data yet are listed too.
+  let enrolled = [];
+  try {
+    enrolled = (await q("SELECT * FROM agents WHERE platform IN ('linux', 'windows')")).rows;
+  } catch { /* database problem: show what Prometheus knows */ }
+  const now = Date.now();
+  const servers = new Map(); // host (lower case) -> merged row
+  const isServer = (t) => t.job === 'linux' || t.job === 'windows';
+  const merge = (t) => {
+    const k = String(t.host).toLowerCase();
+    const cur = servers.get(k);
+    if (!cur) { servers.set(k, { ...t, collection: [t.source] }); return; }
+    if (!cur.collection.includes(t.source)) cur.collection.push(t.source);
+    if (t.source === 'scrape') { cur.scrapeHealth = t.health; cur.scrapeError = t.lastError; cur.instance = t.instance; }
+    else Object.assign(cur, { ...t, collection: cur.collection, scrapeHealth: cur.scrapeHealth ?? (cur.source === 'scrape' ? cur.health : undefined), scrapeError: cur.scrapeError ?? (cur.source === 'scrape' ? cur.lastError : undefined) });
+  };
+  for (const t of [...pulled.filter(isServer), ...pushed]) merge(t);
+  for (const a of enrolled) {
+    const k = a.host.toLowerCase();
+    const d = describeAgent(a, now);
+    const health = { online: 'up', attention: 'up', not_reporting: 'not_reporting', offline: 'not_reporting', pending: 'unknown', blocked: 'unknown' }[d.status] || 'unknown';
+    const agentInfo = { agentId: a.id, agentStatus: d.status, agentReason: d.reason || d.problems.join(' '), lastHeartbeat: a.last_heartbeat };
+    const cur = servers.get(k);
+    if (cur) {
+      if (!cur.collection.includes('agent')) cur.collection.push('agent');
+      Object.assign(cur, agentInfo);
+      if (a.credential_hash) { // enrolled agent: its heartbeat decides; keep a scrape failure visible separately
+        if (cur.source === 'scrape' && cur.scrapeHealth === undefined) { cur.scrapeHealth = cur.health; cur.scrapeError = cur.lastError; }
+        cur.health = health;
+        cur.lastError = agentInfo.agentReason;
+        cur.source = 'agent';
+      }
+    } else if (a.credential_hash) {
+      servers.set(k, {
+        job: a.platform, instance: 'agent', host: a.host, os: a.platform, env: a.env, role: a.role, platform: a.platform,
+        health, lastScrape: null, durationMs: 0, source: 'agent', collection: ['agent'],
+        lastError: agentInfo.agentReason || 'Enrolled; no metrics received yet.', ...agentInfo,
+      });
+    }
+  }
+  res.json([...servers.values(), ...pulled.filter((t) => !isServer(t))]);
 }));
 
 // ---------------- Overview (one call for the whole page) ----------------

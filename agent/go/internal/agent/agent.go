@@ -296,6 +296,9 @@ func (a *Agent) flush(ctx context.Context) error {
 				a.buf = a.buf[1:]
 			}
 			a.lastPushOK = time.Now()
+			if strings.HasPrefix(a.lastErr, "upload") { // a problem that is over is not reported any more
+				a.lastErr = ""
+			}
 			a.mu.Unlock()
 		case errors.As(err, &ae) && !ae.Retryable() && ae.Status != 401 && ae.Status != 403:
 			// the server refused THIS payload (bad data): drop it, keep going

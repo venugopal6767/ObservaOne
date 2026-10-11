@@ -11,6 +11,16 @@ export function infrastructurePage(main, ctx) {
   const other = h('div', { style: { marginTop: '18px' } });
   main.append(h('div', { class: 'page-head' }, h('div', {}, h('h1', {}, 'Infrastructure'), h('p', {}, 'Every server: scraped by Prometheus or sending through the ObservaOne Agent'))), out, other);
 
+  // how this server is collected: "ObservaOne Agent", "Prometheus scrape (host:9100)" or both
+  function collectedBy(t) {
+    const c = t.collection || [t.source];
+    const agentLink = ctx.canOpen('/agents')
+      ? h('a', { href: `/agents/${t.os === 'windows' ? 'windows' : 'linux'}`, 'data-link': true }, 'ObservaOne Agent') : 'ObservaOne Agent';
+    const scrape = h('span', { class: 'mono' }, `scrape ${t.instance && t.instance !== 'agent' ? t.instance : ''}`.trim());
+    if (c.includes('agent') && c.includes('scrape')) return [agentLink, ' + ', scrape];
+    return c.includes('agent') ? agentLink : scrape;
+  }
+
   async function load() {
     try {
       // host list is required; CPU/memory/disk are extras: if they fail we say so (partial data), never show 0
@@ -31,23 +41,27 @@ export function infrastructurePage(main, ctx) {
       page = pg.page;
       clear(out).append(failed.length ? stateBanner('partial', `Some values could not be loaded and show "-". ${failed.join(' · ')}`) : '',
         servers.length ? h('div', { class: 'table-wrap' }, h('table', { class: 'tbl' },
-        h('thead', {}, h('tr', {}, ['Server', 'Status', 'OS', 'Env', 'Role', 'CPU', 'Memory', 'Lowest disk free', 'Last scrape', ''].map((x, i) => h('th', { class: i >= 5 && i <= 7 ? 'num' : '' }, x)))),
+        h('thead', {}, h('tr', {}, ['Server', 'Status', 'OS', 'Env', 'Role', 'CPU', 'Memory', 'Lowest disk free', 'Last seen', ''].map((x, i) => h('th', { class: i >= 5 && i <= 7 ? 'num' : '' }, x)))),
         h('tbody', {}, pg.rows.map((t) => h('tr', {},
-          h('td', {}, h('b', { style: { fontWeight: 600 } }, t.host), t.source === 'agent' ? h('div', { class: 'dim', style: { fontSize: '11px' } }, ctx.canOpen('/agents') ? h('a', { href: '/agents', 'data-link': true }, 'via ObservaOne Agent') : 'via ObservaOne Agent') : h('div', { class: 'dim mono', style: { fontSize: '11px' } }, t.instance)),
-          h('td', {}, healthPill(t.health, t.lastError || undefined)),
+          h('td', {}, h('b', { style: { fontWeight: 600 } }, t.host), h('div', { class: 'dim', style: { fontSize: '11px' } }, collectedBy(t))),
+          h('td', {}, healthPill(t.health, t.lastError || undefined),
+            // both methods: a failing scrape is shown separately from the agent's own state
+            t.scrapeHealth && t.scrapeHealth !== 'up' && (t.collection || []).length > 1
+              ? h('div', { class: 'c-orange', style: { fontSize: '11px', marginTop: '3px' }, title: t.scrapeError || '' }, `Prometheus scrape: ${t.scrapeHealth}`) : null),
           h('td', {}, t.os === 'windows' ? 'Windows' : 'Linux'),
           h('td', {}, t.env || '-'), h('td', {}, t.role || '-'),
           h('td', { class: `num ${tone(C.get(t.host))}` }, fmt(C.get(t.host), 'percent')),
           h('td', { class: `num ${tone(M.get(t.host))}` }, fmt(M.get(t.host), 'percent')),
           h('td', { class: `num ${tone(D.get(t.host), false)}` }, fmt(D.get(t.host), 'percent')),
-          h('td', { class: 'dim', title: t.source === 'agent' ? 'Last data received from the agent' : 'Last scrape by Prometheus' }, t.lastScrape ? timeEl(Date.parse(t.lastScrape), ago(t.lastScrape)) : '-'),
+          h('td', { class: 'dim', title: t.source === 'agent' ? 'Last heartbeat (or data) from the agent' : 'Last scrape by Prometheus' }, (t.lastHeartbeat || t.lastScrape) ? timeEl(Date.parse(t.lastHeartbeat || t.lastScrape), ago(t.lastHeartbeat || t.lastScrape)) : '-'),
           h('td', {}, !ctx.canOpen('/dashboards') ? null : h('a', { href: `/dashboards/${t.os === 'windows' ? 'windows' : 'linux'}-servers`, 'data-link': true, onclick: () => sessionStorage.setItem(`oo.var.${t.os === 'windows' ? 'windows' : 'linux'}-servers.host`, t.host), title: 'Open dashboard', 'aria-label': `Open dashboard for ${t.host}` }, icon('dashboards', 15))))))), pg.foot)
         : h('div', { class: 'table-wrap' }, stateView('empty', {
           title: 'No monitored hosts available',
           text: 'Install the ObservaOne Agent on a server, or add it to prometheus/targets/windows.yml or linux.yml.',
           action: ctx.canOpen('/agents') ? h('a', { href: '/agents', 'data-link': true, class: 'btn btn-sm' }, 'Install an agent') : null,
         })));
-      clear(other).append(h('h3', { style: { margin: '0 0 10px', fontSize: '14px' } }, 'Monitoring components'),
+      clear(other);
+      if (rest.length) other.append(h('h3', { style: { margin: '0 0 10px', fontSize: '14px' } }, 'Monitoring components'),
         h('div', { class: 'table-wrap' }, h('table', { class: 'tbl' },
           h('thead', {}, h('tr', {}, h('th', {}, 'Job'), h('th', {}, 'Endpoint'), h('th', {}, 'Status'), h('th', { class: 'num' }, 'Scrape time'), h('th', {}, 'Error'))),
           h('tbody', {}, rest.map((t) => h('tr', {}, h('td', {}, t.job), h('td', { class: 'mono' }, t.instance),
