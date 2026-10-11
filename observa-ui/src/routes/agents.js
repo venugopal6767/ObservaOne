@@ -265,6 +265,18 @@ agentsRouter.post('/agent-tokens', requirePerm('integrations.manage'), wrap(asyn
   res.json({ token, ...tokenRow(r) });
 }));
 
+// Permanently remove a token that can no longer be used (revoked or expired). Active tokens must be revoked first,
+// so this can never cut off a working agent. Agents enrolled with it keep running (their token link becomes empty);
+// the audit log keeps the record of the token.
+agentsRouter.delete('/agent-tokens/:id/permanently', requirePerm('integrations.manage'), wrap(async (req, res) => {
+  const r = await one(`DELETE FROM agent_tokens WHERE id = $1 AND (revoked OR (expires_at IS NOT NULL AND expires_at < now()))
+                       RETURNING name, prefix`, [Number(req.params.id) || 0]);
+  if (!r) throw httpError(409, 'Only revoked or expired tokens can be deleted. Revoke the token first.');
+  tokenCache.clear();
+  audit(req, 'agent.token.delete', { name: r.name, prefix: r.prefix });
+  res.json({ ok: true });
+}));
+
 agentsRouter.delete('/agent-tokens/:id', requirePerm('integrations.manage'), wrap(async (req, res) => {
   const r = await one('UPDATE agent_tokens SET revoked = TRUE WHERE id = $1 AND NOT revoked RETURNING name, prefix', [Number(req.params.id) || 0]);
   if (!r) throw httpError(404, 'Token not found or already revoked.');

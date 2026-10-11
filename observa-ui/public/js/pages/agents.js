@@ -55,7 +55,7 @@ export function agentsPage(main, ctx) {
   let section = fromPath();
   let view = ctx.params.get('tab') === 'install' ? 'install' : 'agents'; // inside a platform section
   let data = null, info = null, loadError = null;
-  let filter = '', statusFilter = 'all', page = 0, installDrawn = false;
+  let filter = '', statusFilter = 'all', page = 0, installDrawn = false, showOldTokens = false;
   const wiz = { distro: 'debian', env: '', role: '', labels: '', logs: '', cluster: '', token: '', securityLog: false };
 
   const nav = h('div', { class: 'agent-sections', role: 'tablist', 'aria-label': 'Agent platforms' });
@@ -463,9 +463,30 @@ export function agentsPage(main, ctx) {
     h('div', {}, h('button', { class: 'btn btn-primary', onclick: () => newToken() }, icon('plus', 15), 'New token'))));
     clear(body).append(h('div', { class: 'table-wrap' }, stateView('loading', { skeleton: 'table' })));
     try {
-      const { tokens } = await api('/agent-tokens');
+      const { tokens: all } = await api('/agent-tokens');
       const status = (t) => (t.revoked ? pill('Revoked', 'muted') : t.expired ? pill('Expired', 'orange') : t.usedUp ? pill('Used up', 'muted') : pill('Active', 'green'));
-      clear(body).append(h('div', { class: 'table-wrap' }, tokens.length ? h('table', { class: 'tbl' },
+      const dead = (t) => t.revoked || t.expired;   // can never be used again
+      const old = all.filter(dead);
+      const tokens = showOldTokens ? all : all.filter((t) => !dead(t));
+      const remove = async (list) => {
+        const one = list.length === 1;
+        if (!await confirmBox(one ? `Delete "${list[0].name}"?` : `Delete ${list.length} revoked or expired tokens?`,
+          'They are removed from this list for good. Agents keep running, and the audit log keeps the record.', 'Delete')) return;
+        let failed = 0;
+        for (const t of list) { try { await api(`/agent-tokens/${t.id}/permanently`, { method: 'DELETE' }); } catch { failed++; } }
+        toast(failed ? `${list.length - failed} deleted, ${failed} failed` : one ? 'Token deleted' : `${list.length} tokens deleted`, failed ? 'err' : undefined);
+        drawTokens();
+      };
+      const bar = old.length ? h('div', { class: 'toolbar' },
+        h('label', { class: 'dim', style: { display: 'inline-flex', gap: '6px', alignItems: 'center', cursor: 'pointer' } },
+          h('input', { type: 'checkbox', id: 'show-old-tokens', checked: showOldTokens, onchange: (e) => { showOldTokens = e.target.checked; drawTokens(); } }),
+          `Show revoked and expired (${old.length})`),
+        h('div', { class: 'grow' }),
+        h('button', { class: 'btn btn-sm', onclick: () => remove(old) }, icon('trash', 14), `Delete revoked and expired (${old.length})`)) : null;
+      const empty = all.length
+        ? stateView('empty', { title: 'No active tokens', text: 'Create a token when you install an agent. Revoked and expired tokens are hidden.' })
+        : stateView('empty', { title: 'No tokens yet', text: 'Create a token, then use it when you install an agent.' });
+      clear(body).append(bar || '', h('div', { class: 'table-wrap' }, tokens.length ? h('table', { class: 'tbl' },
         h('thead', {}, h('tr', {}, ['Name', 'Token', 'Used', 'Agents', 'Created', 'Last used', 'Expires', 'Status', ''].map((x) => h('th', {}, x)))),
         h('tbody', {}, tokens.map((t) => h('tr', {},
           h('td', {}, h('b', { style: { fontWeight: 600 } }, t.name)),
@@ -476,10 +497,12 @@ export function agentsPage(main, ctx) {
           h('td', { class: 'dim' }, t.lastUsed ? ago(t.lastUsed) : 'never'),
           h('td', { class: 'dim' }, t.expiresAt ? dateTime(Date.parse(t.expiresAt)) : 'never'),
           h('td', {}, status(t)),
-          h('td', { class: 'num' }, t.revoked ? null : h('button', { class: 'btn btn-sm btn-danger', onclick: async () => {
-            if (!await confirmBox(`Revoke "${t.name}"?`, 'New enrollments with this token are refused at once. Enrolled Linux agents keep their own credentials; previous-generation agents using this token stop sending within a minute.', 'Revoke')) return;
-            try { await api(`/agent-tokens/${t.id}`, { method: 'DELETE' }); toast('Token revoked'); drawTokens(); load(); } catch (e) { toast(e.message, 'err'); }
-          } }, 'Revoke')))))) : stateView('empty', { title: 'No tokens yet', text: 'Create a token, then use it when you install an agent.' })));
+          h('td', { class: 'num' }, dead(t)
+            ? h('button', { class: 'btn btn-sm', onclick: () => remove([t]) }, 'Delete')
+            : h('button', { class: 'btn btn-sm btn-danger', onclick: async () => {
+              if (!await confirmBox(`Revoke "${t.name}"?`, 'New enrollments with this token are refused at once. Enrolled Linux agents keep their own credentials; previous-generation agents using this token stop sending within a minute. A revoked token is hidden from this list.', 'Revoke')) return;
+              try { await api(`/agent-tokens/${t.id}`, { method: 'DELETE' }); toast('Token revoked'); drawTokens(); load(); } catch (e) { toast(e.message, 'err'); }
+            } }, 'Revoke')))))) : empty));
     } catch (e) {
       clear(body).append(h('div', { class: 'table-wrap' }, stateFromError(e, 'Tokens')));
     }
