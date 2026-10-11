@@ -92,6 +92,25 @@ func (b *Batch) Add(name, typ, help string, value float64, labels ...string) {
 	f.samples = append(f.samples, sample{labels: sb.String(), value: value})
 }
 
+// Merge copies every sample of o into b (used to keep a collector's samples only when it succeeded).
+func (b *Batch) Merge(o *Batch) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, name := range o.order {
+		f := o.families[name]
+		t := b.families[name]
+		if t == nil {
+			t = &family{typ: f.typ, help: f.help}
+			b.families[name] = t
+			b.order = append(b.order, name)
+		}
+		t.samples = append(t.samples, f.samples...)
+	}
+	b.Dropped += o.Dropped
+}
+
 // Len is the number of samples in the batch.
 func (b *Batch) Len() int {
 	b.mu.Lock()
