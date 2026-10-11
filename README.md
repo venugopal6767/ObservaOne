@@ -125,31 +125,36 @@ The UI keeps its data in the `observa-db` container:
 One agent per server collects **metrics, logs and traces** and sends them to ObservaOne over HTTPS.
 Nothing on the server has to be reachable from the monitoring server (no inbound ports, no firewall rule).
 
-| Platform | What the agent collects |
-|---|---|
-| **Linux** (systemd) | CPU, memory, disk, network, systemd services (node_exporter) · syslog/messages/auth logs or the journal · your log files · traces from apps |
-| **Windows** Server 2016+ | windows_exporter metrics · Application + System event logs (Security optional) · your log files · traces |
-| **Docker host** | the host + every container (cAdvisor) · container stdout/stderr · traces |
-| **Kubernetes / OpenShift** | every node, container CPU/memory, pod logs, Kubernetes events, kube-state-metrics · traces on the node IP |
+| Platform | Agent | What it collects |
+|---|---|---|
+| **Linux** (systemd) | **ObservaOne Go agent 1.1** (new) | CPU, memory, filesystems, disk and network I/O, load, uptime, OS info. Logs and traces: not yet (use the previous agent where needed) |
+| **Windows** Server 2016+ | previous agent (OpenTelemetry Collector) | windows_exporter metrics · event logs · your log files · traces |
+| **Docker host** | previous agent | the host + every container (cAdvisor) · container logs · traces |
+| **Kubernetes / OpenShift** | previous agent | nodes, containers, pod logs, events, kube-state-metrics · traces |
 
-**Install**
-1. ObservaOne → **Agents → Install agent**.
-2. Pick the platform, click **New token**, and fill in environment / role / extra log files if you want them.
-3. Copy the command and run it on the server (Linux: as root; Windows: PowerShell **Run as administrator**; Kubernetes: with `kubectl`).
-4. The server shows up on the **Agents** page within a minute, and on Infrastructure, Dashboards and Logs.
+The Linux agent is documented in full in **[docs/agent/LINUX-AGENT.md](docs/agent/LINUX-AGENT.md)**: architecture, network and TLS, configuration, status rules, metrics, troubleshooting, upgrade and rollback, and test results.
 
-Example (Linux):
+**Install (Linux)**
+1. ObservaOne → **Agents → Linux → Install**, then **Create a token** (choose how long it is valid and how many servers may use it).
+2. Run the two lines shown on the page on the server. The installer asks for the token; what you type is hidden, so it never lands in shell history.
+3. The server shows up under **Agents → Linux** within a minute (status **Online**), and in Infrastructure, Overview and Dashboards.
+
 ```bash
-curl -fsSL https://monitor.example.local/agent/install.sh | sudo bash -s -- \
-  --server https://monitor.example.local --token oat_xxxxxxxx_xxxx --env prod --role web \
-  --logs "/var/log/nginx/*.log"
+curl -fsSL https://monitor.example.local/agent/install.sh -o observaone-install.sh
+sudo bash observaone-install.sh --server https://monitor.example.local --ca-sha256 <FINGERPRINT> --env prod --role web
 ```
 
+The monitored server needs **outbound HTTPS (443) to ObservaOne** and nothing else. ObservaOne must be reachable at that
+address from the server: a laptop or WSL install is not reachable from cloud VMs.
+
+**Windows / Docker / Kubernetes:** Agents → *platform* → Install shows the command for the previous agent.
+
 **Safety built in**
-- The agent token is checked by ObservaOne on **every** upload. Revoke a token (Agents → Tokens) and every agent using it stops within a minute. **Block** cuts off a single server.
+- Linux agent: the enrollment token is swapped once for the agent's own credential; ObservaOne decides the agent's identity and the `host` label on its metrics. Revoking a token stops new enrollments; **Block** or **Remove** cuts off one server at once.
+- Previous agent (Windows / Docker / Kubernetes): the token is checked on every upload. Revoking it stops every agent using it within a minute.
 - Self-signed certificate? The command pins your server's certificate fingerprint. Agents refuse any other server, so there is no "ignore certificate errors".
 - Every download is checked against a fixed SHA-256 before it is installed.
-- Linux: runs as the user `observaone-agent` with only the right to read log files (`CAP_DAC_READ_SEARCH`). node_exporter listens on 127.0.0.1 only.
+- Linux: runs as the unprivileged user `observaone-agent` in a hardened systemd unit (read-only system, 128 MB memory cap); its diagnostics page listens on 127.0.0.1 only.
 - Windows: windows_exporter listens on 127.0.0.1 only. The token file is readable by SYSTEM and Administrators only.
 - If ObservaOne is unreachable, logs and traces wait on disk and are sent later. Metrics wait in memory, and Prometheus accepts them up to 30 minutes late.
 

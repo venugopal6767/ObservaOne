@@ -116,6 +116,13 @@ services:
       GRAFANA_PUBLIC_URL: /grafana/
       UI_RULES_FILE: /etc/prometheus-ui/ui-rules.yml
       AUDIT_RETENTION_DAYS: ${AUDIT_RETENTION_DAYS:-365}
+      # ObservaOne Agent: status thresholds and enrollment limits (docs/agent/LINUX-AGENT.md)
+      AGENT_ONLINE_SECONDS: ${AGENT_ONLINE_SECONDS:-150}
+      AGENT_OFFLINE_SECONDS: ${AGENT_OFFLINE_SECONDS:-900}
+      AGENT_HEARTBEAT_SECONDS: ${AGENT_HEARTBEAT_SECONDS:-30}
+      AGENT_MIN_VERSION: ${AGENT_MIN_VERSION:-1.0.0}
+      AGENT_ENROLL_FAILURES: ${AGENT_ENROLL_FAILURES:-10}
+      AGENT_ENROLL_RATE: ${AGENT_ENROLL_RATE:-300}
       DB_HOST: observa-db
       DB_NAME: observa
       DB_USER: observa
