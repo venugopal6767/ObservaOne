@@ -330,7 +330,8 @@ export function agentsPage(main, ctx) {
       }
       if (p === 'windows') {
         const ps = (v) => `'${String(v).replace(/'/g, "''")}'`;
-        const args = [`-Server ${S}`, `-Token ${t}`];
+        // no -Token: the installer asks for it (hidden), so it stays out of PowerShell history
+        const args = [`-Server ${S}`];
         if (pin) args.push(`-CaSha256 ${c.sha256}`);
         if (wiz.env) args.push(`-Env ${ps(wiz.env)}`);
         if (wiz.role) args.push(`-Role ${ps(wiz.role)}`);
@@ -338,8 +339,14 @@ export function agentsPage(main, ctx) {
         if (wiz.securityLog) args.push('-SecurityLog');
         const lines = ["[Net.ServicePointManager]::SecurityProtocol = 'Tls12'"];
         if (pin) {
-          lines.push(`$fp = '${c.sha256}'`);
-          lines.push("[Net.ServicePointManager]::ServerCertificateValidationCallback = { param($s, $c) ([BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($c.GetRawCertData())) -replace '-', '').ToLower() -eq $fp }");
+          // compiled fingerprint check: a script-block callback fails in Windows PowerShell 5.1
+          lines.push('Add-Type @"');
+          lines.push('using System; using System.Net; using System.Net.Security; using System.Security.Cryptography; using System.Security.Cryptography.X509Certificates;');
+          lines.push('public static class OOPin { static string fp;');
+          lines.push('  static bool Check(object s, X509Certificate c, X509Chain ch, SslPolicyErrors e) { if (c == null) return false; using (var h = SHA256.Create()) return BitConverter.ToString(h.ComputeHash(c.GetRawCertData())).Replace("-", "").ToLower() == fp; }');
+          lines.push('  public static void Enable(string f) { fp = f; ServicePointManager.ServerCertificateValidationCallback = Check; } }');
+          lines.push('"@');
+          lines.push(`[OOPin]::Enable('${c.sha256}')`);
         }
         lines.push(`& ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing ${S}/agent/install.ps1).Content)) ${args.join(' ')}`);
         return lines.join('\n');
@@ -383,10 +390,12 @@ export function agentsPage(main, ctx) {
     steps.push(h('div', { class: 'panel' }, h('div', { class: 'panel-head' }, h('h3', {}, '2. Enrollment token')),
       p === 'linux'
         ? h('p', { class: 'muted', style: { marginTop: 0 } }, 'The installer asks for the token and hides what you type, so it never ends up in shell history or the process list. Each server swaps it for its own credential; revoking the token later only stops new enrollments. For automation use ', h('code', {}, '--token-file FILE'), '.')
-        : h('p', { class: 'muted', style: { marginTop: 0 } }, 'The previous-generation agent keeps the token on the server and sends it with every upload. Revoking the token stops every agent that uses it.'),
+        : p === 'windows'
+          ? h('p', { class: 'muted', style: { marginTop: 0 } }, 'The installer asks for the token and hides what you type, so it stays out of PowerShell history. The previous-generation Windows agent keeps it on the server (readable by SYSTEM and Administrators only) and sends it with every upload: revoking the token stops every agent that uses it.')
+          : h('p', { class: 'muted', style: { marginTop: 0 } }, 'The previous-generation agent keeps the token on the server and sends it with every upload. Revoking the token stops every agent that uses it.'),
       h('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap' } },
-        p === 'linux' ? null : tokenInput,
-        h('button', { class: 'btn', style: { whiteSpace: 'nowrap' }, onclick: () => newToken((tok) => { if (p !== 'linux') { wiz.token = tok; drawInstall(p); } }, p) }, icon('plus', 14), 'Create a token'),
+        p === 'linux' || p === 'windows' ? null : tokenInput,
+        h('button', { class: 'btn', style: { whiteSpace: 'nowrap' }, onclick: () => newToken((tok) => { if (p !== 'linux' && p !== 'windows') { wiz.token = tok; drawInstall(p); } }, p) }, icon('plus', 14), 'Create a token'),
         h('button', { class: 'btn btn-ghost', onclick: () => go('tokens') }, 'Manage tokens'))));
     // 3. options
     const opts = [field('Environment (optional)', input('env', 'prod, uat, dev'))];
@@ -397,7 +406,7 @@ export function agentsPage(main, ctx) {
     if (p === 'windows') opts.push(h('label', { class: 'check-row' }, h('input', { type: 'checkbox', checked: wiz.securityLog, onchange: (e) => { wiz.securityLog = e.target.checked; refresh(); } }), h('span', {}, 'Also send the Security event log (large)')));
     steps.push(h('div', { class: 'panel' }, h('div', { class: 'panel-head' }, h('h3', {}, '3. Options')), h('div', { class: 'grid cols-2' }, ...opts)));
     // 4. command
-    const where = { linux: 'Run on the server (the first line downloads the installer, the second runs it and asks for the token):', windows: 'Paste into Windows PowerShell opened with "Run as administrator":', docker: 'Run on the Docker host as root (or with sudo):', kubernetes: 'Run where kubectl points at the cluster:' }[p];
+    const where = { linux: 'Run on the server (the first line downloads the installer, the second runs it and asks for the token):', windows: 'Paste into Windows PowerShell opened with "Run as administrator" (it asks for the token at the end):', docker: 'Run on the Docker host as root (or with sudo):', kubernetes: 'Run where kubectl points at the cluster:' }[p];
     const after = {
       linux: [h('span', {}, 'Check it: ', h('code', {}, 'sudo observaone-agent status')), h('span', {}, 'Logs: ', h('code', {}, 'journalctl -u observaone-agent -f')),
         h('span', {}, 'Settings: ', h('code', {}, '/etc/observaone-agent/agent.conf'), ' and ', h('code', {}, 'conf.d/*.conf'), ', then ', h('code', {}, 'sudo systemctl reload observaone-agent')),
@@ -411,7 +420,7 @@ export function agentsPage(main, ctx) {
       h('div', { class: 'panel-head' }, h('h3', {}, '4. Run'),
         h('button', { class: 'btn btn-sm right', onclick: () => navigator.clipboard?.writeText(command()).then(() => toast('Command copied')) }, 'Copy')),
       h('div', { class: 'muted', style: { marginBottom: '8px' } }, where), cmdBox,
-      p !== 'linux' && !wiz.token ? h('div', { class: 'c-orange', style: { marginTop: '8px', fontSize: '12.5px' } }, 'Create a token in step 2: the command still shows <TOKEN>.') : null,
+      p !== 'linux' && p !== 'windows' && !wiz.token ? h('div', { class: 'c-orange', style: { marginTop: '8px', fontSize: '12.5px' } }, 'Create a token in step 2: the command still shows <TOKEN>.') : null,
       h('ul', { class: 'agent-notes' }, after.map((n) => h('li', {}, n))),
       h('div', { class: 'dim', style: { fontSize: '12px' } }, p === 'linux'
         ? `ObservaOne Go agent ${data?.latest || ''}, about 7 MB, checksum-verified on download. The host appears under Agents and Infrastructure within a minute.`

@@ -74,7 +74,12 @@ $Server = $Server.TrimEnd('/')
 if ($Server -notmatch '^https://') { Fail '-Server must start with https://' }
 $tokenFile = Join-Path $DataDir 'token'
 if (-not $Token -and (Test-Path $tokenFile)) { $Token = (Get-Content $tokenFile -Raw).Trim(); Say 'Re-using the token already on this server' }
-if ($Token -notmatch '^oat_[0-9a-f]{8}_[A-Za-z0-9_-]{20,64}$') { Fail '-Token is required and must look like oat_... (create one on the Agents page)' }
+if (-not $Token) {
+  # asked here, hidden, so the token is not in the command, PowerShell history or the process list
+  $sec = Read-Host -AsSecureString 'Paste the enrollment token from the Agents page (input hidden)'
+  $Token = [Runtime.InteropServices.Marshal]::PtrToStringBSTR([Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec)).Trim()
+}
+if ($Token -notmatch '^oat_[0-9a-f]{8}_[A-Za-z0-9_-]{20,64}$') { Fail 'The token must look like oat_... (create one on Agents > Windows > Install)' }
 if (-not $HostName) { $HostName = $env:COMPUTERNAME.ToLower() }
 $HostName = $HostName -replace '[^A-Za-z0-9._-]', ''
 if (($Environment + $Role) -notmatch '^[A-Za-z0-9._-]*$') { Fail '-Env and -Role may only use letters, digits, . _ -' }
@@ -82,6 +87,24 @@ if ($env:PROCESSOR_ARCHITECTURE -ne 'AMD64') { Fail "Only 64-bit x86 Windows is 
 $os = (Get-CimInstance Win32_OperatingSystem).Caption -replace '^Microsoft ', ''
 
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+function Enable-CertPin([string]$fp) {
+  if (-not ('OOPin' -as [type])) {
+    Add-Type @"
+using System; using System.Net; using System.Net.Security;
+using System.Security.Cryptography; using System.Security.Cryptography.X509Certificates;
+public static class OOPin {
+  static string fp;
+  static bool Check(object s, X509Certificate c, X509Chain ch, SslPolicyErrors e) {
+    if (c == null || fp == null) return false;
+    using (var h = SHA256.Create()) return BitConverter.ToString(h.ComputeHash(c.GetRawCertData())).Replace("-", "").ToLower() == fp;
+  }
+  public static void Enable(string f) { fp = f; ServicePointManager.ServerCertificateValidationCallback = Check; }
+}
+"@
+  }
+  [OOPin]::Enable($fp)
+}
 
 function Get-DerSha256([byte[]]$der) {
   $sha = [Security.Cryptography.SHA256]::Create()
@@ -100,10 +123,9 @@ try {
     $want = ($CaSha256 -replace ':', '').ToLower()
     # accept exactly this certificate for the rest of this PowerShell session
     $script:PinnedFingerprint = $want
-    [Net.ServicePointManager]::ServerCertificateValidationCallback = {
-      param($s, $cert, $chain, $errors)
-      return ((Get-DerSha256 $cert.GetRawCertData()) -eq $script:PinnedFingerprint)
-    }
+    # compiled check: a PowerShell script block as the callback fails in Windows PowerShell 5.1
+    # ("unexpected error occurred on a send") because it can run on a thread without a runspace
+    Enable-CertPin $want
     Say 'Fetching the server certificate'
     $crt = Join-Path $tmp 'server.crt'
     Invoke-WebRequest -UseBasicParsing -Uri "$Server/agent/server.crt" -OutFile $crt
