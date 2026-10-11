@@ -247,7 +247,7 @@ func boolf(b bool) float64 {
 // ---------------- upload ----------------
 
 func (a *Agent) uploadLoop(ctx context.Context) {
-	bo := &core.Backoff{Base: 2 * time.Second, Max: 5 * time.Minute}
+	bo := &core.Backoff{Base: 2 * time.Second, Max: 2 * time.Minute}
 	for {
 		select {
 		case <-ctx.Done():
@@ -330,7 +330,7 @@ type hbAnswer struct {
 }
 
 func (a *Agent) heartbeatLoop(ctx context.Context) {
-	bo := &core.Backoff{Base: 5 * time.Second, Max: 5 * time.Minute}
+	bo := &core.Backoff{Base: 5 * time.Second, Max: 2 * time.Minute}
 	for {
 		wait := a.heartbeatOnce(ctx, bo)
 		select {

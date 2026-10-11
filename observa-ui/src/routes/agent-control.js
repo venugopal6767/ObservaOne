@@ -41,6 +41,10 @@ export function rateLimited(key, max, windowMs) {
   return b.n > max;
 }
 export function resetRateLimits() { buckets.clear(); }
+function overLimit(key, max, windowMs) { // peek: is the bucket already full? (does not count this request)
+  const b = buckets.get(key);
+  return !!b && Date.now() - b.start <= windowMs && b.n >= max;
+}
 
 // ---------------- input checks ----------------
 const str = (v, re, max = 128) => (typeof v === 'string' && v.length <= max && (!re || re.test(v)) ? v : null);
@@ -146,18 +150,22 @@ agentControlRouter.use('/agent/v1/heartbeat', json8k);
 
 agentControlRouter.post('/agent/v1/enroll', wrap(async (req, res) => {
   const ip = clientIp(req);
-  if (rateLimited(`enroll:${ip}`, config.agent.enrollPerIpPer10Min, 600_000)) {
-    audit(req, 'agent.enroll.rate_limited', { username: 'agent' });
+  // Failed attempts are what an attacker produces: 10 per 10 min per address. Successful enrollments have a
+  // much higher cap, so a whole fleet behind one NAT address can enroll at once.
+  const failed = () => rateLimited(`enrollfail:${ip}`, Number.MAX_SAFE_INTEGER, 600_000);
+  if (overLimit(`enrollfail:${ip}`, config.agent.enrollFailuresPer10Min, 600_000) || rateLimited(`enroll:${ip}`, config.agent.enrollPerIpPer10Min, 600_000)) {
+    if (!rateLimited(`enroll-rl-audit:${ip}`, 1, 600_000)) audit(req, 'agent.enroll.rate_limited', { username: 'agent' });
     res.set('Retry-After', '600');
     return fail(res, 429, 'rate_limited', 'Too many enrollment attempts from this address. Wait 10 minutes.');
   }
   const token = bearer(req);
   if (!ENROLL_TOKEN_RE.test(token)) {
+    failed();
     audit(req, 'agent.enroll.denied', { username: 'agent', reason: 'malformed_token' });
     return fail(res, 401, 'invalid_token', 'Enrollment token missing or malformed.');
   }
   const p = parseEnroll(req.body);
-  if (p.err) return fail(res, 400, 'bad_request', p.err);
+  if (p.err) { failed(); return fail(res, 400, 'bad_request', p.err); }
   const v = p.v;
 
   const credentialSecret = randomToken(32); // 43 base64url characters
@@ -215,6 +223,7 @@ agentControlRouter.post('/agent/v1/enroll', wrap(async (req, res) => {
   });
 
   if (out.deny) {
+    failed();
     audit(req, 'agent.enroll.denied', { username: 'agent', reason: out.deny, prefix: out.prefix, hostname: v.hostname });
     return fail(res, out.status || 401, out.deny, out.msg);
   }

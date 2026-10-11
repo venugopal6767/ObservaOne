@@ -54,6 +54,21 @@ services:
         condition: service_healthy
     restart: "no"
 
+  # Builds the ObservaOne Go agent (Linux amd64 + arm64) into ./agent/files/ with SHA256SUMS.
+  # Nginx serves them at https://SERVER/agent/files/ for agent/install.sh. Runs once per "up"; takes ~1 min the first time.
+  agent-build:
+    image: golang:1.24-alpine
+    working_dir: /src
+    entrypoint: ["/bin/sh", "/src/scripts/build-agent.sh"]
+    environment:
+      GOTOOLCHAIN: local
+      GOCACHE: /tmp/gocache
+      GOFLAGS: -mod=mod
+    volumes:
+      - ./agent:/src/agent
+      - ./scripts:/src/scripts:ro
+    restart: "no"
+
   # ---- Long-running services ---------------------------------------------
   nginx:
     image: nginx:1.30-alpine
@@ -69,6 +84,8 @@ services:
       certs-init:
         condition: service_completed_successfully
       auth-init:
+        condition: service_completed_successfully
+      agent-build:
         condition: service_completed_successfully
       observa:
         condition: service_healthy

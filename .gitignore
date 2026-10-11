@@ -3,3 +3,7 @@ observa-ui/node_modules/
 observa-ui/data/
 nginx/certs/*.key
 nginx/certs/*.crt
+
+# built by scripts/build-agent.sh (agent-build service)
+agent/files/observaone-agent-*
+agent/files/SHA256SUMS
