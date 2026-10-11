@@ -654,7 +654,7 @@ tr.clickable:focus-visible { outline: 2px solid var(--accent-2); outline-offset:
 .detail-status { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
 .problem-list { list-style: none; padding: 10px 12px; margin: 0 0 14px; border: 1px solid rgba(245, 158, 11, 0.45); border-radius: 8px; background: rgba(245, 158, 11, 0.08); color: var(--orange-text); display: flex; flex-direction: column; gap: 6px; }
 .problem-list li { display: flex; gap: 8px; align-items: flex-start; }
-table.kv { width: 100%; border-collapse: collapse; font-size: 13px; table-layout: fixed; }
+table.kv { display: table; width: 100%; border-collapse: collapse; font-size: 13px; table-layout: fixed; }  /* not the .kv grid */
 .agents-main { min-width: 0; }
 table.kv th { text-align: left; color: var(--dim); font-weight: 500; padding: 5px 12px 5px 0; vertical-align: top; width: 120px; }
 table.kv td { padding: 5px 0; overflow-wrap: anywhere; }

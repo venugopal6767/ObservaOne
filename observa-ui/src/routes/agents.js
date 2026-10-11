@@ -4,6 +4,7 @@ import express from 'express';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
 import { config } from '../config.js';
+import { compareVersions } from '../health.js';
 import { q, one } from '../db.js';
 import { audit } from '../store.js';
 import { sha256, randomToken } from '../secrets.js';
@@ -14,6 +15,7 @@ import { CREDENTIAL_RE, AGENT_LATEST, agentForCredential, forgetAgentCredential,
 
 export const AGENT_VERSIONS = {
   agent: AGENT_LATEST,
+  previous: '1.0.0',   // previous-generation agent (Windows, Docker, Kubernetes installers)
   otelcol: '0.162.0',
   nodeExporter: '1.12.1',
   windowsExporter: '0.31.8',
@@ -154,7 +156,9 @@ function toAgent(a, now, m) {
     lastHeartbeat: a.last_heartbeat || null, lastData, lastSeen: a.last_heartbeat || lastData || null,
     bootTime: a.boot_time || null,
     status: d.status, statusReason: d.reason, problems: d.problems, secondsAgo: d.ageSeconds,
-    outdated: !!a.version && a.version !== AGENT_VERSIONS.agent,
+    // the Go agent (Linux) is compared with its latest release; previous-generation agents (Windows, Docker,
+    // Kubernetes) have their own version line (1.0.x), so 1.0.0 there is current, not outdated
+    outdated: !!a.version && compareVersions(a.version, a.platform === 'linux' ? AGENT_VERSIONS.agent : AGENT_VERSIONS.previous) < 0,
     cpu: get(m.cpu), mem: get(m.mem), diskFree: get(m.disk),
     sendFailures: get(m.fails), queue: get(m.queue),
   };
@@ -196,6 +200,7 @@ agentsRouter.get('/agents', requirePerm('view'), wrap(async (req, res) => {
       byPlatform: Object.fromEntries(PLATFORMS.map((p) => [p, agents.filter((a) => a.platform === p).length])),
     },
     latest: AGENT_VERSIONS.agent,
+    latestPrevious: AGENT_VERSIONS.previous,
     thresholds: { onlineSeconds: config.agent.onlineSeconds, offlineSeconds: config.agent.offlineSeconds, heartbeatSeconds: config.agent.heartbeatSeconds },
   });
 }));

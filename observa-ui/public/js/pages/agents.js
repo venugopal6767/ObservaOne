@@ -224,7 +224,7 @@ export function agentsPage(main, ctx) {
       h('td', {}, statusPill(a), a.problems?.length && a.status !== 'not_reporting' && a.status !== 'offline'
         ? h('div', { class: 'c-orange', style: { fontSize: '11px', marginTop: '3px', maxWidth: '260px' } }, a.problems[0]) : null),
       h('td', {}, labelsOf(a).length ? h('div', { class: 'label-chips' }, labelsOf(a).slice(0, 4).map((l) => h('span', { class: 'chip' }, l))) : h('span', { class: 'dim' }, '-')),
-      h('td', {}, a.version ? (a.outdated ? h('span', { class: 'pill pill-orange', title: `Latest is ${data.latest}. Run the installer again to update.` }, `${a.version} ↑`) : a.version) : '-'),
+      h('td', {}, a.version ? (a.outdated ? h('span', { class: 'pill pill-orange', title: `Latest is ${a.platform === 'linux' ? data.latest : data.latestPrevious}. Run the installer again to update.` }, `${a.version} ↑`) : a.version) : '-'),
       h('td', { class: `num ${tone(a.cpu)}` }, fmt(a.cpu, 'percent')),
       h('td', { class: `num ${tone(a.mem)}` }, fmt(a.mem, 'percent')),
       h('td', { class: `num ${tone(a.diskFree, false)}` }, fmt(a.diskFree, 'percent')),
@@ -265,27 +265,28 @@ export function agentsPage(main, ctx) {
     const coll = d.diag?.collectors || {};
     const errs = d.diag?.collectorErrors || {};
     const collTone = { ok: 'green', running: 'green', unavailable: 'muted', disabled: 'muted', error: 'red', failed: 'red', stopped: 'red' };
-    clear(box).append(
+    clear(box).append(...[
       h('div', { class: 'detail-status' }, statusPill(d), h('span', { class: 'muted' }, d.statusReason || 'Everything is reporting normally.')),
       d.problems?.length ? h('ul', { class: 'problem-list' }, d.problems.map((p) => h('li', {}, icon('alert', 14), p))) : null,
       h('div', { class: 'grid cols-2' },
         h('div', { class: 'panel' }, h('div', { class: 'panel-head' }, h('h3', {}, 'Identity')),
           h('table', { class: 'kv' }, h('tbody', {},
-            row('Agent ID', h('code', {}, d.id)), row('Platform', PLATFORMS[d.platform]?.label || d.platform), row('OS', d.os), row('Kernel', d.kernel),
+            row('Agent ID', h('code', {}, d.id)), row('Platform', PLATFORMS[d.platform]?.label || d.platform), row('OS', d.os), d.platform === 'linux' ? row('Kernel', d.kernel) : null,
             row('Architecture', d.arch), row('Version', d.version), row('Address', d.ip),
             row('Labels', [d.env && `env=${d.env}`, d.role && `role=${d.role}`, ...Object.entries(d.labels || {}).map(([k, v]) => `${k}=${v}`)].filter(Boolean).join(', ') || null),
             row('Enrolled', when(d.enrolledAt)), row('Token', d.token), row('Credential', d.enrolled ? 'Own credential (enrolled)' : 'Shared token (previous agent)')))),
         h('div', { class: 'panel' }, h('div', { class: 'panel-head' }, h('h3', {}, 'Reporting')),
           h('table', { class: 'kv' }, h('tbody', {},
-            row('Last heartbeat', when(d.lastHeartbeat)), row('Last data', when(d.lastData)), row('Host booted', when(d.bootTime)),
+            row('Last heartbeat', d.enrolled ? when(d.lastHeartbeat) : h('span', { class: 'dim' }, 'Not sent by the previous-generation agent; status comes from its last data')), row('Last data', when(d.lastData)), d.enrolled ? row('Host booted', when(d.bootTime)) : null,
             row('CPU', fmt(d.cpu, 'percent')), row('Memory', fmt(d.mem, 'percent')), row('Lowest disk free', fmt(d.diskFree, 'percent')),
-            row('Upload failures', d.diag?.uploadFailures != null ? String(d.diag.uploadFailures) : null),
-            row('Agent error', d.diag?.lastError || null))))),
+            d.enrolled ? row('Upload failures', d.diag?.uploadFailures != null ? String(d.diag.uploadFailures) : null) : null,
+            d.enrolled ? row('Agent error', d.diag?.lastError || null) : null)))),
       Object.keys(coll).length ? h('div', { class: 'panel', style: { marginTop: '14px' } }, h('div', { class: 'panel-head' }, h('h3', {}, 'Collectors')),
         h('table', { class: 'tbl' }, h('thead', {}, h('tr', {}, h('th', {}, 'Collector'), h('th', {}, 'State'), h('th', {}, 'Detail'))),
           h('tbody', {}, Object.keys(coll).sort().map((k) => h('tr', {}, h('td', {}, k), h('td', {}, pill(coll[k], collTone[coll[k]] || 'muted')), h('td', { class: 'dim' }, errs[k] || '')))))) : null,
       ctx.canOpen('/dashboards/linux-servers') && d.platform === 'linux'
-        ? h('p', { style: { marginTop: '12px' } }, h('a', { href: `/dashboards/linux-servers?host=${encodeURIComponent(d.host)}` }, 'Open the Linux Servers dashboard for this host →')) : null);
+        ? h('p', { style: { marginTop: '12px' } }, h('a', { href: `/dashboards/linux-servers?host=${encodeURIComponent(d.host)}` }, 'Open the Linux Servers dashboard for this host →')) : null,
+    ].filter(Boolean));
   }
 
   // ---------------------------------------------------------------- install
