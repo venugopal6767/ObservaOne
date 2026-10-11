@@ -111,6 +111,18 @@ public static class ObservaOneCertPin {
   [ObservaOneCertPin]::Enable($fp, $pinHost)
 }
 
+# Saved as soon as the server accepts it (only SYSTEM and Administrators can read it), so a re-run after a
+# failed download does not ask for the token again.
+function Save-Token {
+  [IO.File]::WriteAllText($tokenFile, $Token)
+  $acl = New-Object Security.AccessControl.FileSecurity
+  $acl.SetAccessRuleProtection($true, $false)
+  foreach ($who in 'NT AUTHORITY\SYSTEM', 'BUILTIN\Administrators') {
+    $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($who, 'FullControl', 'Allow')))
+  }
+  Set-Acl -Path $tokenFile -AclObject $acl
+}
+
 function Get-DerSha256([byte[]]$der) {
   $sha = [Security.Cryptography.SHA256]::Create()
   ($sha.ComputeHash($der) | ForEach-Object { $_.ToString('x2') }) -join ''
@@ -159,7 +171,7 @@ try {
     if ($_.Exception.Response) { $code = [int]$_.Exception.Response.StatusCode } else { $code = 0 }
   }
   switch ($code) {
-    { $_ -ge 200 -and $_ -lt 300 -or $_ -eq 400 } { Ok 'Token accepted'; break }
+    { $_ -ge 200 -and $_ -lt 300 -or $_ -eq 400 } { Ok 'Token accepted'; Save-Token; break }
     401 { Fail 'The server refused the token (wrong, revoked or expired). Create a new one on the Agents page.' }
     403 { Fail 'This agent is blocked on the Agents page.' }
     0   { Fail "Cannot connect to $Server over HTTPS. Check DNS, firewall (port 443) and the certificate (-CaSha256 / -CaFile)." }
@@ -247,14 +259,7 @@ try {
   Set-Content -Path (Join-Path $ProgramDir 'VERSION') -Value $AgentVersion
   Invoke-WebRequest -UseBasicParsing -Uri "$Server/agent/configs/windows.yaml" -OutFile (Join-Path $DataDir 'config.yaml')
 
-  # settings, token (only SYSTEM and Administrators can read it), agent id
-  [IO.File]::WriteAllText($tokenFile, $Token)
-  $acl = New-Object Security.AccessControl.FileSecurity
-  $acl.SetAccessRuleProtection($true, $false)
-  foreach ($who in 'NT AUTHORITY\SYSTEM', 'BUILTIN\Administrators') {
-    $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($who, 'FullControl', 'Allow')))
-  }
-  Set-Acl -Path $tokenFile -AclObject $acl
+  # settings, agent id (the token was saved right after it was accepted)
   $caDest = ''
   if ($caPath) { $caDest = Join-Path $DataDir 'ca.crt'; Copy-Item -Force $caPath $caDest; $caDest = $caDest -replace '\\', '/' }
 
