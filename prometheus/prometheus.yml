@@ -48,10 +48,9 @@ scrape_configs:
 
   # ---- Linux servers (node_exporter on port 9100) ----
   - job_name: linux
-    static_configs:
-      - targets: ["node-exporter:9100"]   # the monitoring server itself
-        labels:
-          role: monitoring
+    # Only the servers you list in targets/linux*.yml. Servers with the ObservaOne Agent push their data and
+    # need no entry here. (To also watch the ObservaOne server itself: docker compose --profile self-monitoring up -d
+    # and add "node-exporter:9100" to targets/linux.yml.)
     file_sd_configs:
       - files: ["/etc/prometheus/targets/linux*.yml"]
         refresh_interval: 1m

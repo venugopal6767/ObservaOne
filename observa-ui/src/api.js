@@ -130,7 +130,20 @@ api.get('/prom/label-values', wrap(async (req, res) => {
   const label = String(req.query.label || '');
   if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(label)) throw httpError(400, 'bad label name');
   const match = req.query.match ? [String(req.query.match)] : undefined;
-  res.json(await prom(`/api/v1/label/${label}/values`, { 'match[]': match }));
+  // only values seen recently (Prometheus would otherwise list every value it ever stored)
+  const end = nowSec(), start = end - 3600;
+  let values = await prom(`/api/v1/label/${label}/values`, { 'match[]': match, start, end });
+  if (label === 'host') {
+    // hosts that only exist because of agents removed on the Agents page are not offered any more
+    try {
+      const known = new Set((await q('SELECT id FROM agents')).rows.map((r) => r.id));
+      // a host is offered when a server reported "up" in the last hour (scraped, or an agent that still exists)
+      const series = await prom('/api/v1/series', { 'match[]': ['up{job=~"linux|windows"}'], start, end });
+      const live = new Set(series.filter((s) => !s.agent_id || known.has(s.agent_id)).map((s) => s.host));
+      values = values.filter((h) => live.has(h));
+    } catch { /* keep the unfiltered list */ }
+  }
+  res.json(values);
 }));
 
 api.get('/prom/targets', wrap(async (req, res) => {
@@ -166,7 +179,7 @@ api.get('/prom/targets', wrap(async (req, res) => {
         job: m.job, instance: 'agent', host: m.host || m.instance, os: m.os || '', env: m.env || '', role: m.role || '',
         health: hh.health, lastScrape: last ? new Date(last * 1000).toISOString() : null, durationMs: 0,
         lastError: hh.reason,
-        source: 'agent', platform: m.platform || '',
+        source: 'agent', platform: m.platform || '', agentId: m.agent_id || null,
       });
     }
   } catch { /* Prometheus without agent data */ }
@@ -174,9 +187,10 @@ api.get('/prom/targets', wrap(async (req, res) => {
   // One row per server, whatever collects it (Prometheus scrape, ObservaOne Agent, or both).
   // Enrolled agents also bring their heartbeat state, so "the agent stopped reporting" is told apart
   // from "Prometheus cannot scrape the host". Agents enrolled but without data yet are listed too.
-  let enrolled = [];
+  let enrolled = [], known = null;
   try {
     enrolled = (await q("SELECT * FROM agents WHERE platform IN ('linux', 'windows')")).rows;
+    known = new Set((await q('SELECT id FROM agents')).rows.map((r) => r.id));
   } catch { /* database problem: show what Prometheus knows */ }
   const now = Date.now();
   const servers = new Map(); // host (lower case) -> merged row
@@ -189,7 +203,9 @@ api.get('/prom/targets', wrap(async (req, res) => {
     if (t.source === 'scrape') { cur.scrapeHealth = t.health; cur.scrapeError = t.lastError; cur.instance = t.instance; }
     else Object.assign(cur, { ...t, collection: cur.collection, scrapeHealth: cur.scrapeHealth ?? (cur.source === 'scrape' ? cur.health : undefined), scrapeError: cur.scrapeError ?? (cur.source === 'scrape' ? cur.lastError : undefined) });
   };
-  for (const t of [...pulled.filter(isServer), ...pushed]) merge(t);
+  // data from an agent that was removed on the Agents page stays in Prometheus for a while: do not show it
+  const removed = (t) => t.source === 'agent' && t.agentId && known && !known.has(t.agentId);
+  for (const t of [...pulled.filter(isServer), ...pushed]) if (!removed(t)) merge(t);
   for (const a of enrolled) {
     const k = a.host.toLowerCase();
     const d = describeAgent(a, now);

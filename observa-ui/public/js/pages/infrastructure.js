@@ -8,8 +8,7 @@ export function infrastructurePage(main, ctx) {
   ctx.setDsChip('Prometheus', color('ok'));
   const out = h('div', {}, h('div', { class: 'table-wrap' }, stateView('loading', { skeleton: 'table' })));
   let page = 0;
-  const other = h('div', { style: { marginTop: '18px' } });
-  main.append(h('div', { class: 'page-head' }, h('div', {}, h('h1', {}, 'Infrastructure'), h('p', {}, 'Every server: scraped by Prometheus or sending through the ObservaOne Agent'))), out, other);
+  main.append(h('div', { class: 'page-head' }, h('div', {}, h('h1', {}, 'Infrastructure'), h('p', {}, 'Every server: scraped by Prometheus or sending through the ObservaOne Agent'))), out);
 
   // how this server is collected: "ObservaOne Agent", "Prometheus scrape (host:9100)" or both
   function collectedBy(t) {
@@ -35,7 +34,6 @@ export function infrastructurePage(main, ctx) {
       const rank = { down: 0, not_reporting: 1, unknown: 2, up: 3 };
       const servers = targets.filter((t) => t.job === 'windows' || t.job === 'linux')
         .sort((a, b) => ((rank[a.health] ?? 2) - (rank[b.health] ?? 2)) || a.host.localeCompare(b.host));
-      const rest = targets.filter((t) => t.job !== 'windows' && t.job !== 'linux');
       const tone = (v, hi = true) => (v === undefined ? '' : hi ? (v >= 90 ? 'c-red' : v >= 80 ? 'c-orange' : '') : (v < 10 ? 'c-red' : v < 20 ? 'c-orange' : 'c-green'));
       const pg = paginate(servers, { page, pageSize: 50, noun: servers.length === 1 ? 'host' : 'hosts', onPage: (p) => { page = p; load(); } });
       page = pg.page;
@@ -60,15 +58,8 @@ export function infrastructurePage(main, ctx) {
           text: 'Install the ObservaOne Agent on a server, or add it to prometheus/targets/windows.yml or linux.yml.',
           action: ctx.canOpen('/agents') ? h('a', { href: '/agents', 'data-link': true, class: 'btn btn-sm' }, 'Install an agent') : null,
         })));
-      clear(other);
-      if (rest.length) other.append(h('h3', { style: { margin: '0 0 10px', fontSize: '14px' } }, 'Monitoring components'),
-        h('div', { class: 'table-wrap' }, h('table', { class: 'tbl' },
-          h('thead', {}, h('tr', {}, h('th', {}, 'Job'), h('th', {}, 'Endpoint'), h('th', {}, 'Status'), h('th', { class: 'num' }, 'Scrape time'), h('th', {}, 'Error'))),
-          h('tbody', {}, rest.map((t) => h('tr', {}, h('td', {}, t.job), h('td', { class: 'mono' }, t.instance),
-            h('td', {}, t.health === 'up' ? pill('UP', 'green') : t.health === 'down' ? pill('DOWN', 'red') : pill('Unknown', 'muted')),
-            h('td', { class: 'num' }, `${t.durationMs} ms`), h('td', { class: 'dim', style: { fontSize: '12px' } }, t.lastError || '')))))));
+      // only your servers here: the monitoring stack's own components are on the Data Sources page
     } catch (e) {
-      clear(other);
       clear(out).append(h('div', { class: 'table-wrap' }, stateFromError(e, 'Infrastructure')));
     }
   }

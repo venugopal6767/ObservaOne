@@ -308,8 +308,11 @@ services:
     logging: *logging
 
   # Monitors the machine that runs this stack (Linux host, or the Docker Desktop VM on Windows)
+  # Optional: watch the ObservaOne server itself (off by default, so only what you install shows up).
+  #   docker compose --profile self-monitoring up -d   and add "node-exporter:9100" to prometheus/targets/linux.yml
   node-exporter:
     image: prom/node-exporter:v1.12.1
+    profiles: [self-monitoring]
     command:
       - --path.rootfs=/host
     pid: host
