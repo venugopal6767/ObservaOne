@@ -5,6 +5,7 @@ import { useQuery, useQueryClient, keepPreviousData, type QueryKey } from '@tans
 import type { Me } from '@/lib/api';
 import { applyTheme, onSystemThemeChange, storedTheme, type ThemePref } from '@/lib/theme';
 import { findRoute } from './routes';
+import type { Filters } from '@/lib/catalog';
 
 // ---------------- time range ----------------
 export const RANGES: [number, string][] = [
@@ -63,6 +64,9 @@ interface AppCtx {
   savePref: (key: string, value: unknown) => void;
   dsChip: DsChip;
   setDsChip: (c: DsChip) => void;
+  /** global filters (environment, platform, cluster, service, host) used by the Metrics pages; saved per user */
+  filters: Filters;
+  setFilters: (f: Filters) => void;
 }
 
 const Ctx = createContext<AppCtx | null>(null);
@@ -118,6 +122,7 @@ export function AppProvider({ initialMe, onLogout, children }: { initialMe: Me; 
     return REFRESH.some(([ms]) => ms === p) ? p : 30_000;
   });
   const [dsChip, setDsChip] = useState<DsChip>(null);
+  const [filters, setFiltersState] = useState<Filters>(() => (initialMe.prefs?.filters && typeof initialMe.prefs.filters === 'object' ? initialMe.prefs.filters : {}));
 
   const savePref = useCallback((key: string, value: unknown) => {
     prefsRef.current = { ...prefsRef.current, [key]: value };
@@ -162,8 +167,14 @@ export function AppProvider({ initialMe, onLogout, children }: { initialMe: Me; 
       savePref,
       dsChip,
       setDsChip,
+      filters,
+      setFilters: (f) => {
+        const clean = Object.fromEntries(Object.entries(f).filter(([, v]) => v)) as Filters;
+        setFiltersState(clean);
+        savePref('filters', clean);
+      },
     };
-  }, [me, theme, themePref, setThemePrefState, range, refreshMs, dsChip, onLogout, qc, savePref]);
+  }, [me, theme, themePref, setThemePrefState, range, refreshMs, dsChip, filters, onLogout, qc, savePref]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

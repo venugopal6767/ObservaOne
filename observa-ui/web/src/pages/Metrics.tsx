@@ -18,7 +18,7 @@ const EXAMPLES: [string, string][] = [
   ['rate(prometheus_http_requests_total[5m])', 'Prometheus API requests per second'],
 ];
 
-export default function Metrics() {
+export default function Metrics({ embedded = false }: { embedded?: boolean }) {
   const { can, canOpen, pref, savePref, setDsChip, theme } = useApp();
   const { open } = useDialogs();
   const [params, setParams] = useSearchParams();
@@ -87,7 +87,7 @@ export default function Metrics() {
 
   return (
     <>
-      <PageHead title="Metrics Explorer" sub="Query and visualize metrics from Prometheus" />
+      {!embedded && <PageHead title="Metrics Explorer" sub="Query and visualize metrics from Prometheus" />}
       <div className="query-bar">
         <div className="query-input">
           <input value={text} list="metric-names" spellCheck={false} aria-label="PromQL query" onChange={(e) => setText(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && run()} />
@@ -146,7 +146,7 @@ function MetricsTable({ series, unit, big }: { series: { label: string; points: 
   );
 }
 
-function AddPanelDialog({ query, unit, onClose }: { query: string; unit: Unit; onClose: () => void }) {
+export function AddPanelDialog({ query, unit, onClose }: { query: string; unit: Unit; onClose: () => void }) {
   const dashes = useQuery({ queryKey: ['dashboards'], queryFn: () => api<{ id: string; title: string; kind: string }[]>('/dashboards') });
   const custom = (dashes.data || []).filter((d) => d.kind === 'custom');
   const [dashId, setDashId] = useState('');

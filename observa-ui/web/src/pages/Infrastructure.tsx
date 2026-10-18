@@ -73,7 +73,7 @@ export default function Infrastructure() {
                 : thresholdColor(v, metric === 'disk' ? { warn: 20, crit: 10, lowerIsWorse: true, base: 'ok' } : { warn: 80, crit: 90, base: 'ok' });
               return (
                 <button key={`${t.job}-${t.host}`} role="listitem" className="host-tile" style={{ background: bg, color: bg.startsWith('#') ? readableOn(bg) : '#fff' }}
-                  title={`${t.host} · ${t.health}${v !== undefined ? ` · ${fmt(v, 'percent')}` : ''}`} onClick={() => canOpen('/dashboards') && openDash(t)}>
+                  title={`${t.host} · ${t.health}${v !== undefined ? ` · ${fmt(v, 'percent')}` : ''}`} onClick={() => (canOpen('/metrics') ? navigate(`/metrics/host/${encodeURIComponent(t.host)}`) : canOpen('/dashboards') && openDash(t))}>
                   <span className="host-name">{t.host}</span><span className="host-val">{t.health !== 'up' ? (t.health === 'down' ? 'DOWN' : '—') : fmt(v, 'percent', 0)}</span>
                 </button>
               );
@@ -84,7 +84,7 @@ export default function Infrastructure() {
             <span><i style={{ background: 'var(--warn)' }} />{metric === 'disk' ? '10–20% free' : '80–90%'}</span>
             <span><i style={{ background: 'var(--crit)' }} />{metric === 'disk' ? '< 10% free' : '≥ 90%'} or down</span>
             <span><i style={{ background: 'var(--unknown)' }} />not reporting</span>
-            {canOpen('/dashboards') && <span className="dim">Click a host to open its dashboard</span>}
+            {(canOpen('/metrics') || canOpen('/dashboards')) && <span className="dim">Click a host to open its details</span>}
           </div>
         </section>
       ) : (
@@ -95,7 +95,7 @@ export default function Infrastructure() {
               {pager.rows.map((t) => (
                 <tr key={`${t.job}-${t.host}-${t.instance}`}>
                   <td>
-                    <b style={{ fontWeight: 600 }}>{t.host}</b>
+                    {canOpen('/metrics') ? <Link to={`/metrics/host/${encodeURIComponent(t.host)}`} style={{ fontWeight: 600 }}>{t.host}</Link> : <b style={{ fontWeight: 600 }}>{t.host}</b>}
                     {t.source === 'agent'
                       ? <div className="dim" style={{ fontSize: 11 }}>{canOpen('/agents') ? <Link to="/agents">via ObservaOne Agent</Link> : 'via ObservaOne Agent'}</div>
                       : <div className="dim mono" style={{ fontSize: 11 }}>{t.instance}</div>}
