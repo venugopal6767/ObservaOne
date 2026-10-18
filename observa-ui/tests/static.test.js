@@ -8,10 +8,10 @@ import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = (p) => fs.readFileSync(path.join(root, p), 'utf8');
-const walk = (dir) => fs.readdirSync(path.join(root, dir), { withFileTypes: true })
-  .flatMap((d) => (d.isDirectory() ? walk(path.join(dir, d.name)) : d.name.endsWith('.js') ? [path.join(dir, d.name)] : []));
+const walk = (dir, ext = /\.js$/) => fs.readdirSync(path.join(root, dir), { withFileTypes: true })
+  .flatMap((d) => (d.isDirectory() ? walk(path.join(dir, d.name), ext) : ext.test(d.name) ? [path.join(dir, d.name)] : []));
 const srcFiles = walk('src');
-const uiFiles = walk('public/js');
+const uiFiles = walk('web/src', /\.(ts|tsx)$/); // the React web UI
 
 test('no demo / sample data generator in the product', () => {
   assert.equal(fs.existsSync(path.join(root, 'src/demo.js')), false, 'src/demo.js must be deleted');
@@ -38,28 +38,21 @@ test('no user-facing Grafana links or redirects in the UI', () => {
   assert.doesNotMatch(read('src/api.js'), /grafanaUrl/);
 });
 
-test('every name a page imports from ui.js exists in ui.js', () => {
-  const ui = read('public/js/ui.js');
-  const exported = new Set([...ui.matchAll(/export (?:async )?(?:function|const|class) ([\w$]+)/g)].map((m) => m[1]));
-  for (const f of uiFiles) {
-    const m = read(f).match(/import \{([^}]*)\} from '\.\.?\/ui\.js'/);
-    if (!m) continue;
-    for (const name of m[1].split(',').map((x) => x.trim()).filter(Boolean)) {
-      assert.ok(exported.has(name), `${f} imports "${name}" which ui.js does not export`);
-    }
-  }
+test('the old plain-JS UI is gone; the server serves the React build', () => {
+  assert.equal(fs.existsSync(path.join(root, 'public/js')), false, 'public/js (old UI) must be removed');
+  assert.match(read('src/server.js'), /web\/dist/, 'server.js must serve web/dist');
 });
 
 test('theme colours: page code uses theme tokens, not hard-coded hex colours', () => {
-  for (const f of uiFiles.filter((x) => x.includes('pages') && !x.endsWith('datasources.js'))) { // data source brand tints are allowed
+  for (const f of uiFiles.filter((x) => x.includes('pages') && !x.endsWith('DataSources.tsx'))) { // data source brand tints are allowed
     assert.doesNotMatch(read(f), /['"]#[0-9a-fA-F]{6}['"]/, `${f} has a hard-coded colour`);
   }
 });
 
 test('module wiring: every page module and API guard names a real module', async () => {
   const { MODULE_IDS } = await import('../src/modules.js');
-  const reg = read('public/js/pages/registry.js');
-  const used = [...reg.matchAll(/P\('[^']+', '[^']+', '[^']+', \w+, (?:null|'[^']*'), '(\w+)'\)/g), ...reg.matchAll(/module: '(\w+)'/g)].map((m) => m[1]);
+  const reg = read('web/src/app/routes.ts');
+  const used = [...reg.matchAll(/module: '(\w+)'/g)].map((m) => m[1]);
   assert.ok(used.length >= 8, 'registry should tag module pages');
   for (const id of used) assert.ok(MODULE_IDS.includes(id), `registry uses unknown module "${id}"`);
   const guards = [...read('src/api.js').matchAll(/requireModule\(([^)]*)\)/g)].flatMap((m) => [...m[1].matchAll(/'(\w+)'/g)].map((x) => x[1]));
@@ -71,9 +64,11 @@ test('module wiring: every page module and API guard names a real module', async
 });
 
 test('shared pages (Overview, Data Sources, Settings) have no module, so they are always reachable', () => {
-  const reg = read('public/js/pages/registry.js');
+  const reg = read('web/src/app/routes.ts');
   for (const p of ['/overview', '/datasources', '/settings']) {
-    const line = reg.split('\n').find((l) => l.includes(`P('${p}'`));
-    assert.ok(line && !/,\s*'\w+'\)\s*\]?\s*\}?,?\s*$/.test(line.split(p)[1].replace(/\w+Page\)/, '')), `${p} must not belong to a module`);
+    const line = reg.split('\n').find((l) => l.includes(`path: '${p}'`));
+    assert.ok(line, `${p} must be in routes.ts`);
+    const item = line.slice(line.indexOf(`path: '${p}'`)).split('}')[0];
+    assert.doesNotMatch(item, /module:/, `${p} must not belong to a module`);
   }
 });

@@ -1,0 +1,29 @@
+{
+  "name": "observa-web",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "description": "ObservaOne web UI (React + TypeScript). Built into web/dist and served by observa-ui.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "typecheck": "tsc -b",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@fontsource/inter": "^5.3.0",
+    "@tanstack/react-query": "^5.104.4",
+    "chart.js": "^4.5.1",
+    "lucide-react": "^1.59.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "react-router-dom": "^7.18.4"
+  },
+  "devDependencies": {
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "typescript": "^5.9.3",
+    "vite": "^8.3.4"
+  }
+}

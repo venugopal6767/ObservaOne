@@ -249,7 +249,20 @@ OBSERVA_TEST_URL=https://SERVER OBSERVA_TEST_ADMIN_PASSWORD='...' \
 OBSERVA_TEST_VIEWER_PASSWORD='...' NODE_TLS_REJECT_UNAUTHORIZED=0 npm test
 ```
 
-`NODE_TLS_REJECT_UNAUTHORIZED=0` is only for the self-signed lab certificate. What is checked: no demo or sample data, health rules (no traffic, not reporting), module visibility on the API, permissions, no Grafana links in the UI, and that every page's imports exist.
+`NODE_TLS_REJECT_UNAUTHORIZED=0` is only for the self-signed lab certificate. What is checked: no demo or sample data, health rules (no traffic, not reporting), module visibility on the API, permissions, no Grafana links in the UI, and that the server serves the React build.
+
+## 7c. The web UI (React)
+
+The UI is a React + TypeScript app in `observa-ui/web`. `docker compose build observa` builds it automatically (multi-stage Dockerfile); nothing extra is needed on the server. To work on it:
+
+```bash
+cd observa-ui/web
+npm ci
+npm run dev        # http://localhost:5173, sends /api to a running observa-ui (OBSERVA_API=http://localhost:8080)
+npm run build      # type-check + production build into web/dist (observa-ui serves this folder)
+```
+
+See `observa-ui/web/README.md` for the layout of the code.
 
 ## 8. Everyday commands
 

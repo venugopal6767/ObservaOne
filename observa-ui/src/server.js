@@ -40,16 +40,18 @@ app.get('/healthz', async (req, res) => {
 app.all('/internal/agent-verify', verifyAgent);
 app.use('/api', api);
 
-// Third-party files served from node_modules (no internet needed at runtime)
-app.get('/vendor/chart.js', (req, res) => res.sendFile(path.join(root, 'node_modules/chart.js/dist/chart.umd.min.js')));
-app.use('/vendor/inter', express.static(path.join(root, 'node_modules/@fontsource/inter'), { maxAge: '7d' }));
-
-app.use(express.static(path.join(root, 'public'), { index: false, maxAge: '1h' }));
+// The web UI: a React app built into web/dist (see web/README.md). Built files have a content hash in their
+// name, so they can be cached for a long time; index.html is never cached so a new build shows up at once.
+const webRoot = path.join(root, 'web/dist');
+app.use('/assets', express.static(path.join(webRoot, 'assets'), { immutable: true, maxAge: '365d', fallthrough: false }));
+app.use(express.static(webRoot, { index: false, maxAge: '1h' }));
 
 // Single-page app: every other GET returns index.html
-app.get(/^\/(?!api\/|vendor\/).*/, (req, res) => {
+app.get(/^\/(?!api\/|assets\/|internal\/).*/, (req, res) => {
   res.setHeader('Cache-Control', 'no-cache');
-  res.sendFile(path.join(root, 'public/index.html'));
+  res.sendFile(path.join(webRoot, 'index.html'), (err) => {
+    if (err && !res.headersSent) res.status(503).type('text').send('The web UI is not built. Run: cd web && npm ci && npm run build');
+  });
 });
 
 // ---- start: database first, then HTTP ----
