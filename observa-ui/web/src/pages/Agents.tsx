@@ -1,223 +1,327 @@
-// Agents, organised per platform (like Datadog): an overview of the whole fleet, then one section each for
-// Linux, Windows, Docker and Kubernetes with that platform's agents and its own install steps. Plus tokens.
-import { useEffect, useMemo, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+// Agents, organised per platform: an overview of the whole fleet, then one section each for Linux, Windows,
+// Docker and Kubernetes with that platform's agents and its own install steps, plus enrollment tokens.
+// Linux uses the ObservaOne Go agent (enrollment token -> own credential, heartbeats, status rules on the
+// server); Windows, Docker and Kubernetes still use the previous-generation agent (token sent with every upload).
+// Every number comes from /api/agents (the database + Prometheus). A value the agent has not reported shows
+// "-"; an agent that stopped sending heartbeats shows "Not reporting" (the host may still be up).
+import { useMemo, useState } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Plus, Copy, Trash2, ShieldCheck, Terminal, Monitor, Container, Boxes, Server, ChevronDown } from 'lucide-react';
+import { Plus, Copy, Trash2, ShieldCheck, Terminal, Monitor, Container, Boxes, Server, AlertTriangle, KeyRound } from 'lucide-react';
 import { api } from '@/lib/api';
-import { fmt, ago } from '@/lib/format';
+import { fmt, ago, dateTime } from '@/lib/format';
 import { toneClass } from '@/lib/theme';
 import { useApp, usePlainQuery } from '@/app/AppContext';
-import { ErrorState, Field, InfoBox, Modal, PageHead, Pill, Select, StateView, TableWrap, Time, copyText, toast, useDialogs } from '@/components/ui';
+import { ErrorState, Field, InfoBox, Modal, PageHead, Pill, Select, StateBanner, StateView, TableFoot, TableWrap, Tabs, Time, copyText, toast, useDialogs, usePager, type Tone } from '@/components/ui';
 import { StatCard } from '@/components/StatCard';
 
 type Platform = 'linux' | 'windows' | 'docker' | 'kubernetes';
-interface Agent { id: string; host: string; platform: Platform; os: string; arch: string; version: string; env: string; role: string; cluster: string; ip: string; token: string | null; lastSeen: string; status: 'online' | 'offline' | 'blocked'; outdated: boolean; cpu: number | null; mem: number | null; diskFree: number | null; sendFailures: number; queue: number }
-interface AgentsData { agents: Agent[]; summary: { total: number; online: number; offline: number; blocked: number; outdated: number; byPlatform: Record<Platform, number> }; latest: string }
+type Status = 'online' | 'attention' | 'not_reporting' | 'offline' | 'pending' | 'blocked';
+interface Agent {
+  id: string; host: string; platform: Platform; os: string; arch: string; version: string; env: string; role: string; cluster: string; ip: string;
+  kernel: string; labels: Record<string, string>; token: string | null; enrolled: boolean; enrolledAt: string | null; lastHeartbeat: string | null;
+  lastData: string | null; lastSeen: string | null; bootTime: string | null; status: Status; statusReason: string; problems: string[];
+  outdated: boolean; cpu: number | null; mem: number | null; diskFree: number | null;
+  diag?: { collectors: Record<string, string> | null; collectorErrors?: Record<string, string>; uploadFailures: number | null; lastError: string; uptimeSeconds: number | null };
+}
+interface AgentsData {
+  agents: Agent[]; latest: string; latestPrevious: string;
+  thresholds: { onlineSeconds: number; offlineSeconds: number; heartbeatSeconds: number };
+}
 interface InstallInfo { server: string; cert: { available: boolean; selfSigned?: boolean; sha256?: string; spkiPin?: string; issuer?: string }; versions: Record<string, string> }
-interface Token { id: number; name: string; prefix: string; createdBy: string; createdAt: string; lastUsed: string | null; expiresAt: string | null; revoked: boolean; expired: boolean; agents: number }
+interface Token { id: number; name: string; prefix: string; createdBy: string; createdAt: string; lastUsed: string | null; expiresAt: string | null; revoked: boolean; expired: boolean; usedUp: boolean; maxUses: number | null; uses: number; agents: number }
 
-const PLATFORMS: Record<Platform, { label: string; hint: string; Icon: typeof Server; what: string }> = {
-  linux: { label: 'Linux', hint: 'Ubuntu, RHEL, Debian, SUSE, Amazon Linux (systemd)', Icon: Terminal, what: 'Host metrics (node_exporter), system logs or the journal, extra log files, and OpenTelemetry traces from apps on the server.' },
-  windows: { label: 'Windows', hint: 'Windows Server 2016 and newer', Icon: Monitor, what: 'Host metrics (windows_exporter), Application and System event logs, extra log files, and OpenTelemetry traces.' },
-  docker: { label: 'Docker', hint: 'Host + every container (cAdvisor) + container logs', Icon: Container, what: 'The Docker host, every container\'s CPU, memory and network (cAdvisor), and container logs.' },
-  kubernetes: { label: 'Kubernetes', hint: 'Every node, pods, events, kube-state-metrics (also OpenShift)', Icon: Boxes, what: 'One agent per node (DaemonSet), a cluster agent for events, and kube-state-metrics for pods, deployments and nodes.' },
+type Support = 'ready' | 'previous';
+const SUPPORT: Record<Support, [string, Tone, string]> = {
+  ready: ['Ready', 'green', 'ObservaOne Go agent: enrollment, heartbeats and host metrics tested end to end.'],
+  previous: ['Previous agent', 'orange', 'Works with the previous-generation agent (OpenTelemetry Collector). The Go agent for this platform is planned.'],
+};
+const PLATFORMS: Record<Platform, { label: string; Icon: typeof Server; support: Support; desc: string }> = {
+  linux: { label: 'Linux', Icon: Terminal, support: 'ready', desc: 'Servers and VMs with systemd: Ubuntu, Debian, RHEL, Rocky, AlmaLinux, Amazon Linux, SUSE. amd64 and arm64.' },
+  windows: { label: 'Windows', Icon: Monitor, support: 'previous', desc: 'Windows Server 2016 and newer. Uses the previous-generation agent until the Go agent for Windows is released.' },
+  docker: { label: 'Docker', Icon: Container, support: 'previous', desc: 'A Docker host and every container on it. Uses the previous-generation agent until the Go agent supports containers.' },
+  kubernetes: { label: 'Kubernetes', Icon: Boxes, support: 'previous', desc: 'Every node, pod and cluster event; also OpenShift, EKS, AKS, GKE. Uses the previous-generation agent for now.' },
 };
 const PLATFORM_KEYS = Object.keys(PLATFORMS) as Platform[];
+const STATUS: Record<Status, [string, Tone]> = {
+  online: ['Online', 'solid-green'], attention: ['Needs attention', 'solid-orange'], not_reporting: ['Not reporting', 'stale'],
+  offline: ['Offline', 'solid-red'], pending: ['Waiting for first heartbeat', 'muted'], blocked: ['Blocked', 'muted'],
+};
+const DISTROS: Record<string, [string, string]> = {
+  debian: ['Ubuntu / Debian', 'sudo apt-get update && sudo apt-get install -y curl'],
+  rhel: ['RHEL / Rocky / AlmaLinux / CentOS Stream', 'sudo dnf install -y curl'],
+  amazon: ['Amazon Linux 2 / 2023', 'sudo yum install -y curl'],
+  suse: ['SUSE / openSUSE', 'sudo zypper install -y curl'],
+};
 type TabKey = 'overview' | Platform | 'tokens';
+type StatusFilter = 'all' | Status;
+
+const counts = (list: Agent[]) => ({
+  total: list.length,
+  online: list.filter((a) => a.status === 'online' || a.status === 'attention').length,
+  attention: list.filter((a) => a.status === 'attention' || a.status === 'blocked' || a.outdated).length,
+  notReporting: list.filter((a) => a.status === 'not_reporting').length,
+  offline: list.filter((a) => a.status === 'offline').length,
+  pending: list.filter((a) => a.status === 'pending').length,
+});
+const secs = (s?: number) => (!s ? '-' : s < 120 ? `${s} s` : `${Math.round(s / 60)} min`);
+const StatusPill = ({ a }: { a: Pick<Agent, 'status' | 'statusReason'> }) => {
+  const [label, tone] = STATUS[a.status] || [a.status, 'muted'];
+  return <Pill tone={tone} title={a.statusReason || label}>{label}</Pill>;
+};
 
 export default function Agents() {
   const { can } = useApp();
   const canManage = can('integrations.manage');
   const [params, setParams] = useSearchParams();
-  // old links: ?tab=fleet -> overview, ?tab=install&platform=x -> that platform with the installer open
-  const initialTab = (() => {
+  const tab: TabKey = (() => {
     const t = params.get('tab');
     if (t === 'install') return (params.get('platform') as Platform) || 'linux';
+    if (t === 'fleet') return 'overview';
     if (t && (t === 'tokens' || t in PLATFORMS)) return t as TabKey;
     return 'overview';
   })();
-  const [tab, setTabState] = useState<TabKey>(initialTab);
-  const [installOpen, setInstallOpen] = useState(params.get('tab') === 'install');
-  const setTab = (k: TabKey, install = false) => {
-    setTabState(k); setInstallOpen(install);
-    const n = new URLSearchParams(params); n.set('tab', k); n.delete('platform'); setParams(n, { replace: true });
+  const view = params.get('view') === 'install' || params.get('tab') === 'install' ? 'install' : 'agents';
+  const go = (k: TabKey, v: 'agents' | 'install' = 'agents') => {
+    const n = new URLSearchParams(); if (k !== 'overview') n.set('tab', k); if (v === 'install') n.set('view', 'install'); setParams(n, { replace: true });
   };
 
   const q = usePlainQuery(['agents'], () => api<AgentsData>('/agents'));
   const info = useQuery({ queryKey: ['agents-install-info'], queryFn: () => api<InstallInfo>('/agents/install-info'), staleTime: 300_000 });
   const d = q.data;
+  const head = <PageHead title="Agents" sub="One ObservaOne Agent per server sends its metrics to this platform"
+    actions={canManage ? <button className="btn btn-primary" onClick={() => go(tab in PLATFORMS ? tab : 'linux', 'install')}><Plus size={15} />Install agent</button> : undefined} />;
 
-  const head = <PageHead title="Agents" sub="One agent per server sends metrics, logs and traces to ObservaOne"
-    actions={canManage ? <button className="btn btn-primary" onClick={() => setTab(tab in PLATFORMS ? tab : 'linux', true)}><Plus size={15} />Install agent</button> : undefined} />;
-  if (q.isPending) return <>{head}<TableWrap label="Agents"><StateView kind="loading" skeleton="table" /></TableWrap></>;
-  if (q.isError) return <>{head}<TableWrap label="Agents"><ErrorState error={q.error} what="Agents" /></TableWrap></>;
-  const s = d!.summary;
-  const failing = d!.agents.filter((a) => a.sendFailures > 0).length;
-  const attention = s.blocked + s.outdated + failing;
+  const tabs: [TabKey, string][] = [['overview', `All platforms${d ? ` (${d.agents.length})` : ''}`], ...PLATFORM_KEYS.map((p) => [p, `${PLATFORMS[p].label}${d ? ` (${d.agents.filter((a) => a.platform === p).length})` : ''}`] as [TabKey, string])];
+  if (canManage) tabs.push(['tokens', 'Enrollment tokens']);
 
   return (
     <>
       {head}
-      <div className="grid cards-4" style={{ marginBottom: 16 }}>
-        <StatCard label="Agents" value={s.total} extra={<div className="dim tile-sub">{PLATFORM_KEYS.filter((p) => s.byPlatform[p]).map((p) => `${s.byPlatform[p]} ${PLATFORMS[p].label}`).join(' · ') || 'none yet'}</div>} />
-        <StatCard label="Online" value={s.online} tone={s.online ? 'green' : ''} extra={<div className="dim tile-sub">sent data in the last 2½ minutes</div>} />
-        <StatCard label="Offline" value={s.offline} tone={s.offline ? 'red' : ''} extra={<div className="dim tile-sub">{s.offline ? 'not heard from - check these servers' : 'all agents reporting'}</div>} />
-        <StatCard label="Need attention" value={attention} tone={attention ? 'orange' : ''} extra={<div className="dim tile-sub">{s.outdated} outdated · {s.blocked} blocked · {failing} with upload errors</div>} />
-      </div>
-
-      <div className="platform-tabs" role="tablist" aria-label="Platform">
-        <button role="tab" aria-selected={tab === 'overview'} className={tab === 'overview' ? 'active' : ''} onClick={() => setTab('overview')}><Server size={15} />All platforms<span className="count-badge">{s.total}</span></button>
-        {PLATFORM_KEYS.map((p) => {
-          const { label, Icon } = PLATFORMS[p];
-          return <button key={p} role="tab" aria-selected={tab === p} className={tab === p ? 'active' : ''} onClick={() => setTab(p)}><Icon size={15} />{label}<span className="count-badge">{s.byPlatform[p] || 0}</span></button>;
-        })}
-        {canManage && <button role="tab" aria-selected={tab === 'tokens'} className={`push-right ${tab === 'tokens' ? 'active' : ''}`} onClick={() => setTab('tokens')}>Tokens</button>}
-      </div>
-
-      {tab === 'overview' && (
-        <>
-          <div className="platform-cards">
-            {PLATFORM_KEYS.map((p) => {
-              const list = d!.agents.filter((a) => a.platform === p);
-              const on = list.filter((a) => a.status === 'online').length, off = list.filter((a) => a.status === 'offline').length;
-              const { label, Icon, hint } = PLATFORMS[p];
-              return (
-                <button key={p} className="platform-card" onClick={() => setTab(p, !list.length && canManage)}>
-                  <div className="pc-head"><span className="pc-icon"><Icon size={18} /></span><b>{label}</b><span className="dim pc-count">{list.length}</span></div>
-                  {list.length ? (
-                    <div className="pc-status"><span className="c-green">{on} online</span>{off > 0 && <span className="c-red">{off} offline</span>}</div>
-                  ) : <div className="dim pc-status">{canManage ? 'Not installed yet - set it up →' : 'No agents yet'}</div>}
-                  <div className="dim pc-hint">{hint}</div>
-                </button>
-              );
-            })}
-          </div>
-          <Fleet agents={d!.agents} latest={d!.latest} canManage={canManage} showPlatform onInstall={() => setTab('linux', true)} />
-        </>
-      )}
-
-      {tab in PLATFORMS && (
-        <PlatformSection p={tab as Platform} agents={d!.agents.filter((a) => a.platform === tab)} latest={d!.latest} canManage={canManage}
-          info={info.data} infoError={info.error} installOpen={installOpen} setInstallOpen={setInstallOpen} />
-      )}
-      {tab === 'tokens' && canManage && <Tokens />}
+      <div className="toolbar"><Tabs items={tabs} active={tab} onChange={(k) => go(k)} label="Agent platforms" /></div>
+      {tab === 'tokens' ? (canManage ? <Tokens /> : null)
+        : q.isPending ? <TableWrap label="Agents"><StateView kind="loading" skeleton="table" /></TableWrap>
+          : q.isError ? <TableWrap label="Agents"><ErrorState error={q.error} what="Agents" /></TableWrap>
+            : tab === 'overview' ? <Overview data={d!} canManage={canManage} go={go} />
+              : <PlatformSection p={tab as Platform} data={d!} canManage={canManage} view={view} go={go} info={info.data} infoError={info.error} />}
     </>
   );
 }
 
-function PlatformSection({ p, agents, latest, canManage, info, infoError, installOpen, setInstallOpen }: {
-  p: Platform; agents: Agent[]; latest: string; canManage: boolean; info?: InstallInfo; infoError: unknown; installOpen: boolean; setInstallOpen: (v: boolean) => void;
-}) {
-  const { label, Icon, what } = PLATFORMS[p];
-  const showInstall = installOpen || (!agents.length && canManage);
+function StatCards({ list, data, onFilter, sub }: { list: Agent[]; data: AgentsData; onFilter: (f: StatusFilter) => void; sub?: string }) {
+  const c = counts(list), t = data.thresholds || {} as AgentsData['thresholds'];
   return (
-    <div className="platform-section">
-      <div className="platform-intro">
-        <span className="pc-icon lg"><Icon size={22} /></span>
-        <div>
-          <h2>{label} agents</h2>
-          <p className="muted">{what}</p>
-        </div>
-        {canManage && agents.length > 0 && (
-          <button className="btn" style={{ marginLeft: 'auto' }} aria-expanded={showInstall} onClick={() => setInstallOpen(!installOpen)}>
-            <Plus size={14} />Install on {label}<ChevronDown size={14} className={`chev ${showInstall ? 'open-down' : ''}`} />
-          </button>
-        )}
-      </div>
-      {showInstall && (info ? <InstallWizard platform={p} info={info} canManage={canManage} /> : infoError ? <ErrorState error={infoError} what="Install information" /> : <StateView kind="loading" />)}
-      {agents.length > 0
-        ? <Fleet agents={agents} latest={latest} canManage={canManage} platform={p} />
-        : !canManage && <TableWrap label={`${label} agents`}><StateView kind="empty" title={`No ${label} agents yet`} text="An administrator can install agents from this page." /></TableWrap>}
+    <div className="grid cards-5" style={{ marginBottom: 16 }}>
+      <StatCard label="Agents" value={c.total} onClick={() => onFilter('all')} extra={<div className="dim tile-sub">{sub || (c.pending ? `${c.pending} waiting for first heartbeat` : 'enrolled')}</div>} />
+      <StatCard label="Online" value={c.online} tone={c.online ? 'green' : ''} onClick={() => onFilter('online')} extra={<div className="dim tile-sub">heartbeat in the last {secs(t.onlineSeconds)}</div>} />
+      <StatCard label="Not reporting" value={c.notReporting} tone={c.notReporting ? 'orange' : ''} onClick={() => onFilter('not_reporting')} extra={<div className="dim tile-sub">{c.notReporting ? 'silent; the host may still be up' : 'none'}</div>} />
+      <StatCard label="Offline" value={c.offline} tone={c.offline ? 'red' : ''} onClick={() => onFilter('offline')} extra={<div className="dim tile-sub">silent for more than {secs(t.offlineSeconds)}</div>} />
+      <StatCard label="Needs attention" value={c.attention} tone={c.attention ? 'orange' : ''} onClick={() => onFilter('attention')} extra={<div className="dim tile-sub">problems, outdated or blocked</div>} />
     </div>
   );
 }
 
-function Fleet({ agents, latest, canManage, showPlatform, platform, onInstall }: { agents: Agent[]; latest: string; canManage: boolean; showPlatform?: boolean; platform?: Platform; onInstall?: () => void }) {
-  const { confirm } = useDialogs();
+function Overview({ data, canManage, go }: { data: AgentsData; canManage: boolean; go: (k: TabKey, v?: 'agents' | 'install') => void }) {
+  const [status, setStatus] = useState<StatusFilter>('all');
+  return (
+    <>
+      <StatCards list={data.agents} data={data} onFilter={setStatus} />
+      <div className="grid cards-4" style={{ marginBottom: 16 }}>
+        {PLATFORM_KEYS.map((p) => {
+          const c = counts(data.agents.filter((a) => a.platform === p)), m = PLATFORMS[p];
+          return (
+            <button key={p} className="panel platform-card" onClick={() => go(p, c.total ? 'agents' : canManage ? 'install' : 'agents')}>
+              <div className="platform-card-head"><m.Icon size={18} /><b>{m.label}</b><span className="grow" /><Pill tone={SUPPORT[m.support][1]} title={SUPPORT[m.support][2]}>{SUPPORT[m.support][0]}</Pill></div>
+              {c.total ? (
+                <div className="platform-card-counts"><span className="c-green">{c.online} online</span>{c.notReporting > 0 && <span className="c-orange">{c.notReporting} not reporting</span>}{c.offline > 0 && <span className="c-red">{c.offline} offline</span>}<span className="dim">of {c.total}</span></div>
+              ) : <div className="dim">{canManage ? 'No agents yet. Install one.' : 'No agents yet.'}</div>}
+            </button>
+          );
+        })}
+      </div>
+      <Fleet agents={data.agents} data={data} canManage={canManage} showPlatform status={status} setStatus={setStatus} onInstall={() => go('linux', 'install')} />
+    </>
+  );
+}
+
+function PlatformSection({ p, data, canManage, view, go, info, infoError }: {
+  p: Platform; data: AgentsData; canManage: boolean; view: 'agents' | 'install'; go: (k: TabKey, v?: 'agents' | 'install') => void; info?: InstallInfo; infoError: unknown;
+}) {
+  const m = PLATFORMS[p];
+  const list = data.agents.filter((a) => a.platform === p);
+  const [status, setStatus] = useState<StatusFilter>('all');
+  return (
+    <div className="platform-section">
+      <div className="section-head">
+        <div>
+          <h2><m.Icon size={18} />{m.label} <Pill tone={SUPPORT[m.support][1]} title={SUPPORT[m.support][2]}>{SUPPORT[m.support][0]}</Pill></h2>
+          <p className="muted">{m.desc}</p>
+        </div>
+        <Tabs items={[['agents', `Agents (${list.length})`], ['install', 'Install']]} active={view} onChange={(v) => go(p, v)} label={`${m.label} sections`} />
+      </div>
+      {view === 'install' ? (
+        !canManage ? <TableWrap label="Install"><StateView kind="empty" title='Installing agents needs the "integrations.manage" permission' text="Ask an administrator to install the agent or to give you that permission." /></TableWrap>
+          : info ? <InstallWizard p={p} info={info} latest={data.latest} goTokens={() => go('tokens')} /> : infoError ? <ErrorState error={infoError} what="Install information" /> : <StateView kind="loading" />
+      ) : (
+        <>
+          <StatCards list={list} data={data} onFilter={setStatus} sub={list.length ? undefined : 'none enrolled yet'} />
+          <Fleet agents={list} data={data} canManage={canManage} status={status} setStatus={setStatus} platform={p} onInstall={() => go(p, 'install')} />
+        </>
+      )}
+    </div>
+  );
+}
+
+function Fleet({ agents, data, canManage, showPlatform, platform, status, setStatus, onInstall }: {
+  agents: Agent[]; data: AgentsData; canManage: boolean; showPlatform?: boolean; platform?: Platform; status: StatusFilter; setStatus: (s: StatusFilter) => void; onInstall: () => void;
+}) {
+  const { open, confirm } = useDialogs();
   const qc = useQueryClient();
   const [filter, setFilter] = useState('');
-  const [status, setStatus] = useState('');
   const act = async (path: string, method: string, msg: string) => {
     try { await api(path, { method }); toast(msg); qc.invalidateQueries({ queryKey: ['agents'] }); } catch (e) { toast((e as Error).message, 'err'); }
   };
   const list = useMemo(() => {
     const f = filter.toLowerCase();
-    return agents.filter((a) => (!status || a.status === status) && (!f || [a.host, a.os, a.env, a.role, a.ip, a.cluster, a.token].join(' ').toLowerCase().includes(f)));
+    const match = (a: Agent) => status === 'all' || a.status === status || (status === 'online' && a.status === 'attention') || (status === 'attention' && (a.status === 'blocked' || a.outdated));
+    return agents.filter((a) => match(a) && (!f || [a.host, a.os, a.env, a.role, a.ip, a.cluster, a.version, a.id, ...Object.entries(a.labels || {}).map(([k, v]) => `${k}=${v}`)].join(' ').toLowerCase().includes(f)));
   }, [agents, filter, status]);
+  const pager = usePager(list, 50, `${filter}|${status}`);
   if (!agents.length) {
-    return <TableWrap label="Agents"><StateView kind="empty" title="No agents enrolled" text={canManage ? 'Install the agent on a server and it shows up here within a minute.' : 'No agent has reported yet. An administrator can install agents from this page.'}
-      action={canManage && onInstall ? <button className="btn btn-primary" onClick={onInstall}>Install your first agent</button> : undefined} /></TableWrap>;
+    return <TableWrap label="Agents"><StateView kind="empty" title={platform ? `No ${PLATFORMS[platform].label} agents enrolled` : 'No agents enrolled'}
+      text={canManage ? 'Install the agent on a server and it shows up here within a minute.' : 'No agent has enrolled yet. An administrator can install agents from this page.'}
+      action={canManage ? <button className="btn btn-primary" onClick={onInstall}>Install an agent</button> : undefined} /></TableWrap>;
   }
-  const k8s = platform === 'kubernetes';
+  const labelsOf = (a: Agent) => [a.env && `env=${a.env}`, a.role && `role=${a.role}`, ...Object.entries(a.labels || {}).map(([k, v]) => `${k}=${v}`)].filter(Boolean) as string[];
+  const showDetail = (a: Agent) => open((close) => <AgentDetail id={a.id} host={a.host} onClose={close} />);
   return (
     <>
-      <div className="toolbar" style={{ marginTop: 4 }}>
-        <input className="input" placeholder="Filter by host, OS, env, role, IP..." aria-label="Filter agents" style={{ width: 280 }} value={filter} onChange={(e) => setFilter(e.target.value)} />
-        <Select className="select" label="Status" style={{ width: 150 }} value={status} onChange={setStatus} options={[['', 'Any status'], ['online', 'Online'], ['offline', 'Offline'], ['blocked', 'Blocked']]} />
+      <div className="toolbar" style={{ marginBottom: 12 }}>
+        <input className="input" type="search" placeholder="Filter: host, env, label, version, IP..." aria-label="Filter agents" style={{ width: 300, maxWidth: '100%' }} value={filter} onChange={(e) => setFilter(e.target.value)} />
+        <Select className="select" label="Filter by status" style={{ width: 190 }} value={status} onChange={setStatus}
+          options={[['all', 'All statuses'], ['online', 'Online'], ['attention', 'Needs attention'], ['not_reporting', 'Not reporting'], ['offline', 'Offline'], ['pending', 'Waiting'], ['blocked', 'Blocked']]} />
         <div className="grow" />
-        <span className="dim" style={{ fontSize: 12 }}>Latest agent version: {latest}</span>
+        <span className="dim" style={{ fontSize: 12 }}>Latest agent: {data.latest}</span>
       </div>
       <TableWrap label="Agents">
         <table className="tbl">
           <thead><tr>
-            <th>Host</th>{showPlatform && <th>Platform</th>}{k8s && <th>Cluster</th>}<th>Env / role</th><th>Version</th><th>Status</th>
-            <th className="num">CPU</th><th className="num">Memory</th><th className="num">Disk free</th><th>Uploads</th><th>Last seen</th><th />
+            <th>Host</th>{showPlatform && <th>Platform</th>}<th>Status</th><th>Labels</th><th>Version</th>
+            <th className="num">CPU</th><th className="num">Memory</th><th className="num">Disk free</th><th>Last heartbeat</th><th />
           </tr></thead>
           <tbody>
-            {list.length ? list.map((a) => (
-              <tr key={a.id}>
-                <td><b style={{ fontWeight: 600 }}>{a.host}</b><div className="dim" style={{ fontSize: 11 }}>{[a.ip, !k8s && a.cluster && `cluster ${a.cluster}`].filter(Boolean).join(' · ') || a.id}</div></td>
-                {showPlatform && <td>{PLATFORMS[a.platform]?.label || a.platform}<div className="dim" style={{ fontSize: 11 }}>{[a.os, a.arch].filter(Boolean).join(' · ')}</div></td>}
-                {k8s && <td>{a.cluster || '-'}</td>}
-                <td>{[a.env, a.role].filter(Boolean).join(' / ') || <span className="dim">-</span>}</td>
-                <td>{a.version ? (a.outdated ? <Pill tone="orange" title={`Latest is ${latest}. Run the install command again to update.`}>{a.version} ↑</Pill> : a.version) : '-'}</td>
-                <td><Pill tone={a.status === 'online' ? 'solid-green' : a.status === 'offline' ? 'solid-red' : 'muted'}>{a.status === 'online' ? 'Online' : a.status === 'offline' ? 'Offline' : 'Blocked'}</Pill></td>
-                <td className={`num ${toneClass(a.cpu)}`}>{a.cpu === null ? '-' : fmt(a.cpu, 'percent')}</td>
-                <td className={`num ${toneClass(a.mem)}`}>{a.mem === null ? '-' : fmt(a.mem, 'percent')}</td>
-                <td className={`num ${toneClass(a.diskFree, false)}`}>{a.diskFree === null ? '-' : fmt(a.diskFree, 'percent')}</td>
-                <td>{a.sendFailures > 0 ? <span className="c-red" title="Items that failed to upload in the last 15 minutes">{fmt(a.sendFailures, 'short')} failed</span>
-                  : a.queue > 0 ? <span className="c-orange" title="Items waiting to be sent">{fmt(a.queue, 'short')} queued</span> : <span className="c-green">OK</span>}</td>
-                <td className="dim"><Time ms={Date.parse(a.lastSeen)} text={ago(a.lastSeen)} /></td>
+            {pager.rows.length ? pager.rows.map((a) => (
+              <tr key={a.id} className="clickable" tabIndex={0} onClick={(e) => { if (!(e.target as HTMLElement).closest('button, a')) showDetail(a); }} onKeyDown={(e) => { if (e.key === 'Enter') showDetail(a); }}>
+                <td><b style={{ fontWeight: 600 }}>{a.host}</b><div className="dim" style={{ fontSize: 11 }}>{[a.os, a.arch].filter(Boolean).join(' · ') || a.id}</div></td>
+                {showPlatform && <td>{PLATFORMS[a.platform]?.label || a.platform}</td>}
+                <td><StatusPill a={a} />{a.problems?.length > 0 && a.status !== 'not_reporting' && a.status !== 'offline' && <div className="c-orange" style={{ fontSize: 11, marginTop: 3, maxWidth: 260 }}>{a.problems[0]}</div>}</td>
+                <td>{labelsOf(a).length ? <div className="label-chips">{labelsOf(a).slice(0, 4).map((l) => <span key={l} className="chip">{l}</span>)}</div> : <span className="dim">-</span>}</td>
+                <td>{a.version ? (a.outdated ? <Pill tone="orange" title={`Latest is ${a.platform === 'linux' ? data.latest : data.latestPrevious}. Run the installer again to update.`}>{a.version} ↑</Pill> : a.version) : '-'}</td>
+                <td className={`num ${toneClass(a.cpu)}`}>{fmt(a.cpu, 'percent')}</td>
+                <td className={`num ${toneClass(a.mem)}`}>{fmt(a.mem, 'percent')}</td>
+                <td className={`num ${toneClass(a.diskFree, false)}`}>{fmt(a.diskFree, 'percent')}</td>
+                <td className="dim">{a.lastSeen ? <Time ms={Date.parse(a.lastSeen)} text={ago(a.lastSeen)} /> : 'never'}</td>
                 <td className="num" style={{ whiteSpace: 'nowrap' }}>
                   {canManage && (a.status === 'blocked'
                     ? <button className="btn btn-sm" onClick={() => act(`/agents/${encodeURIComponent(a.id)}/unblock`, 'POST', `${a.host} can send data again`)}>Allow</button>
-                    : <button className="btn btn-sm" title="Refuse all data from this agent" onClick={async () => {
-                      if (await confirm(`Block ${a.host}?`, 'The agent keeps running but ObservaOne refuses everything it sends until you allow it again.', 'Block')) act(`/agents/${encodeURIComponent(a.id)}/block`, 'POST', `${a.host} blocked`);
+                    : <button className="btn btn-sm" title="Refuse everything this agent sends" onClick={async () => {
+                      if (await confirm(`Block ${a.host}?`, 'The agent keeps running but ObservaOne refuses its heartbeats and data until you allow it again.', 'Block')) act(`/agents/${encodeURIComponent(a.id)}/block`, 'POST', `${a.host} blocked`);
                     }}>Block</button>)}
-                  {canManage && a.status !== 'online' && <button className="icon-btn" title="Forget this agent (after you uninstalled it)" aria-label={`Forget ${a.host}`} style={{ marginLeft: 4 }} onClick={async () => {
-                    if (await confirm(`Forget ${a.host}?`, 'Removes it from this list. If the agent is still installed and its token is valid, it comes back the next time it sends data.', 'Forget')) act(`/agents/${encodeURIComponent(a.id)}`, 'DELETE', `${a.host} removed`);
+                  {canManage && a.status !== 'online' && a.status !== 'attention' && <button className="icon-btn" title="Remove this agent (after you uninstalled it)" aria-label={`Remove ${a.host}`} style={{ marginLeft: 4 }} onClick={async () => {
+                    if (await confirm(`Remove ${a.host}?`, a.enrolled ? 'Removes it and its credential. If the agent is still installed it can no longer send anything; install it again with a new token to bring it back.' : 'Removes it from this list. A previous-generation agent that still has a valid token comes back when it next sends data.', 'Remove')) act(`/agents/${encodeURIComponent(a.id)}`, 'DELETE', `${a.host} removed`);
                   }}><Trash2 size={15} /></button>}
                 </td>
               </tr>
-            )) : <tr><td colSpan={12} className="dim">No agent matches the filter.</td></tr>}
+            )) : <tr><td colSpan={10} className="dim">No agent matches the filter.</td></tr>}
           </tbody>
         </table>
+        <TableFoot pager={pager} noun="agents" />
       </TableWrap>
     </>
   );
 }
 
-// ------------------------------------------------------------ install wizard (one platform)
-function commandFor(p: Platform, info: InstallInfo, w: { token: string; env: string; role: string; logs: string; cluster: string; securityLog: boolean }) {
+// ------------------------------------------------------------ agent detail
+function AgentDetail({ id, host, onClose }: { id: string; host: string; onClose: () => void }) {
+  const { canOpen } = useApp();
+  const q = useQuery({ queryKey: ['agent', id], queryFn: () => api<{ agent: Agent }>(`/agents/${encodeURIComponent(id)}`) });
+  const d = q.data?.agent;
+  const when = (x: string | null) => (x ? <span><Time ms={Date.parse(x)} text={dateTime(Date.parse(x)).slice(0, 16)} /><span className="dim"> ({ago(x)})</span></span> : <span className="dim">-</span>);
+  const row = (k: string, v: React.ReactNode) => <><dt>{k}</dt><dd>{v === null || v === undefined || v === '' ? <span className="dim">-</span> : v}</dd></>;
+  const coll = d?.diag?.collectors || {};
+  const errs = d?.diag?.collectorErrors || {};
+  const collTone: Record<string, Tone> = { ok: 'green', running: 'green', unavailable: 'muted', disabled: 'muted', error: 'red', failed: 'red', stopped: 'red' };
+  return (
+    <Modal title={host} onClose={onClose} wide actions={[{ label: 'Close' }]}>
+      {q.isPending ? <StateView kind="loading" skeleton="cards" /> : q.isError ? <ErrorState error={q.error} what="Agent" /> : d && (
+        <>
+          <div className="detail-status"><StatusPill a={d} /><span className="muted">{d.statusReason || 'Everything is reporting normally.'}</span></div>
+          {d.problems?.length > 0 && <ul className="problem-list">{d.problems.map((p) => <li key={p}><AlertTriangle size={14} />{p}</li>)}</ul>}
+          <div className="grid cols-2">
+            <section className="panel">
+              <div className="panel-head"><h3>Identity</h3></div>
+              <dl className="kv">
+                {row('Agent ID', <code>{d.id}</code>)}{row('Platform', PLATFORMS[d.platform]?.label || d.platform)}{row('OS', d.os)}
+                {d.platform === 'linux' && row('Kernel', d.kernel)}{row('Architecture', d.arch)}{row('Version', d.version)}{row('Address', d.ip)}
+                {row('Labels', [d.env && `env=${d.env}`, d.role && `role=${d.role}`, ...Object.entries(d.labels || {}).map(([k, v]) => `${k}=${v}`)].filter(Boolean).join(', '))}
+                {row('Enrolled', when(d.enrolledAt))}{row('Token', d.token)}{row('Credential', d.enrolled ? 'Own credential (enrolled)' : 'Shared token (previous agent)')}
+              </dl>
+            </section>
+            <section className="panel">
+              <div className="panel-head"><h3>Reporting</h3></div>
+              <dl className="kv">
+                {row('Last heartbeat', d.enrolled ? when(d.lastHeartbeat) : <span className="dim">Not sent by the previous-generation agent; status comes from its last data</span>)}
+                {row('Last data', when(d.lastData))}{d.enrolled && row('Host booted', when(d.bootTime))}
+                {row('CPU', fmt(d.cpu, 'percent'))}{row('Memory', fmt(d.mem, 'percent'))}{row('Lowest disk free', fmt(d.diskFree, 'percent'))}
+                {d.enrolled && row('Upload failures', d.diag?.uploadFailures != null ? String(d.diag.uploadFailures) : null)}
+                {d.enrolled && row('Agent error', d.diag?.lastError || null)}
+              </dl>
+            </section>
+          </div>
+          {Object.keys(coll).length > 0 && (
+            <section className="panel" style={{ marginTop: 14 }}>
+              <div className="panel-head"><h3>Collectors</h3></div>
+              <table className="tbl compact">
+                <thead><tr><th>Collector</th><th>State</th><th>Detail</th></tr></thead>
+                <tbody>{Object.keys(coll).sort().map((k) => <tr key={k}><td>{k}</td><td><Pill tone={collTone[coll[k]] || 'muted'}>{coll[k]}</Pill></td><td className="dim">{errs[k] || ''}</td></tr>)}</tbody>
+              </table>
+            </section>
+          )}
+          {canOpen('/metrics') && <p style={{ marginTop: 12 }}><Link to={`/metrics/host/${encodeURIComponent(d.host)}`} onClick={onClose}>Open the host view for {d.host} →</Link></p>}
+        </>
+      )}
+    </Modal>
+  );
+}
+
+// ------------------------------------------------------------ install (one platform)
+const shq = (v: string) => `'${String(v).replace(/'/g, "'\\''")}'`;
+function commandFor(p: Platform, info: InstallInfo, w: Wiz): string {
   const S = info.server;
   const c = info.cert || { available: false };
   const pin = c.available && c.selfSigned;
-  const t = w.token || '<TOKEN>';
-  const shq = (v: string) => `'${String(v).replace(/'/g, "'\\''")}'`;
   const curlGet = pin ? `curl -fsSLk --pinnedpubkey "${c.spkiPin}"` : 'curl -fsSL';
-  const opts: string[] = [];
-  if (pin) opts.push(`--ca-sha256 ${c.sha256}`);
-  if (w.env) opts.push(`--env ${shq(w.env)}`);
-  if (w.role) opts.push(`--role ${shq(w.role)}`);
-  if (w.logs.trim()) opts.push(`--logs ${shq(w.logs.trim())}`);
-  if (p === 'linux' || p === 'docker') {
-    if (p === 'docker') opts.unshift('--docker');
-    return { where: 'Run on the server as root (or with sudo):', text: `${curlGet} ${S}/agent/install.sh | sudo bash -s -- \\\n  --server ${S} \\\n  --token ${t}${opts.length ? ` \\\n  ${opts.join(' \\\n  ')}` : ''}` };
+  if (p === 'linux') {
+    // no --token: the installer asks for it and hides what is typed (never in shell history or ps)
+    const opts = [`--server ${S}`];
+    if (pin) opts.push(`--ca-sha256 ${c.sha256}`);
+    if (w.env) opts.push(`--env ${shq(w.env)}`);
+    if (w.role) opts.push(`--role ${shq(w.role)}`);
+    for (const l of w.labels.split(',').map((x) => x.trim()).filter(Boolean)) opts.push(`--label ${shq(l)}`);
+    return [`${curlGet} ${S}/agent/install.sh -o observaone-install.sh`, `sudo bash observaone-install.sh \\\n  ${opts.join(' \\\n  ')}`].join('\n');
+  }
+  const t = w.token || '<TOKEN>';
+  if (p === 'docker') {
+    const opts = ['--docker', `--server ${S}`, `--token ${t}`];
+    if (pin) opts.push(`--ca-sha256 ${c.sha256}`);
+    if (w.env) opts.push(`--env ${shq(w.env)}`);
+    if (w.role) opts.push(`--role ${shq(w.role)}`);
+    if (w.logs.trim()) opts.push(`--logs ${shq(w.logs.trim())}`);
+    return `${curlGet} ${S}/agent/install-legacy.sh | sudo bash -s -- \\\n  ${opts.join(' \\\n  ')}`;
   }
   if (p === 'windows') {
     const ps = (v: string) => `'${String(v).replace(/'/g, "''")}'`;
-    const args = [`-Server ${S}`, `-Token ${t}`];
+    const args = [`-Server ${S}`]; // no -Token: the installer asks for it (hidden), so it stays out of PowerShell history
     if (pin) args.push(`-CaSha256 ${c.sha256}`);
     if (w.env) args.push(`-Env ${ps(w.env)}`);
     if (w.role) args.push(`-Role ${ps(w.role)}`);
@@ -225,11 +329,18 @@ function commandFor(p: Platform, info: InstallInfo, w: { token: string; env: str
     if (w.securityLog) args.push('-SecurityLog');
     const lines = ["[Net.ServicePointManager]::SecurityProtocol = 'Tls12'"];
     if (pin) {
-      lines.push(`$fp = '${c.sha256}'`);
-      lines.push("[Net.ServicePointManager]::ServerCertificateValidationCallback = { param($s, $c) ([BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($c.GetRawCertData())) -replace '-', '').ToLower() -eq $fp }");
+      // compiled fingerprint check, for this server only (other sites keep the normal check);
+      // a script-block callback fails in Windows PowerShell 5.1
+      lines.push('Add-Type @"');
+      lines.push('using System; using System.Net; using System.Net.Security; using System.Security.Cryptography; using System.Security.Cryptography.X509Certificates;');
+      lines.push('public static class ObservaOneCertPin { static string fp; static string host;');
+      lines.push('  static bool Check(object s, X509Certificate c, X509Chain ch, SslPolicyErrors e) { var r = s as HttpWebRequest; if (r == null || !string.Equals(r.RequestUri.Host, host, StringComparison.OrdinalIgnoreCase)) return e == SslPolicyErrors.None; if (c == null) return false; using (var h = SHA256.Create()) return BitConverter.ToString(h.ComputeHash(c.GetRawCertData())).Replace("-", "").ToLower() == fp; }');
+      lines.push('  public static void Enable(string f, string hst) { fp = f; host = hst; ServicePointManager.ServerCertificateValidationCallback = Check; } }');
+      lines.push('"@');
+      lines.push(`[ObservaOneCertPin]::Enable('${c.sha256}', '${new URL(S).hostname}')`);
     }
     lines.push(`& ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing ${S}/agent/install.ps1).Content)) ${args.join(' ')}`);
-    return { where: 'Paste into Windows PowerShell opened with "Run as administrator":', text: lines.join('\n') };
+    return lines.join('\n');
   }
   const cluster = w.cluster || '<CLUSTER-NAME>';
   const lines = ['kubectl create namespace observaone'];
@@ -240,109 +351,127 @@ function commandFor(p: Platform, info: InstallInfo, w: { token: string; env: str
   }
   lines.push(`kubectl -n observaone create secret generic observaone-agent \\\n  --from-literal=server=${S} \\\n  --from-literal=token=${t} \\\n  --from-literal=cluster=${shq(cluster)}${w.env ? ` \\\n  --from-literal=env=${shq(w.env)}` : ''}${caArgs}`);
   lines.push(`${curlGet} ${S}/agent/kubernetes.yaml | kubectl apply -f -`);
-  return { where: 'Run where kubectl points at the cluster (cluster-admin). OpenShift: use oc, and see the note below.', text: lines.join('\n') };
+  return lines.join('\n');
 }
 
-const NOTES: Record<Platform, string[]> = {
-  linux: ['Installs node_exporter (127.0.0.1:9101) and the agent as systemd services under /opt/observaone-agent, running as the user observaone-agent.',
-    'Uses no inbound ports. Only outbound HTTPS to this server.',
-    'Apps on the server can send OpenTelemetry traces to 127.0.0.1:4317 (gRPC) or :4318 (HTTP).',
-    'Already scraping this server from Prometheus (targets file)? Remove it there to avoid counting it twice.'],
-  windows: ['Installs windows_exporter (127.0.0.1:9182, no firewall opening) and the ObservaOne Agent Windows service. An existing windows_exporter is reused.',
-    'Uses no inbound ports. Only outbound HTTPS to this server.',
-    'Apps can send OpenTelemetry traces to 127.0.0.1:4317 (gRPC) or :4318 (HTTP).',
-    'Already scraping this server from Prometheus (targets file)? Remove it there to avoid counting it twice.'],
-  docker: ['Runs 3 containers (agent, node-exporter, cAdvisor) with Docker Compose in /opt/observaone-agent.',
-    'Same machine as ObservaOne (lab, Docker Desktop, WSL)? Skip this command: put the token in .env as AGENT_TOKEN and run  docker compose --profile agent up -d  in the monitoring-stack folder.',
-    'Container logs are named after the container ID. Set the Docker log option tag to {{.Name}} to use container names instead.',
-    'Images come from Docker Hub and ghcr.io. Without internet, copy them to your own registry first.'],
-  kubernetes: ['Creates the observaone namespace: a DaemonSet (one agent per node), a cluster agent for events, and kube-state-metrics.',
-    'Pods send traces to the node IP: set an env var NODE_IP from status.hostIP and OTEL_EXPORTER_OTLP_ENDPOINT=http://$(NODE_IP):4318.',
-    'OpenShift: also run  oc adm policy add-scc-to-user privileged -z observaone-agent -n observaone',
-    'Images come from Docker Hub, quay.io and registry.k8s.io. Without internet, mirror them and edit the image names.'],
-};
-
-function InstallWizard({ platform: p, info, canManage }: { platform: Platform; info: InstallInfo; canManage: boolean }) {
+interface Wiz { distro: string; env: string; role: string; labels: string; logs: string; cluster: string; token: string; securityLog: boolean }
+function InstallWizard({ p, info, latest, goTokens }: { p: Platform; info: InstallInfo; latest: string; goTokens: () => void }) {
   const { open } = useDialogs();
-  const [w, setW] = useState({ token: '', env: '', role: '', logs: '', cluster: '', securityLog: false });
-  useEffect(() => { setW((x) => ({ ...x, logs: '', role: '' })); }, [p]);
-  const set = (k: keyof typeof w) => (e: React.ChangeEvent<HTMLInputElement>) => setW({ ...w, [k]: k === 'securityLog' ? e.target.checked : e.target.value });
-  const cmd = commandFor(p, info, w);
+  const [w, setW] = useState<Wiz>({ distro: 'debian', env: '', role: '', labels: '', logs: '', cluster: '', token: '', securityLog: false });
+  const set = (k: keyof Wiz) => (e: React.ChangeEvent<HTMLInputElement>) => setW({ ...w, [k]: k === 'securityLog' ? e.target.checked : e.target.value });
+  const S = info.server;
   const c = info.cert || { available: false };
+  const pin = c.available && c.selfSigned;
+  const cmd = commandFor(p, info, w);
+  const hostPort = S.replace(/^https?:\/\//, '');
+  const tokenInCommand = p === 'docker' || p === 'kubernetes';
+  const req: Record<Platform, string[]> = {
+    linux: ['systemd; amd64 or arm64; about 15 MB of disk', 'root (sudo) to install; the agent itself runs as the unprivileged user observaone-agent',
+      `outbound HTTPS (443) from the server to ${hostPort}; no inbound port is opened`, 'curl and sha256sum (preinstalled on most distributions)'],
+    windows: ['Windows Server 2016 or newer, PowerShell 5.1+', 'an Administrator PowerShell', `outbound HTTPS (443) to ${hostPort}`],
+    docker: ['Docker Engine with the compose plugin', 'root (sudo)', `outbound HTTPS (443) to ${hostPort}`, 'images from Docker Hub and ghcr.io (or your mirror)'],
+    kubernetes: ['kubectl with cluster-admin', `outbound HTTPS (443) from the nodes to ${hostPort}`, 'images from Docker Hub, quay.io and registry.k8s.io (or your mirror)'],
+  };
+  const where: Record<Platform, string> = {
+    linux: 'Run on the server (the first line downloads the installer, the second runs it and asks for the token):',
+    windows: 'Paste into Windows PowerShell opened with "Run as administrator" (it asks for the token at the end):',
+    docker: 'Run on the Docker host as root (or with sudo):', kubernetes: 'Run where kubectl points at the cluster:',
+  };
+  const after: Record<Platform, React.ReactNode[]> = {
+    linux: [<>Check it: <code>sudo observaone-agent status</code></>, <>Logs: <code>journalctl -u observaone-agent -f</code></>,
+      <>Settings: <code>/etc/observaone-agent/agent.conf</code> and <code>conf.d/*.conf</code>, then <code>sudo systemctl reload observaone-agent</code></>,
+      'Upgrade: run the same two lines again (identity and your settings are kept; a failed upgrade rolls back).', <>Remove: <code>sudo bash observaone-install.sh --uninstall</code></>],
+    windows: ['Remove: run the same command with -Uninstall.'],
+    docker: ['Runs the agent, node-exporter and cAdvisor containers in /opt/observaone-agent.', 'Remove: run the same command with --uninstall.'],
+    kubernetes: ['Creates a DaemonSet (one agent per node), a cluster agent and kube-state-metrics in the observaone namespace.', 'OpenShift: also run  oc adm policy add-scc-to-user privileged -z observaone-agent -n observaone', 'Remove: kubectl delete -f kubernetes.yaml'],
+  };
   return (
     <div className="agent-wizard">
-      <div className="grid cols-2">
-        <section className="panel">
-          <div className="panel-head"><h3><span className="step-n">1</span>Agent token</h3></div>
-          <p className="muted" style={{ marginTop: 0 }}>One token can be used on many servers. Revoke it to cut them all off at once.</p>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <input className="input mono" placeholder="oat_..." aria-label="Agent token" value={w.token} onChange={(e) => setW({ ...w, token: e.target.value.trim() })} style={{ flex: 1 }} />
-            {canManage && <button className="btn" style={{ whiteSpace: 'nowrap' }} onClick={() => open((close) => <NewTokenDialog onClose={close} onUse={(tok) => setW((x) => ({ ...x, token: tok }))} />)}><Plus size={14} />New token</button>}
-          </div>
-          <div style={{ marginTop: 12 }}>
-            {!c.available ? <div className="dim">Agents trust the server certificate through the normal system certificate store.</div>
-              : c.selfSigned ? <InfoBox tone="ok"><ShieldCheck size={14} style={{ verticalAlign: -2 }} /> Your server uses a self-signed certificate. The command pins its fingerprint, so agents only ever talk to this server: <code>{c.sha256?.slice(0, 16)}…</code></InfoBox>
-                : <div className="dim">Certificate issued by {c.issuer}. Agents trust it through the system certificate store (install your company CA on the servers if needed).</div>}
-          </div>
-        </section>
-        <section className="panel">
-          <div className="panel-head"><h3><span className="step-n">2</span>Options</h3></div>
-          <Field label="Environment (optional)"><input className="input" placeholder="prod, uat, dev" value={w.env} onChange={set('env')} /></Field>
-          {p !== 'kubernetes' ? (
-            <>
-              <Field label="Extra log files (optional)" hint={p === 'windows' ? 'Application and System event logs are always sent.' : 'System logs (syslog/messages/auth or the journal) are always sent.'}>
-                <input className="input" placeholder={p === 'windows' ? 'C:\\inetpub\\logs\\LogFiles\\*\\*.log' : '/var/log/nginx/*.log, /opt/app/logs/*.log'} value={w.logs} onChange={set('logs')} />
-              </Field>
-              <Field label="Role (optional)"><input className="input" placeholder={p === 'windows' ? 'sql, iis, app' : 'web, database, app'} value={w.role} onChange={set('role')} /></Field>
-            </>
-          ) : (
-            <Field label="Cluster name" hint="Shown on the Agents page and added to every metric as cluster=..."><input className="input" placeholder="prod-cluster" value={w.cluster} onChange={set('cluster')} /></Field>
-          )}
-          {p === 'windows' && <label className="check-row"><input type="checkbox" checked={w.securityLog} onChange={set('securityLog')} /><span>Also send the Security event log (sign-ins, account changes - large)</span></label>}
-        </section>
-      </div>
+      {!/^https:\/\//.test(S) && <StateBanner>This page was opened at {S}. Agents need the HTTPS address of this server as they reach it (never localhost): set PUBLIC_URL=https://your-server in .env, or open ObservaOne through its https:// address.</StateBanner>}
       <section className="panel">
-        <div className="panel-head"><h3><span className="step-n">3</span>Run this command</h3><button className="btn btn-sm right" onClick={() => copyText(cmd.text, 'Command copied')}><Copy size={13} />Copy</button></div>
-        <div className="muted" style={{ marginBottom: 8 }}>{cmd.where}</div>
-        <pre className="code cmd">{cmd.text}</pre>
-        {!w.token && <div className="c-orange" style={{ marginTop: 8, fontSize: 12.5 }}>Add a token in step 1 - the command still shows &lt;TOKEN&gt;.</div>}
-        <ul className="agent-notes">{NOTES[p].map((n) => <li key={n}>{n}</li>)}</ul>
-        <div className="dim" style={{ fontSize: 12, marginTop: 6 }}>
-          Bundles OpenTelemetry Collector {info.versions.otelcol}, node_exporter {info.versions.nodeExporter}, windows_exporter {info.versions.windowsExporter}, cAdvisor {info.versions.cadvisor}, kube-state-metrics {info.versions.kubeStateMetrics}. Every download is checked against a fixed SHA-256.
-          {' '}Remove: run the same install command with <code>{p === 'windows' ? '-Uninstall' : p === 'kubernetes' ? 'kubectl delete -f kubernetes.yaml' : '--uninstall'}</code>.
+        <div className="panel-head"><h3>1. Requirements</h3></div>
+        <ul className="agent-notes" style={{ marginTop: 0 }}>{req[p].map((r) => <li key={r}>{r}</li>)}</ul>
+        {p === 'linux' && (
+          <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', marginBottom: 10 }}>
+            <span className="muted">Distribution</span>
+            <Select className="select" label="Linux distribution" style={{ width: 300 }} value={w.distro} onChange={(v) => setW({ ...w, distro: v })} options={Object.entries(DISTROS).map(([k, [l]]) => [k, l] as [string, string])} />
+            <span className="dim">curl missing?</span><code>{DISTROS[w.distro][1]}</code>
+          </div>
+        )}
+        {!c.available ? <div className="dim">Agents trust the server certificate through the normal system certificate store.</div>
+          : pin ? <InfoBox tone="ok"><ShieldCheck size={14} style={{ verticalAlign: -2 }} /> Self-signed server certificate: the commands pin its fingerprint, so agents only ever talk to this server: <code>{c.sha256?.slice(0, 16)}…</code></InfoBox>
+            : <div className="dim">Certificate issued by {c.issuer}. Agents verify it through their system certificate store.</div>}
+      </section>
+      <section className="panel">
+        <div className="panel-head"><h3>2. Enrollment token</h3></div>
+        <p className="muted" style={{ marginTop: 0 }}>
+          {p === 'linux' ? <>The installer asks for the token and hides what you type, so it never ends up in shell history or the process list. Each server swaps it for its own credential; revoking the token later only stops new enrollments. For automation use <code>--token-file FILE</code>.</>
+            : p === 'windows' ? 'The installer asks for the token and hides what you type, so it stays out of PowerShell history. The previous-generation Windows agent keeps it on the server and sends it with every upload: revoking the token stops every agent that uses it.'
+              : 'The previous-generation agent keeps the token on the server and sends it with every upload. Revoking the token stops every agent that uses it.'}
+        </p>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          {tokenInCommand && <input className="input mono" placeholder="oat_..." aria-label="Agent token" value={w.token} onChange={(e) => setW({ ...w, token: e.target.value.trim() })} style={{ flex: 1, minWidth: 220 }} />}
+          <button className="btn" style={{ whiteSpace: 'nowrap' }} onClick={() => open((close) => <NewTokenDialog platform={p} onClose={close} onCreated={(tok) => { if (tokenInCommand) setW((x) => ({ ...x, token: tok })); }} />)}><Plus size={14} />Create a token</button>
+          <button className="btn btn-ghost" onClick={goTokens}><KeyRound size={14} />Manage tokens</button>
         </div>
-        <div className="info-box" style={{ marginTop: 12, marginBottom: 0 }}><span>After it runs, the server appears in the list below within about a minute (this page refreshes by itself).</span></div>
+      </section>
+      <section className="panel">
+        <div className="panel-head"><h3>3. Options</h3></div>
+        <div className="grid cols-2">
+          <Field label="Environment (optional)"><input className="input" placeholder="prod, uat, dev" value={w.env} onChange={set('env')} /></Field>
+          {p !== 'kubernetes' && <Field label="Role (optional)"><input className="input" placeholder={p === 'windows' ? 'sql, iis, app' : 'web, database, app'} value={w.role} onChange={set('role')} /></Field>}
+          {p === 'linux' && <Field label="Labels (optional)" hint="key=value, comma separated; lower-case keys. Up to 10."><input className="input" placeholder="team=payments, tier=1" value={w.labels} onChange={set('labels')} /></Field>}
+          {p === 'kubernetes' && <Field label="Cluster name" hint="Added to every metric as cluster=..."><input className="input" placeholder="prod-cluster" value={w.cluster} onChange={set('cluster')} /></Field>}
+          {(p === 'windows' || p === 'docker') && <Field label="Extra log files (optional)"><input className="input" placeholder={p === 'windows' ? 'C:\\inetpub\\logs\\LogFiles\\*\\*.log' : '/var/log/nginx/*.log'} value={w.logs} onChange={set('logs')} /></Field>}
+        </div>
+        {p === 'windows' && <label className="check-row"><input type="checkbox" checked={w.securityLog} onChange={set('securityLog')} /><span>Also send the Security event log (large)</span></label>}
+      </section>
+      <section className="panel">
+        <div className="panel-head"><h3>4. Run</h3><button className="btn btn-sm right" onClick={() => copyText(cmd, 'Command copied')}><Copy size={13} />Copy</button></div>
+        <div className="muted" style={{ marginBottom: 8 }}>{where[p]}</div>
+        <pre className="code cmd" tabIndex={0} aria-label="Install command">{cmd}</pre>
+        {tokenInCommand && !w.token && <div className="c-orange" style={{ marginTop: 8, fontSize: 12.5 }}>Create a token in step 2: the command still shows &lt;TOKEN&gt;.</div>}
+        <ul className="agent-notes">{after[p].map((n, i) => <li key={i}>{n}</li>)}</ul>
+        <div className="dim" style={{ fontSize: 12 }}>
+          {p === 'linux' ? `ObservaOne Go agent ${latest}, about 7 MB, checksum-verified on download. The host appears under Agents and Infrastructure within a minute.`
+            : `Previous-generation agent: OpenTelemetry Collector ${info.versions.otelcol || ''}. Every download is checked against a fixed SHA-256.`}
+        </div>
       </section>
     </div>
   );
 }
 
-function NewTokenDialog({ onClose, onUse }: { onClose: () => void; onUse?: (t: string) => void }) {
+// ------------------------------------------------------------ tokens
+function NewTokenDialog({ onClose, onCreated, platform }: { onClose: () => void; onCreated?: (t: string) => void; platform?: Platform }) {
   const qc = useQueryClient();
   const [name, setName] = useState('');
-  const [days, setDays] = useState(0);
+  const [days, setDays] = useState(7);
+  const [uses, setUses] = useState(platform === 'linux' ? 1 : 0);
   const [token, setToken] = useState<string | null>(null);
   if (token) {
     return (
-      <Modal title="Copy the token now" onClose={onClose} actions={[onUse ? { label: 'Use in the install command', primary: true, onClick: () => { onUse(token); } } : { label: 'Done', primary: true }]}>
-        <p style={{ marginTop: 0 }}>This is the only time the token is shown. It goes into the install command; the agent stores it on the server.</p>
-        <pre className="code" style={{ wordBreak: 'break-all' }}>{token}</pre>
+      <Modal title="Copy the token now" onClose={onClose} actions={[{ label: 'Done', primary: true, onClick: () => { onCreated?.(token); } }]}>
+        <p style={{ marginTop: 0 }}>This is the only time the token is shown. ObservaOne keeps only a fingerprint of it.</p>
+        <pre className="code" style={{ wordBreak: 'break-all', whiteSpace: 'pre-wrap' }}>{token}</pre>
         <button className="btn" onClick={() => copyText(token)}><Copy size={13} />Copy</button>
       </Modal>
     );
   }
   return (
-    <Modal title="New agent token" onClose={onClose} actions={[
+    <Modal title="New enrollment token" onClose={onClose} actions={[
       { label: 'Cancel' },
       { label: 'Create', primary: true, onClick: async () => {
-        const r = await api<{ token: string }>('/agent-tokens', { method: 'POST', body: { name, expiresDays: days } });
+        const r = await api<{ token: string }>('/agent-tokens', { method: 'POST', body: { name, expiresDays: days, maxUses: uses || null } });
         setToken(r.token);
         qc.invalidateQueries({ queryKey: ['agent-tokens'] });
         return false; // keep the dialog open to show the token
       } },
     ]}>
-      <Field label="Name" hint="Where will you use it? Shown on the Agents page next to each agent."><input className="input" maxLength={60} placeholder="e.g. Production Linux servers" value={name} onChange={(e) => setName(e.target.value)} /></Field>
-      <Field label="Expires" hint="Agents using an expired token stop sending. Existing installs keep the token they have."><Select options={[[0, 'Never'], [30, '30 days'], [90, '90 days'], [365, '1 year']]} value={days} onChange={setDays} /></Field>
+      <Field label="Name" hint="Where will you use it? Shown next to each agent that enrolled with it."><input className="input" maxLength={60} placeholder={platform ? `e.g. ${PLATFORMS[platform].label} servers, prod` : 'e.g. Production Linux servers'} value={name} onChange={(e) => setName(e.target.value)} /></Field>
+      <div className="grid cols-2">
+        <Field label="Valid for" hint="After this, new enrollments are refused. Enrolled agents keep working."><Select options={[[1, '1 day'], [7, '7 days'], [30, '30 days'], [90, '90 days'], [0, 'Never']]} value={days} onChange={setDays} /></Field>
+        <Field label="Can enroll" hint="Limits how many servers can enroll with it."><Select options={[[1, 'Once (one server)'], [10, '10 servers'], [100, '100 servers'], [0, 'Unlimited']]} value={uses} onChange={setUses} /></Field>
+      </div>
     </Modal>
   );
 }
@@ -350,34 +479,61 @@ function NewTokenDialog({ onClose, onUse }: { onClose: () => void; onUse?: (t: s
 function Tokens() {
   const { open, confirm } = useDialogs();
   const qc = useQueryClient();
-  const q = useQuery({ queryKey: ['agent-tokens'], queryFn: () => api<{ tokens: Token[] }>('/agent-tokens') });
+  const [showOld, setShowOld] = useState(false);
+  const q = useQuery({ queryKey: ['agent-tokens'], queryFn: () => api<{ tokens: Token[]; purgeMinutes: number }>('/agent-tokens') });
+  const refresh = () => { qc.invalidateQueries({ queryKey: ['agent-tokens'] }); qc.invalidateQueries({ queryKey: ['agents'] }); };
+  const dead = (t: Token) => t.revoked || t.expired; // can never be used again
+  const all = q.data?.tokens || [];
+  const old = all.filter(dead);
+  const tokens = showOld ? all : all.filter((t) => !dead(t));
+  const purge = q.data?.purgeMinutes || 0;
+  const remove = async (list: Token[]) => {
+    const one = list.length === 1;
+    if (!(await confirm(one ? `Delete "${list[0].name}"?` : `Delete ${list.length} revoked or expired tokens?`, 'They are removed from this list for good. Agents keep running, and the audit log keeps the record.', 'Delete'))) return;
+    let failed = 0;
+    for (const t of list) { try { await api(`/agent-tokens/${t.id}/permanently`, { method: 'DELETE' }); } catch { failed++; } }
+    toast(failed ? `${list.length - failed} deleted, ${failed} failed` : one ? 'Token deleted' : `${list.length} tokens deleted`, failed ? 'err' : undefined);
+    refresh();
+  };
   return (
     <>
-      <div className="toolbar" style={{ marginBottom: 12 }}>
-        <p className="muted" style={{ margin: 0 }}>Tokens let agents send data. Use one per group of servers (e.g. per environment) so you can revoke a group at once.</p>
-        <div className="grow" />
+      <div className="section-head">
+        <div>
+          <h2>Enrollment tokens</h2>
+          <p className="muted">A token lets servers enroll. Use one per group (environment, team) and limit how many servers and how long. Linux agents swap the token for their own credential, so revoking a token only stops new enrollments.</p>
+        </div>
         <button className="btn btn-primary" onClick={() => open((close) => <NewTokenDialog onClose={close} />)}><Plus size={15} />New token</button>
       </div>
+      {old.length > 0 && (
+        <div className="toolbar">
+          <label className="dim" style={{ display: 'inline-flex', gap: 6, alignItems: 'center', cursor: 'pointer' }}><input type="checkbox" checked={showOld} onChange={(e) => setShowOld(e.target.checked)} />Show revoked and expired ({old.length})</label>
+          {purge > 0 && <span className="dim" style={{ fontSize: 12 }}>Revoked and expired tokens are deleted automatically after {purge} min.</span>}
+          <div className="grow" />
+          <button className="btn btn-sm" onClick={() => remove(old)}><Trash2 size={14} />Delete revoked and expired ({old.length})</button>
+        </div>
+      )}
       {q.isPending ? <TableWrap label="Tokens"><StateView kind="loading" skeleton="table" /></TableWrap>
-        : q.isError ? <TableWrap label="Tokens"><ErrorState error={q.error} what="Agent tokens" /></TableWrap>
-          : !q.data.tokens.length ? <TableWrap label="Tokens"><StateView kind="empty" title="No tokens yet" text="Create a token, then use it in the install command." /></TableWrap> : (
+        : q.isError ? <TableWrap label="Tokens"><ErrorState error={q.error} what="Tokens" /></TableWrap>
+          : !tokens.length ? <TableWrap label="Tokens"><StateView kind="empty" title={all.length ? 'No active tokens' : 'No tokens yet'} text={all.length ? 'Create a token when you install an agent. Revoked and expired tokens are hidden.' : 'Create a token, then use it when you install an agent.'} /></TableWrap> : (
             <TableWrap label="Tokens">
               <table className="tbl">
-                <thead><tr>{['Name', 'Token', 'Agents', 'Created', 'Last used', 'Expires', 'Status', ''].map((x, i) => <th key={x || i}>{x}</th>)}</tr></thead>
+                <thead><tr>{['Name', 'Token', 'Used', 'Agents', 'Created', 'Last used', 'Expires', 'Status', ''].map((x, i) => <th key={x || i}>{x}</th>)}</tr></thead>
                 <tbody>
-                  {q.data.tokens.map((t) => (
-                    <tr key={t.id} style={{ opacity: t.revoked ? 0.55 : 1 }}>
+                  {tokens.map((t) => (
+                    <tr key={t.id}>
                       <td><b style={{ fontWeight: 600 }}>{t.name}</b></td>
                       <td className="mono dim">oat_{t.prefix}_…</td>
+                      <td>{t.maxUses ? `${t.uses} of ${t.maxUses}` : `${t.uses} (no limit)`}</td>
                       <td>{t.agents}</td>
                       <td className="dim">{ago(t.createdAt)} by {t.createdBy || '?'}</td>
                       <td className="dim">{t.lastUsed ? ago(t.lastUsed) : 'never'}</td>
-                      <td className="dim">{t.expiresAt ? new Date(t.expiresAt).toLocaleDateString() : 'never'}</td>
-                      <td>{t.revoked ? <Pill>Revoked</Pill> : t.expired ? <Pill tone="orange">Expired</Pill> : <Pill tone="green">Active</Pill>}</td>
-                      <td className="num">{!t.revoked && <button className="btn btn-sm btn-danger" onClick={async () => {
-                        if (!(await confirm(`Revoke "${t.name}"?`, `${t.agents} agent(s) use this token. They stop sending data within a minute. This cannot be undone - you would install them again with a new token.`, 'Revoke'))) return;
-                        try { await api(`/agent-tokens/${t.id}`, { method: 'DELETE' }); toast('Token revoked'); qc.invalidateQueries({ queryKey: ['agent-tokens'] }); qc.invalidateQueries({ queryKey: ['agents'] }); } catch (e) { toast((e as Error).message, 'err'); }
-                      }}>Revoke</button>}</td>
+                      <td className="dim">{t.expiresAt ? dateTime(Date.parse(t.expiresAt)).slice(0, 16) : 'never'}</td>
+                      <td>{t.revoked ? <Pill>Revoked</Pill> : t.expired ? <Pill tone="orange">Expired</Pill> : t.usedUp ? <Pill>Used up</Pill> : <Pill tone="green">Active</Pill>}</td>
+                      <td className="num">{dead(t) ? <button className="btn btn-sm" onClick={() => remove([t])}>Delete</button>
+                        : <button className="btn btn-sm btn-danger" onClick={async () => {
+                          if (!(await confirm(`Revoke "${t.name}"?`, `New enrollments with this token are refused at once. Enrolled Linux agents keep their own credentials; previous-generation agents using this token stop sending within a minute.${purge > 0 ? ` A revoked token is hidden and deleted after ${purge} min.` : ''}`, 'Revoke'))) return;
+                          try { await api(`/agent-tokens/${t.id}`, { method: 'DELETE' }); toast('Token revoked'); refresh(); } catch (e) { toast((e as Error).message, 'err'); }
+                        }}>Revoke</button>}</td>
                     </tr>
                   ))}
                 </tbody>

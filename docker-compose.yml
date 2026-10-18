@@ -54,6 +54,21 @@ services:
         condition: service_healthy
     restart: "no"
 
+  # Builds the ObservaOne Go agent (Linux amd64 + arm64) into ./agent/files/ with SHA256SUMS.
+  # Nginx serves them at https://SERVER/agent/files/ for agent/install.sh. Runs once per "up"; takes ~1 min the first time.
+  agent-build:
+    image: golang:1.24-alpine
+    working_dir: /src
+    entrypoint: ["/bin/sh", "/src/scripts/build-agent.sh"]
+    environment:
+      GOTOOLCHAIN: local
+      GOCACHE: /tmp/gocache
+      GOFLAGS: -mod=mod
+    volumes:
+      - ./agent:/src/agent
+      - ./scripts:/src/scripts:ro
+    restart: "no"
+
   # ---- Long-running services ---------------------------------------------
   nginx:
     image: nginx:1.30-alpine
@@ -69,6 +84,8 @@ services:
       certs-init:
         condition: service_completed_successfully
       auth-init:
+        condition: service_completed_successfully
+      agent-build:
         condition: service_completed_successfully
       observa:
         condition: service_healthy
@@ -99,6 +116,14 @@ services:
       GRAFANA_PUBLIC_URL: /grafana/
       UI_RULES_FILE: /etc/prometheus-ui/ui-rules.yml
       AUDIT_RETENTION_DAYS: ${AUDIT_RETENTION_DAYS:-365}
+      # ObservaOne Agent: status thresholds and enrollment limits (docs/agent/LINUX-AGENT.md)
+      AGENT_ONLINE_SECONDS: ${AGENT_ONLINE_SECONDS:-150}
+      AGENT_OFFLINE_SECONDS: ${AGENT_OFFLINE_SECONDS:-900}
+      AGENT_HEARTBEAT_SECONDS: ${AGENT_HEARTBEAT_SECONDS:-30}
+      AGENT_MIN_VERSION: ${AGENT_MIN_VERSION:-1.0.0}
+      AGENT_ENROLL_FAILURES: ${AGENT_ENROLL_FAILURES:-10}
+      AGENT_ENROLL_RATE: ${AGENT_ENROLL_RATE:-300}
+      AGENT_TOKEN_PURGE_MINUTES: ${AGENT_TOKEN_PURGE_MINUTES:-5}   # revoked/expired tokens deleted after this; 0 = keep
       DB_HOST: observa-db
       DB_NAME: observa
       DB_USER: observa
@@ -284,8 +309,11 @@ services:
     logging: *logging
 
   # Monitors the machine that runs this stack (Linux host, or the Docker Desktop VM on Windows)
+  # Optional: watch the ObservaOne server itself (off by default, so only what you install shows up).
+  #   docker compose --profile self-monitoring up -d   and add "node-exporter:9100" to prometheus/targets/linux.yml
   node-exporter:
     image: prom/node-exporter:v1.12.1
+    profiles: [self-monitoring]
     command:
       - --path.rootfs=/host
     pid: host

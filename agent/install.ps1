@@ -74,7 +74,12 @@ $Server = $Server.TrimEnd('/')
 if ($Server -notmatch '^https://') { Fail '-Server must start with https://' }
 $tokenFile = Join-Path $DataDir 'token'
 if (-not $Token -and (Test-Path $tokenFile)) { $Token = (Get-Content $tokenFile -Raw).Trim(); Say 'Re-using the token already on this server' }
-if ($Token -notmatch '^oat_[0-9a-f]{8}_[A-Za-z0-9_-]{20,64}$') { Fail '-Token is required and must look like oat_... (create one on the Agents page)' }
+if (-not $Token) {
+  # asked here, hidden, so the token is not in the command, PowerShell history or the process list
+  $sec = Read-Host -AsSecureString 'Paste the enrollment token from the Agents page (input hidden)'
+  $Token = [Runtime.InteropServices.Marshal]::PtrToStringBSTR([Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec)).Trim()
+}
+if ($Token -notmatch '^oat_[0-9a-f]{8}_[A-Za-z0-9_-]{20,64}$') { Fail 'The token must look like oat_... (create one on Agents > Windows > Install)' }
 if (-not $HostName) { $HostName = $env:COMPUTERNAME.ToLower() }
 $HostName = $HostName -replace '[^A-Za-z0-9._-]', ''
 if (($Environment + $Role) -notmatch '^[A-Za-z0-9._-]*$') { Fail '-Env and -Role may only use letters, digits, . _ -' }
@@ -82,6 +87,41 @@ if ($env:PROCESSOR_ARCHITECTURE -ne 'AMD64') { Fail "Only 64-bit x86 Windows is 
 $os = (Get-CimInstance Win32_OperatingSystem).Caption -replace '^Microsoft ', ''
 
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+function Enable-CertPin([string]$fp, [string]$pinHost) {
+  # Pinned fingerprint for the ObservaOne server ONLY; every other site (GitHub downloads) keeps the normal
+  # Windows certificate check. Compiled: a script-block callback fails in Windows PowerShell 5.1.
+  if (-not ('ObservaOneCertPin' -as [type])) {
+    Add-Type @"
+using System; using System.Net; using System.Net.Security;
+using System.Security.Cryptography; using System.Security.Cryptography.X509Certificates;
+public static class ObservaOneCertPin {
+  static string fp; static string host;
+  static bool Check(object s, X509Certificate c, X509Chain ch, SslPolicyErrors e) {
+    var req = s as HttpWebRequest;
+    bool ours = req != null && string.Equals(req.RequestUri.Host, host, StringComparison.OrdinalIgnoreCase);
+    if (!ours) return e == SslPolicyErrors.None;
+    if (c == null || fp == null) return false;
+    using (var h = SHA256.Create()) return BitConverter.ToString(h.ComputeHash(c.GetRawCertData())).Replace("-", "").ToLower() == fp;
+  }
+  public static void Enable(string f, string hst) { fp = f; host = hst; ServicePointManager.ServerCertificateValidationCallback = Check; }
+}
+"@
+  }
+  [ObservaOneCertPin]::Enable($fp, $pinHost)
+}
+
+# Saved as soon as the server accepts it (only SYSTEM and Administrators can read it), so a re-run after a
+# failed download does not ask for the token again.
+function Save-Token {
+  [IO.File]::WriteAllText($tokenFile, $Token)
+  $acl = New-Object Security.AccessControl.FileSecurity
+  $acl.SetAccessRuleProtection($true, $false)
+  foreach ($who in 'NT AUTHORITY\SYSTEM', 'BUILTIN\Administrators') {
+    $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($who, 'FullControl', 'Allow')))
+  }
+  Set-Acl -Path $tokenFile -AclObject $acl
+}
 
 function Get-DerSha256([byte[]]$der) {
   $sha = [Security.Cryptography.SHA256]::Create()
@@ -100,10 +140,9 @@ try {
     $want = ($CaSha256 -replace ':', '').ToLower()
     # accept exactly this certificate for the rest of this PowerShell session
     $script:PinnedFingerprint = $want
-    [Net.ServicePointManager]::ServerCertificateValidationCallback = {
-      param($s, $cert, $chain, $errors)
-      return ((Get-DerSha256 $cert.GetRawCertData()) -eq $script:PinnedFingerprint)
-    }
+    # compiled check: a PowerShell script block as the callback fails in Windows PowerShell 5.1
+    # ("unexpected error occurred on a send") because it can run on a thread without a runspace
+    Enable-CertPin $want ([Uri]$Server).Host
     Say 'Fetching the server certificate'
     $crt = Join-Path $tmp 'server.crt'
     Invoke-WebRequest -UseBasicParsing -Uri "$Server/agent/server.crt" -OutFile $crt
@@ -132,7 +171,7 @@ try {
     if ($_.Exception.Response) { $code = [int]$_.Exception.Response.StatusCode } else { $code = 0 }
   }
   switch ($code) {
-    { $_ -ge 200 -and $_ -lt 300 -or $_ -eq 400 } { Ok 'Token accepted'; break }
+    { $_ -ge 200 -and $_ -lt 300 -or $_ -eq 400 } { Ok 'Token accepted'; Save-Token; break }
     401 { Fail 'The server refused the token (wrong, revoked or expired). Create a new one on the Agents page.' }
     403 { Fail 'This agent is blocked on the Agents page.' }
     0   { Fail "Cannot connect to $Server over HTTPS. Check DNS, firewall (port 443) and the certificate (-CaSha256 / -CaFile)." }
@@ -220,14 +259,7 @@ try {
   Set-Content -Path (Join-Path $ProgramDir 'VERSION') -Value $AgentVersion
   Invoke-WebRequest -UseBasicParsing -Uri "$Server/agent/configs/windows.yaml" -OutFile (Join-Path $DataDir 'config.yaml')
 
-  # settings, token (only SYSTEM and Administrators can read it), agent id
-  [IO.File]::WriteAllText($tokenFile, $Token)
-  $acl = New-Object Security.AccessControl.FileSecurity
-  $acl.SetAccessRuleProtection($true, $false)
-  foreach ($who in 'NT AUTHORITY\SYSTEM', 'BUILTIN\Administrators') {
-    $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($who, 'FullControl', 'Allow')))
-  }
-  Set-Acl -Path $tokenFile -AclObject $acl
+  # settings, agent id (the token was saved right after it was accepted)
   $caDest = ''
   if ($caPath) { $caDest = Join-Path $DataDir 'ca.crt'; Copy-Item -Force $caPath $caDest; $caDest = $caDest -replace '\\', '/' }
 

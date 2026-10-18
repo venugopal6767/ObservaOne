@@ -559,7 +559,7 @@ export function requireUser(req, res, next) {
 
 // ---------- per-user preferences ----------
 const PREF_KEYS = new Set(['timeRange', 'metricsQuery', 'logsQuery', 'tracesQuery', 'homePage', 'dashboardVars', 'navCollapsed', 'theme',
-  'refreshMs', 'sidebarCollapsed', 'metricsHistory', 'filters', 'savedViews', 'askHistory']); // web UI 2.0: refresh, sidebar, recent queries, metric filters, saved views, questions
+  'refreshMs', 'sidebarCollapsed', 'metricsHistory', 'filters', 'savedViews', 'askHistory', 'autoRefresh']); // web UI 2.0: refresh, sidebar, recent queries, metric filters, saved views, questions
 
 export async function getPrefs(userId) {
   if (!userId) return {};

@@ -1,8 +1,8 @@
 import type { ReactNode } from 'react';
 import { Bell } from 'lucide-react';
 
-export function StatCard({ label, value, unit, trend, trendGoodWhen = 'down', extra, tone, bell, onClick, title }: {
-  label: string; value: ReactNode; unit?: string; trend?: number | null; trendGoodWhen?: 'up' | 'down';
+export function StatCard({ label, value, unit, trend, trendUnit = '%', trendTitle = 'Change against one hour earlier', trendGoodWhen = 'down', extra, tone, bell, onClick, title }: {
+  label: string; value: ReactNode; unit?: string; trend?: number | null; trendUnit?: string; trendTitle?: string; trendGoodWhen?: 'up' | 'down';
   extra?: ReactNode; tone?: 'red' | 'green' | 'orange' | ''; bell?: boolean; onClick?: () => void; title?: string;
 }) {
   let trendEl = null;
@@ -10,7 +10,7 @@ export function StatCard({ label, value, unit, trend, trendGoodWhen = 'down', ex
     const up = trend >= 0;
     const good = trendGoodWhen === 'up' ? up : !up;
     const cls = Math.abs(trend) < 0.5 ? 'flat' : good ? 'up' : 'bad';
-    trendEl = <span className={`trend ${cls}`} title="Change against one hour earlier">{up ? '↑' : '↓'} {Math.abs(trend).toFixed(1)}%</span>;
+    trendEl = <span className={`trend ${cls}`} title={trendTitle}>{up ? '↑' : '↓'} {Math.abs(trend).toFixed(1)}{trendUnit === '%' ? '%' : ` ${trendUnit}`}</span>;
   }
   const body = (
     <>

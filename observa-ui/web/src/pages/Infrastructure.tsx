@@ -7,13 +7,17 @@ import { api, type PromVector } from '@/lib/api';
 import { fmt, ago } from '@/lib/format';
 import { thresholdColor, readableOn, toneClass } from '@/lib/theme';
 import { useApp, usePlainQuery } from '@/app/AppContext';
-import { ErrorState, HealthPill, PageHead, Pill, Select, StateBanner, StateView, TableFoot, TableWrap, Tabs, Time, usePager } from '@/components/ui';
+import { ErrorState, HealthPill, PageHead, Select, StateBanner, StateView, TableFoot, TableWrap, Tabs, Time, usePager } from '@/components/ui';
 
-const CPU = 'clamp(max by (host) (100 - avg by (instance, host) (rate(windows_cpu_time_total{mode="idle"}[5m])) * 100), 0, 100) or clamp(max by (host) (100 - avg by (instance, host) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100), 0, 100)';
-const MEM = 'max by (host) (100 * (1 - windows_memory_available_bytes / windows_memory_physical_total_bytes)) or max by (host) (100 * (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes))';
-const DISK = 'min by (host) (100 * windows_logical_disk_free_bytes{volume!~"HarddiskVolume.*"} / windows_logical_disk_size_bytes{volume!~"HarddiskVolume.*"}) or min by (host) (100 * node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs|nsfs|fuse.*"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs|nsfs|fuse.*"})';
+// same queries as the server (src/queries.js): agent values only when fresh, so a stopped agent shows "-"
+const CPU = "clamp(max by (host) (last_over_time(observaone_cpu_utilization_ratio[120s])) * 100, 0, 100) or (clamp(100 * (1 - sum by (host) (rate(windows_cpu_time_total{mode=\"idle\",core!=\"\"}[5m])) / sum by (host) (rate(windows_cpu_time_total{core!=\"\"}[5m]))), 0, 100) and on (host) (max by (host) (timestamp(windows_cpu_time_total{mode=\"idle\",core!=\"\"})) > time() - 120)) or (clamp(100 * (1 - sum by (host) (rate(node_cpu_seconds_total{mode=\"idle\",agent_id=\"\"}[5m])) / sum by (host) (rate(node_cpu_seconds_total{agent_id=\"\"}[5m]))), 0, 100) and on (host) (max by (host) (timestamp(node_cpu_seconds_total{mode=\"idle\",agent_id=\"\"})) > time() - 120))";
+const MEM = "max by (host) (100 * last_over_time(observaone_memory_utilization_ratio[120s])) or (max by (host) (100 * (1 - windows_memory_available_bytes / windows_memory_physical_total_bytes)) and on (host) (max by (host) (timestamp(windows_memory_available_bytes)) > time() - 120)) or (max by (host) (100 * (1 - node_memory_MemAvailable_bytes{agent_id=\"\"} / node_memory_MemTotal_bytes{agent_id=\"\"})) and on (host) (max by (host) (timestamp(node_memory_MemAvailable_bytes{agent_id=\"\"})) > time() - 120))";
+const DISK = "min by (host) (100 * (1 - last_over_time(observaone_filesystem_utilization_ratio{fstype!~\"tmpfs|overlay|squashfs|ramfs|nsfs|fuse.*\"}[120s]))) or (min by (host) (100 * windows_logical_disk_free_bytes{volume!~\"HarddiskVolume.*\"} / windows_logical_disk_size_bytes{volume!~\"HarddiskVolume.*\"}) and on (host) (max by (host) (timestamp(windows_logical_disk_size_bytes{volume!~\"HarddiskVolume.*\"})) > time() - 120)) or (min by (host) (100 * node_filesystem_avail_bytes{fstype!~\"tmpfs|overlay|squashfs|ramfs|nsfs|fuse.*\",agent_id=\"\"} / node_filesystem_size_bytes{fstype!~\"tmpfs|overlay|squashfs|ramfs|nsfs|fuse.*\",agent_id=\"\"}) and on (host) (max by (host) (timestamp(node_filesystem_size_bytes{fstype!~\"tmpfs|overlay|squashfs|ramfs|nsfs|fuse.*\",agent_id=\"\"})) > time() - 120))";
 
-interface Target { job: string; instance: string; host: string; os: string; env: string; role: string; health: string; lastScrape: string | null; durationMs: number; lastError: string; source: 'scrape' | 'agent'; platform?: string }
+interface Target {
+  job: string; instance: string; host: string; os: string; env: string; role: string; health: string; lastScrape: string | null; durationMs: number; lastError: string;
+  source: 'scrape' | 'agent'; platform?: string; collection?: ('scrape' | 'agent')[]; scrapeHealth?: string; scrapeError?: string; lastHeartbeat?: string | null;
+}
 type Metric = 'cpu' | 'mem' | 'disk';
 
 export default function Infrastructure() {
@@ -42,8 +46,7 @@ export default function Infrastructure() {
   const head = <PageHead title="Infrastructure" sub="Every server: scraped by Prometheus or sending through the ObservaOne Agent" />;
   if (q.isPending) return <>{head}<TableWrap label="Hosts"><StateView kind="loading" skeleton="table" /></TableWrap></>;
   if (q.isError) return <>{head}<TableWrap label="Hosts"><ErrorState error={q.error} what="Infrastructure" /></TableWrap></>;
-  const { C, M, D, failed, targets } = q.data;
-  const rest = targets.filter((t) => t.job !== 'windows' && t.job !== 'linux');
+  const { C, M, D, failed } = q.data;
   const dashFor = (t: Target) => `${t.os === 'windows' ? 'windows' : 'linux'}-servers`;
   const openDash = (t: Target) => { sessionStorage.setItem(`oo.var.${dashFor(t)}.host`, t.host); navigate(`/dashboards/${dashFor(t)}`); };
   const value = (t: Target) => (metric === 'cpu' ? C : metric === 'mem' ? M : D).get(t.host);
@@ -90,23 +93,23 @@ export default function Infrastructure() {
       ) : (
         <TableWrap label="Hosts">
           <table className="tbl">
-            <thead><tr>{['Server', 'Status', 'OS', 'Env', 'Role', 'CPU', 'Memory', 'Lowest disk free', 'Last data', ''].map((x, i) => <th key={x || i} className={i >= 5 && i <= 7 ? 'num' : ''}>{x}</th>)}</tr></thead>
+            <thead><tr>{['Server', 'Status', 'OS', 'Env', 'Role', 'CPU', 'Memory', 'Lowest disk free', 'Last seen', ''].map((x, i) => <th key={x || i} className={i >= 5 && i <= 7 ? 'num' : ''}>{x}</th>)}</tr></thead>
             <tbody>
               {pager.rows.map((t) => (
                 <tr key={`${t.job}-${t.host}-${t.instance}`}>
                   <td>
                     {canOpen('/metrics') ? <Link to={`/metrics/host/${encodeURIComponent(t.host)}`} style={{ fontWeight: 600 }}>{t.host}</Link> : <b style={{ fontWeight: 600 }}>{t.host}</b>}
-                    {t.source === 'agent'
-                      ? <div className="dim" style={{ fontSize: 11 }}>{canOpen('/agents') ? <Link to="/agents">via ObservaOne Agent</Link> : 'via ObservaOne Agent'}</div>
-                      : <div className="dim mono" style={{ fontSize: 11 }}>{t.instance}</div>}
+                    <div className="dim" style={{ fontSize: 11 }}><CollectedBy t={t} /></div>
                   </td>
-                  <td><HealthPill health={t.health} detail={t.lastError || undefined} /></td>
+                  <td><HealthPill health={t.health} detail={t.lastError || undefined} />
+                    {/* both methods: a failing scrape is shown separately from the agent's own state */}
+                    {t.scrapeHealth && t.scrapeHealth !== 'up' && (t.collection || []).length > 1 && <div className="c-orange" style={{ fontSize: 11, marginTop: 3 }} title={t.scrapeError || ''}>Prometheus scrape: {t.scrapeHealth}</div>}</td>
                   <td>{t.os === 'windows' ? 'Windows' : 'Linux'}</td>
                   <td>{t.env || '-'}</td><td>{t.role || '-'}</td>
                   <td className={`num ${toneClass(C.get(t.host))}`}>{fmt(C.get(t.host), 'percent')}</td>
                   <td className={`num ${toneClass(M.get(t.host))}`}>{fmt(M.get(t.host), 'percent')}</td>
                   <td className={`num ${toneClass(D.get(t.host), false)}`}>{fmt(D.get(t.host), 'percent')}</td>
-                  <td className="dim" title={t.source === 'agent' ? 'Last data received from the agent' : 'Last scrape by Prometheus'}>{t.lastScrape ? <Time ms={Date.parse(t.lastScrape)} text={ago(t.lastScrape)} /> : '-'}</td>
+                  <td className="dim" title={t.source === 'agent' ? 'Last heartbeat (or data) from the agent' : 'Last scrape by Prometheus'}>{(t.lastHeartbeat || t.lastScrape) ? <Time ms={Date.parse((t.lastHeartbeat || t.lastScrape)!)} text={ago((t.lastHeartbeat || t.lastScrape)!)} /> : '-'}</td>
                   <td>{canOpen('/dashboards') && <button className="icon-btn" title="Open dashboard" aria-label={`Open dashboard for ${t.host}`} onClick={() => openDash(t)}><LayoutDashboard size={15} /></button>}</td>
                 </tr>
               ))}
@@ -115,21 +118,17 @@ export default function Infrastructure() {
           <TableFoot pager={pager} noun={servers.length === 1 ? 'host' : 'hosts'} />
         </TableWrap>
       )}
-      <h3 className="section-title" style={{ marginTop: 18 }}>Monitoring components</h3>
-      <TableWrap label="Monitoring components">
-        <table className="tbl">
-          <thead><tr><th>Job</th><th>Endpoint</th><th>Status</th><th className="num">Scrape time</th><th>Error</th></tr></thead>
-          <tbody>
-            {rest.map((t) => (
-              <tr key={`${t.job}-${t.instance}`}>
-                <td>{t.job}</td><td className="mono">{t.instance}</td>
-                <td>{t.health === 'up' ? <Pill tone="green">UP</Pill> : t.health === 'down' ? <Pill tone="red">DOWN</Pill> : <Pill>Unknown</Pill>}</td>
-                <td className="num">{t.durationMs} ms</td><td className="dim" style={{ fontSize: 12 }}>{t.lastError || ''}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </TableWrap>
+      {canOpen('/datasources') && <p className="dim" style={{ fontSize: 12, marginTop: 10 }}>Only your servers are listed here. The monitoring stack's own components are on <Link to="/datasources">Data Sources</Link>.</p>}
     </>
   );
+}
+
+// how a server is collected: "ObservaOne Agent", "Prometheus scrape (host:9100)" or both
+function CollectedBy({ t }: { t: Target }) {
+  const { canOpen } = useApp();
+  const c = t.collection || [t.source];
+  const agent = canOpen('/agents') ? <Link to={`/agents?tab=${t.os === 'windows' ? 'windows' : 'linux'}`}>ObservaOne Agent</Link> : <>ObservaOne Agent</>;
+  const scrape = <span className="mono">scrape{t.instance && t.instance !== 'agent' ? ` ${t.instance}` : ''}</span>;
+  if (c.includes('agent') && c.includes('scrape')) return <>{agent} + {scrape}</>;
+  return c.includes('agent') ? agent : scrape;
 }

@@ -23,7 +23,8 @@ interface OverviewData {
   latSeries: { result: PromMatrix } | null; latError: string | null;
 }
 
-const pct = (now: number | null, before: number | null) => (now === null || before === null || !before ? null : ((now - before) / Math.abs(before)) * 100);
+// CPU and memory are already percentages: compare them in percentage points (27% vs 1.6% = +25.4 pts)
+const pts = (now: number | null, before: number | null) => (now === null || before === null || !Number.isFinite(before) ? null : now - before);
 /** a failed part of the overview, as the right state (unavailable vs error) */
 const Failed = ({ msg, what }: { msg: string; what: string }) =>
   <ErrorState error={new ApiError(msg, { status: /Cannot reach|timeout|HTTP 5\d\d/i.test(msg) ? 502 : 400 })} what={what} />;
@@ -63,10 +64,10 @@ export default function Overview() {
         : <div className="muted tile-sub">{d.servers.total} servers monitored{d.servers.down ? <span className="c-red"> · {d.servers.down} down</span> : null}</div>)} />,
   );
   if (M.infrastructure) tiles.push(
-    <StatCard key="cpu" label="CPU Usage" value={d.cpu.now === null ? '-' : d.cpu.now.toFixed(1)} unit={d.cpu.now === null ? '' : '%'} trend={pct(d.cpu.now, d.cpu.before)}
+    <StatCard key="cpu" label="CPU Usage" value={d.cpu.now === null ? '-' : d.cpu.now.toFixed(1)} unit={d.cpu.now === null ? '' : '%'} trend={pts(d.cpu.now, d.cpu.before)} trendUnit="pts" trendTitle="Change in percentage points vs 1 hour ago"
       tone={d.cpu.now !== null && d.cpu.now >= 90 ? 'red' : ''} onClick={canOpen('/infrastructure') ? () => navigate('/infrastructure') : undefined}
       extra={d.cpu.now === null ? <Reason text={d.cpu.error ? `Unavailable: ${d.cpu.error}` : 'No CPU data from any server'} /> : null} />,
-    <StatCard key="mem" label="Memory Usage" value={d.mem.now === null ? '-' : d.mem.now.toFixed(1)} unit={d.mem.now === null ? '' : '%'} trend={pct(d.mem.now, d.mem.before)}
+    <StatCard key="mem" label="Memory Usage" value={d.mem.now === null ? '-' : d.mem.now.toFixed(1)} unit={d.mem.now === null ? '' : '%'} trend={pts(d.mem.now, d.mem.before)} trendUnit="pts" trendTitle="Change in percentage points vs 1 hour ago"
       tone={d.mem.now !== null && d.mem.now >= 90 ? 'red' : ''} onClick={canOpen('/infrastructure') ? () => navigate('/infrastructure') : undefined}
       extra={d.mem.now === null ? <Reason text={d.mem.error ? `Unavailable: ${d.mem.error}` : 'No memory data from any server'} /> : null} />,
   );

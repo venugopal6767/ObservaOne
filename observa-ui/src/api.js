@@ -19,6 +19,7 @@ import { getDatasources, ds, requireConfigured, updateDatasource, testDatasource
 import { cpuByHost, memByHost, diskFreeByHost, SERVERS_UP } from './queries.js';
 import { classifyService, summarizeServices, agentHostHealth } from './health.js';
 import { MODULES, enabledModules, moduleSettings, setEnabledModules, requireModule } from './modules.js';
+import { describeAgent } from './routes/agent-control.js';
 
 export const api = express.Router();
 api.use(express.json({ limit: '200kb' }));
@@ -126,11 +127,46 @@ api.get('/prom/metric-names', wrap(async (req, res) => {
   res.json(metricNamesCache.names);
 }));
 
+// Every metric seen in the last hour, with its type and description when Prometheus knows them
+// (scraped data has them; pushed data often does not: the type is then guessed from the name).
+let metricCatalogCache = { at: 0, list: [] };
+api.get('/prom/metric-catalog', wrap(async (req, res) => {
+  if (Date.now() - metricCatalogCache.at > 60_000) {
+    const end = nowSec();
+    const [names, meta] = await Promise.all([
+      prom('/api/v1/label/__name__/values', { start: end - 3600, end }),
+      prom('/api/v1/metadata').catch(() => ({})),
+    ]);
+    metricCatalogCache = {
+      at: Date.now(),
+      list: names.map((name) => {
+        const m = meta?.[name]?.[0] || {};
+        return { name, type: m.type || (/_total$/.test(name) ? 'counter' : /_bucket$/.test(name) ? 'histogram' : 'gauge'), help: m.help || '' };
+      }),
+    };
+  }
+  res.set('Cache-Control', 'no-store');
+  res.json(metricCatalogCache.list);
+}));
+
 api.get('/prom/label-values', wrap(async (req, res) => {
   const label = String(req.query.label || '');
   if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(label)) throw httpError(400, 'bad label name');
   const match = req.query.match ? [String(req.query.match)] : undefined;
-  res.json(await prom(`/api/v1/label/${label}/values`, { 'match[]': match }));
+  // only values seen recently (Prometheus would otherwise list every value it ever stored)
+  const end = nowSec(), start = end - 3600;
+  let values = await prom(`/api/v1/label/${label}/values`, { 'match[]': match, start, end });
+  if (label === 'host') {
+    // hosts that only exist because of agents removed on the Agents page are not offered any more
+    try {
+      const known = new Set((await q('SELECT id FROM agents')).rows.map((r) => r.id));
+      // a host is offered when a server reported "up" in the last hour (scraped, or an agent that still exists)
+      const series = await prom('/api/v1/series', { 'match[]': ['up{job=~"linux|windows"}'], start, end });
+      const live = new Set(series.filter((s) => !s.agent_id || known.has(s.agent_id)).map((s) => s.host));
+      values = values.filter((h) => live.has(h));
+    } catch { /* keep the unfiltered list */ }
+  }
+  res.json(values);
 }));
 
 api.get('/prom/targets', wrap(async (req, res) => {
@@ -166,11 +202,57 @@ api.get('/prom/targets', wrap(async (req, res) => {
         job: m.job, instance: 'agent', host: m.host || m.instance, os: m.os || '', env: m.env || '', role: m.role || '',
         health: hh.health, lastScrape: last ? new Date(last * 1000).toISOString() : null, durationMs: 0,
         lastError: hh.reason,
-        source: 'agent', platform: m.platform || '',
+        source: 'agent', platform: m.platform || '', agentId: m.agent_id || null,
       });
     }
   } catch { /* Prometheus without agent data */ }
-  res.json([...pulled, ...pushed]);
+
+  // One row per server, whatever collects it (Prometheus scrape, ObservaOne Agent, or both).
+  // Enrolled agents also bring their heartbeat state, so "the agent stopped reporting" is told apart
+  // from "Prometheus cannot scrape the host". Agents enrolled but without data yet are listed too.
+  let enrolled = [], known = null;
+  try {
+    enrolled = (await q("SELECT * FROM agents WHERE platform IN ('linux', 'windows')")).rows;
+    known = new Set((await q('SELECT id FROM agents')).rows.map((r) => r.id));
+  } catch { /* database problem: show what Prometheus knows */ }
+  const now = Date.now();
+  const servers = new Map(); // host (lower case) -> merged row
+  const isServer = (t) => t.job === 'linux' || t.job === 'windows';
+  const merge = (t) => {
+    const k = String(t.host).toLowerCase();
+    const cur = servers.get(k);
+    if (!cur) { servers.set(k, { ...t, collection: [t.source] }); return; }
+    if (!cur.collection.includes(t.source)) cur.collection.push(t.source);
+    if (t.source === 'scrape') { cur.scrapeHealth = t.health; cur.scrapeError = t.lastError; cur.instance = t.instance; }
+    else Object.assign(cur, { ...t, collection: cur.collection, scrapeHealth: cur.scrapeHealth ?? (cur.source === 'scrape' ? cur.health : undefined), scrapeError: cur.scrapeError ?? (cur.source === 'scrape' ? cur.lastError : undefined) });
+  };
+  // data from an agent that was removed on the Agents page stays in Prometheus for a while: do not show it
+  const removed = (t) => t.source === 'agent' && t.agentId && known && !known.has(t.agentId);
+  for (const t of [...pulled.filter(isServer), ...pushed]) if (!removed(t)) merge(t);
+  for (const a of enrolled) {
+    const k = a.host.toLowerCase();
+    const d = describeAgent(a, now);
+    const health = { online: 'up', attention: 'up', not_reporting: 'not_reporting', offline: 'not_reporting', pending: 'unknown', blocked: 'unknown' }[d.status] || 'unknown';
+    const agentInfo = { agentId: a.id, agentStatus: d.status, agentReason: d.reason || d.problems.join(' '), lastHeartbeat: a.last_heartbeat };
+    const cur = servers.get(k);
+    if (cur) {
+      if (!cur.collection.includes('agent')) cur.collection.push('agent');
+      Object.assign(cur, agentInfo);
+      if (a.credential_hash) { // enrolled agent: its heartbeat decides; keep a scrape failure visible separately
+        if (cur.source === 'scrape' && cur.scrapeHealth === undefined) { cur.scrapeHealth = cur.health; cur.scrapeError = cur.lastError; }
+        cur.health = health;
+        cur.lastError = agentInfo.agentReason;
+        cur.source = 'agent';
+      }
+    } else if (a.credential_hash) {
+      servers.set(k, {
+        job: a.platform, instance: 'agent', host: a.host, os: a.platform, env: a.env, role: a.role, platform: a.platform,
+        health, lastScrape: null, durationMs: 0, source: 'agent', collection: ['agent'],
+        lastError: agentInfo.agentReason || 'Enrolled; no metrics received yet.', ...agentInfo,
+      });
+    }
+  }
+  res.json([...servers.values(), ...pulled.filter((t) => !isServer(t))]);
 }));
 
 // ---------------- Overview (one call for the whole page) ----------------
