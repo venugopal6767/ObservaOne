@@ -18,6 +18,7 @@ const PAGES: Record<string, ComponentType> = {
   '/metrics/explore': lazy(() => import('@/pages/metrics/Explorer')),
   '/metrics/host/:host': lazy(() => import('@/pages/metrics/HostView')),
   '/metrics/kubernetes': lazy(() => import('@/pages/metrics/Kubernetes')),
+  '/metrics/investigate': lazy(() => import('@/pages/metrics/Investigate')),
   '/logs': lazy(() => import('@/pages/Logs')),
   '/traces': lazy(() => import('@/pages/Traces')),
   '/services': lazy(() => import('@/pages/Services')),

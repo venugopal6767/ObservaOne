@@ -1,0 +1,36 @@
+# DEMO Prometheus: scrapes only the made-up estate served by the demo generator, plus the real
+# monitoring components. Test data only; see demo/README.md to remove it.
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+
+rule_files:
+  - /etc/prometheus/rules.yml
+  - /etc/prometheus-ui/*.yml      # rules created in the ObservaOne UI (so the alert wizard works in demo mode)
+
+alerting:
+  alertmanagers:
+    - path_prefix: /alertmanager
+      static_configs:
+        - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  - job_name: demo
+    honor_labels: true             # job, host, env, cluster... come from the demo targets
+    http_sd_configs:
+      - url: http://demo:9101/sd
+        refresh_interval: 1m
+
+  - job_name: prometheus
+    metrics_path: /prometheus/metrics
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  - job_name: alertmanager
+    metrics_path: /alertmanager/metrics
+    static_configs:
+      - targets: ["alertmanager:9093"]
+
+  - job_name: observa-stack
+    static_configs:
+      - targets: ["loki:3100", "tempo:3200"]

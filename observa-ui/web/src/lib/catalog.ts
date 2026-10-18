@@ -9,14 +9,18 @@ export type Platform = 'linux' | 'windows' | 'kubernetes';
 export interface Filters { env?: string; platform?: Platform | ''; cluster?: string; namespace?: string; service?: string; host?: string }
 export type Combine = 'avg' | 'max' | 'min' | 'sum';
 
-export type Category = 'system' | 'kubernetes' | 'applications' | 'network' | 'windows' | 'linux';
+export type Category = 'system' | 'kubernetes' | 'applications' | 'databases' | 'network' | 'cloud' | 'vmware' | 'windows' | 'linux' | 'custom';
 export const CATEGORIES: { id: Category; name: string; hint: string }[] = [
   { id: 'system', name: 'System metrics', hint: 'CPU, memory, disk and load for servers and VMs' },
-  { id: 'kubernetes', name: 'Kubernetes', hint: 'Pods, nodes, namespaces, restarts' },
-  { id: 'applications', name: 'Applications', hint: 'Requests, errors and latency per service' },
-  { id: 'network', name: 'Network', hint: 'Traffic in and out, errors' },
-  { id: 'linux', name: 'Linux', hint: 'node_exporter metrics' },
+  { id: 'kubernetes', name: 'Kubernetes', hint: 'Pods, nodes, namespaces, restarts and volumes' },
+  { id: 'applications', name: 'Applications', hint: 'Requests, errors, latency and JVM memory per service' },
+  { id: 'databases', name: 'Databases', hint: 'PostgreSQL and MySQL connections, transactions and size' },
+  { id: 'network', name: 'Network & Devices', hint: 'Server traffic, switch / router / firewall interfaces' },
+  { id: 'cloud', name: 'Cloud', hint: 'AWS CloudWatch and Azure Monitor metrics' },
+  { id: 'vmware', name: 'VMware', hint: 'ESXi hosts, virtual machines and datastores' },
   { id: 'windows', name: 'Windows', hint: 'windows_exporter metrics' },
+  { id: 'linux', name: 'Linux', hint: 'node_exporter metrics' },
+  { id: 'custom', name: 'Custom', hint: 'Anything else: write PromQL' },
 ];
 
 export interface MetricDef {
@@ -34,6 +38,8 @@ export interface MetricDef {
   /** threshold that means "look at this" (for colours and alert defaults) */
   warn?: number; crit?: number; lowerIsWorse?: boolean;
   keywords: string[];
+  /** typical reasons to look at this metric, shown as common use cases */
+  uses?: string[];
   /** PromQL for these filters, one line per `by`, combined with `fn` */
   expr: (m: Matchers, by: string, fn: Combine) => string;
   /** raw metric names used, for the info card */
@@ -173,7 +179,124 @@ export const METRICS: MetricDef[] = [
     raw: ['http_server_request_duration_seconds_bucket'],
     expr: (m, by) => `1000 * histogram_quantile(0.95, sum by (${by}, le) (rate(http_server_request_duration_seconds_bucket${sel(m.app)}[5m])))`,
   },
+  {
+    id: 'jvm_heap', name: 'JVM heap usage', category: 'applications', unit: 'percent', by: 'service_name', byOptions: ['service_name', 'namespace'],
+    description: 'Java heap in use as a share of the maximum heap.', normal: 'A saw-tooth below 80%. Staying near 100% means long garbage collections and OutOfMemoryError risk.',
+    warn: 80, crit: 90, keywords: ['jvm', 'heap', 'java memory', 'garbage collection', 'gc'],
+    raw: ['jvm_memory_used_bytes', 'jvm_memory_limit_bytes'],
+    expr: (m, by, fn) => `${fn} by (${by}) (100 * sum by (${by}, service_name) (jvm_memory_used_bytes{jvm_memory_type="heap"${m.app}}) / sum by (${by}, service_name) (jvm_memory_limit_bytes{jvm_memory_type="heap"${m.app}}))`,
+  },
+  {
+    id: 'db_connections', name: 'Database connections', category: 'databases', unit: 'percent', by: 'host', byOptions: ['host', 'env'],
+    description: 'Open connections as a share of the server maximum (PostgreSQL and MySQL).', normal: 'Below 70%. At 100% new connections are refused.',
+    warn: 70, crit: 90, keywords: ['database connections', 'db connections', 'connections', 'connection pool', 'postgres', 'mysql'],
+    raw: ['pg_stat_database_numbackends', 'mysql_global_status_threads_connected'],
+    expr: (m, by, fn) => `${fn} by (${by}) (100 * sum by (instance, ${by}) (pg_stat_database_numbackends${sel(m.host)}) / max by (instance, ${by}) (pg_settings_max_connections${sel(m.host)}))`
+      + ` or ${fn} by (${by}) (100 * max by (instance, ${by}) (mysql_global_status_threads_connected${sel(m.host)}) / max by (instance, ${by}) (mysql_global_variables_max_connections${sel(m.host)}))`,
+  },
+  {
+    id: 'db_tps', name: 'Database transactions', category: 'databases', unit: 'reqps', by: 'host', byOptions: ['host', 'datname'],
+    description: 'Committed + rolled back transactions (PostgreSQL) or queries (MySQL) per second.', normal: 'Follows your traffic; a drop to zero while traffic still comes in is an outage.',
+    keywords: ['transactions', 'tps', 'queries per second', 'database load', 'qps'],
+    raw: ['pg_stat_database_xact_commit', 'mysql_global_status_queries'],
+    expr: (m, by) => `sum by (${by}) (rate(pg_stat_database_xact_commit${sel(m.host)}[5m]) + rate(pg_stat_database_xact_rollback${sel(m.host)}[5m]))`
+      + (by === 'datname' ? '' : ` or sum by (${by}) (rate(mysql_global_status_queries${sel(m.host)}[5m]))`),
+  },
+  {
+    id: 'db_size', name: 'Database size', category: 'databases', unit: 'bytes', by: 'datname', byOptions: ['datname', 'host'],
+    description: 'Size of each PostgreSQL database on disk.', normal: 'Grows steadily; sudden jumps are bulk loads or bloat.',
+    keywords: ['database size', 'db size', 'table size'],
+    raw: ['pg_database_size_bytes'],
+    expr: (m, by, fn) => `${fn === 'avg' ? 'sum' : fn} by (${by}) (pg_database_size_bytes${sel(m.host)})`,
+  },
+  {
+    id: 'if_traffic', name: 'Interface traffic', category: 'network', unit: 'Bps', by: 'device', byOptions: ['device', 'ifName'],
+    description: 'Bytes in + out per second on switch, router and firewall interfaces (SNMP).', normal: 'Below 70% of the link speed; a sudden zero on an uplink is an outage.',
+    keywords: ['interface', 'switch', 'router', 'firewall', 'snmp', 'uplink', 'port traffic'],
+    raw: ['ifHCInOctets', 'ifHCOutOctets'],
+    expr: (_m, by, fn) => `${fn === 'avg' ? 'sum' : fn} by (${by}) (rate(ifHCInOctets[5m]) + rate(ifHCOutOctets[5m]))`,
+  },
+  {
+    id: 'if_errors', name: 'Interface errors', category: 'network', unit: 'short', by: 'device', byOptions: ['device', 'ifName'],
+    description: 'Input errors per second on network device interfaces (SNMP).', normal: 'Zero. Steady errors point at a bad cable, optic or duplex mismatch.',
+    keywords: ['interface errors', 'crc errors', 'port errors'],
+    raw: ['ifInErrors'],
+    expr: (_m, by) => `sum by (${by}) (rate(ifInErrors[5m]))`,
+  },
+  {
+    id: 'if_down', name: 'Interfaces down', category: 'network', unit: 'short', by: 'device', byOptions: ['device'],
+    description: 'Interfaces that are enabled but not passing traffic (oper down, admin up).', normal: 'Zero on every device.',
+    warn: 1, crit: 1, keywords: ['interface down', 'port down', 'link down'],
+    raw: ['ifOperStatus', 'ifAdminStatus'],
+    expr: (_m, by) => `count by (${by}) (ifOperStatus == 2 and ifAdminStatus == 1)`,
+  },
+  {
+    id: 'esxi_cpu', name: 'ESXi host CPU', category: 'vmware', unit: 'percent', by: 'host_name', byOptions: ['host_name', 'cluster_name'],
+    description: 'CPU used on each ESXi host, as a share of its capacity.', normal: 'Below 75% leaves room for HA failover.',
+    warn: 75, crit: 90, keywords: ['esxi cpu', 'vmware cpu', 'hypervisor cpu', 'vsphere cpu'],
+    raw: ['vmware_host_cpu_usage', 'vmware_host_cpu_max'],
+    expr: (_m, by, fn) => `${fn} by (${by}) (100 * vmware_host_cpu_usage / vmware_host_cpu_max)`,
+  },
+  {
+    id: 'esxi_mem', name: 'ESXi host memory', category: 'vmware', unit: 'percent', by: 'host_name', byOptions: ['host_name', 'cluster_name'],
+    description: 'Memory used on each ESXi host.', normal: 'Below 80%; above that VMs start ballooning and swapping.',
+    warn: 80, crit: 90, keywords: ['esxi memory', 'vmware memory', 'hypervisor memory', 'esxi'],
+    raw: ['vmware_host_memory_usage', 'vmware_host_memory_max'],
+    expr: (_m, by, fn) => `${fn} by (${by}) (100 * vmware_host_memory_usage / vmware_host_memory_max)`,
+  },
+  {
+    id: 'vm_cpu', name: 'VM CPU (MHz)', category: 'vmware', unit: 'short', by: 'vm_name', byOptions: ['vm_name', 'host_name'],
+    description: 'CPU used by each virtual machine, in MHz.', normal: 'Compare with the vCPUs: 1 vCPU is roughly 2,000-3,000 MHz.',
+    keywords: ['vm cpu', 'virtual machine cpu', 'vm', 'virtual machines'],
+    raw: ['vmware_vm_cpu_usage_average'],
+    expr: (_m, by, fn) => `${fn === 'avg' ? 'sum' : fn} by (${by}) (vmware_vm_cpu_usage_average)`,
+  },
+  {
+    id: 'datastore', name: 'Datastore usage', category: 'vmware', unit: 'percent', by: 'ds_name', byOptions: ['ds_name'],
+    description: 'Space used on each VMware datastore.', normal: 'Below 80%. Full datastores stop VMs and snapshots.',
+    warn: 80, crit: 90, keywords: ['datastore', 'vmware storage', 'vsan'],
+    raw: ['vmware_datastore_freespace_size', 'vmware_datastore_capacity_size'],
+    expr: (_m, by, fn) => `${fn} by (${by}) (100 - 100 * vmware_datastore_freespace_size / vmware_datastore_capacity_size)`,
+  },
+  {
+    id: 'pvc_usage', name: 'Volume usage (PVC)', category: 'kubernetes', unit: 'percent', by: 'persistentvolumeclaim', byOptions: ['persistentvolumeclaim', 'namespace', 'cluster'],
+    description: 'Space used on persistent volumes.', normal: 'Below 80%. A full volume stops databases and queues.',
+    warn: 80, crit: 90, keywords: ['pvc', 'persistent volume', 'volume usage', 'pvcs'],
+    raw: ['kubelet_volume_stats_used_bytes', 'kubelet_volume_stats_capacity_bytes'],
+    expr: (m, by, fn) => `${fn} by (${by}) (100 * kubelet_volume_stats_used_bytes${sel(m.k8s)} / kubelet_volume_stats_capacity_bytes${sel(m.k8s)})`,
+  },
 ];
+
+/** common use cases shown when a metric is selected */
+const USES: Record<string, string[]> = {
+  cpu: ['Which servers are overloaded right now', 'Hosts with high CPU over a period', 'Capacity planning before a release', 'Compare CPU with yesterday or last week'],
+  memory: ['Servers about to run out of memory', 'Memory leaks: usage that only goes up', 'Right-sizing VMs'],
+  disk: ['Disks that will fill up soon', 'Log or backup folders growing too fast', 'Clean-up before a disk-full outage'],
+  network: ['Unusual traffic spikes or drops', 'Backups or transfers saturating a link', 'Compare traffic between servers'],
+  net_errors: ['Faulty cables, drivers or switch ports', 'Packet loss behind slow applications'],
+  load: ['Processes waiting for CPU or disk', 'Overloaded Linux servers'],
+  processes_cpu: ['Which process is using the CPU', 'Runaway Java or Node processes', 'Noisy neighbours on shared servers'],
+  pod_cpu: ['Busiest namespaces or pods', 'Pods close to their CPU limits', 'Cluster capacity planning'],
+  pod_memory: ['Pods at risk of OOMKill', 'Memory per namespace for chargeback'],
+  pod_restarts: ['Crash-looping pods', 'Pods killed for running out of memory'],
+  pods_running: ['Pods disappearing after a deployment', 'Evictions on busy nodes'],
+  rps: ['Traffic per service', 'Sudden drops that mean an outage', 'Peak hours for capacity planning'],
+  errors: ['Which service is failing', 'Errors after a deployment', 'SLO error budgets'],
+  latency: ['Slowest services', 'Latency regressions after a release', 'Response-time SLOs'],
+  jvm_heap: ['Memory leaks in Java and Mule services', 'Heap sizes that are too small', 'Long garbage-collection pauses'],
+  db_connections: ['Connection pools running out', 'Applications leaking connections'],
+  db_tps: ['Database load per server', 'Traffic drops at the database layer'],
+  db_size: ['Databases growing fast', 'Disk planning for database servers'],
+  if_traffic: ['Saturated uplinks', 'Traffic per switch or firewall'],
+  if_errors: ['Bad cables or optics', 'Duplex mismatches'],
+  if_down: ['Ports or links that went down'],
+  esxi_cpu: ['Overloaded ESXi hosts', 'Room for HA failover'],
+  esxi_mem: ['ESXi hosts that will start swapping', 'VM placement'],
+  vm_cpu: ['Busiest virtual machines', 'VMs that need more vCPUs'],
+  datastore: ['Datastores filling up', 'Snapshot growth'],
+  pvc_usage: ['Persistent volumes about to fill', 'Database and queue storage on Kubernetes'],
+};
+for (const m of METRICS) m.uses = USES[m.id];
 export const metricById = (id: string) => METRICS.find((x) => x.id === id);
 
 /** PromQL for a builder state */
@@ -203,20 +326,31 @@ export function describe(s: { metric: string; filters: Filters; by?: string; fn?
 }
 
 /** Ready-made templates shown on the Templates tab */
-export interface Template { id: string; title: string; text: string; metric: string; by?: string; fn?: Combine; topk?: number; filters?: Filters; op?: '>' | '<'; value?: number; categories: Category[] }
+export interface Template { id: string; title: string; text: string; metric: string; by?: string; fn?: Combine; topk?: number; filters?: Filters; op?: '>' | '<'; value?: number; categories: Category[]; tags: string[] }
 export const TEMPLATES: Template[] = [
-  { id: 't-cpu', title: 'CPU usage', text: 'View CPU usage and top CPU hosts', metric: 'cpu', categories: ['system', 'linux', 'windows'] },
-  { id: 't-mem', title: 'Memory usage', text: 'Track memory utilization and available memory', metric: 'memory', categories: ['system', 'linux', 'windows'] },
-  { id: 't-disk', title: 'Disk usage', text: 'Monitor disk space on every server', metric: 'disk', fn: 'max', categories: ['system', 'linux', 'windows'] },
-  { id: 't-net', title: 'Network usage', text: 'Monitor network traffic in and out', metric: 'network', categories: ['system', 'network'] },
-  { id: 't-neterr', title: 'Network errors', text: 'Packets with errors per server', metric: 'net_errors', categories: ['network'] },
-  { id: 't-proc', title: 'Processes', text: 'Top processes by CPU', metric: 'processes_cpu', topk: 10, fn: 'sum', categories: ['system', 'linux', 'windows'] },
-  { id: 't-load', title: 'System load', text: '1-minute load average (Linux)', metric: 'load', categories: ['linux', 'system'] },
-  { id: 't-podcpu', title: 'Namespace CPU', text: 'CPU cores used per namespace', metric: 'pod_cpu', categories: ['kubernetes'] },
-  { id: 't-podmem', title: 'Namespace memory', text: 'Working-set memory per namespace', metric: 'pod_memory', categories: ['kubernetes'] },
-  { id: 't-restart', title: 'Restarting pods', text: 'Pods that restarted in the last hour', metric: 'pod_restarts', categories: ['kubernetes'] },
-  { id: 't-pods', title: 'Running pods', text: 'Running pods per namespace', metric: 'pods_running', categories: ['kubernetes'] },
-  { id: 't-rps', title: 'Requests per second', text: 'Traffic per service', metric: 'rps', categories: ['applications'] },
-  { id: 't-err', title: 'Error rate', text: 'Failed requests (5xx) per service', metric: 'errors', categories: ['applications'] },
-  { id: 't-lat', title: 'Latency (P95)', text: 'Slowest services', metric: 'latency', categories: ['applications'] },
+  { id: 't-cpu', title: 'CPU usage', text: 'View CPU usage and top CPU consuming hosts', metric: 'cpu', categories: ['system', 'linux', 'windows'], tags: ['System', 'Linux', 'Windows'] },
+  { id: 't-mem', title: 'Memory usage', text: 'Track memory utilization and available memory', metric: 'memory', categories: ['system', 'linux', 'windows'], tags: ['System', 'Linux', 'Windows'] },
+  { id: 't-disk', title: 'Disk usage', text: 'Monitor disk space and the fullest volumes', metric: 'disk', fn: 'max', categories: ['system', 'linux', 'windows'], tags: ['System', 'Linux', 'Windows'] },
+  { id: 't-net', title: 'Network usage', text: 'Monitor network traffic in and out', metric: 'network', categories: ['system', 'network'], tags: ['System', 'Network'] },
+  { id: 't-proc', title: 'Processes', text: 'Top processes by CPU', metric: 'processes_cpu', topk: 10, fn: 'sum', categories: ['system', 'linux', 'windows'], tags: ['System', 'Linux', 'Windows'] },
+  { id: 't-load', title: 'System load', text: '1-minute load average', metric: 'load', categories: ['linux', 'system'], tags: ['System', 'Linux'] },
+  { id: 't-neterr', title: 'Network errors', text: 'Packets with errors per server', metric: 'net_errors', categories: ['network'], tags: ['Network', 'Linux', 'Windows'] },
+  { id: 't-podcpu', title: 'Kubernetes pod CPU', text: 'CPU cores used per namespace', metric: 'pod_cpu', categories: ['kubernetes'], tags: ['Kubernetes', 'Pod'] },
+  { id: 't-podmem', title: 'Kubernetes pod memory', text: 'Working-set memory per namespace', metric: 'pod_memory', categories: ['kubernetes'], tags: ['Kubernetes', 'Pod'] },
+  { id: 't-restart', title: 'Restarting pods', text: 'Pods that restarted in the last hour', metric: 'pod_restarts', categories: ['kubernetes'], tags: ['Kubernetes', 'Pod'] },
+  { id: 't-pods', title: 'Running pods', text: 'Running pods per namespace', metric: 'pods_running', categories: ['kubernetes'], tags: ['Kubernetes', 'Namespace'] },
+  { id: 't-pvc', title: 'Volume usage', text: 'Persistent volumes filling up', metric: 'pvc_usage', categories: ['kubernetes'], tags: ['Kubernetes', 'Storage'] },
+  { id: 't-rps', title: 'Requests per second', text: 'Traffic per service', metric: 'rps', categories: ['applications'], tags: ['Application', 'HTTP'] },
+  { id: 't-err', title: 'Error rate', text: 'Failed requests (5xx) per service', metric: 'errors', categories: ['applications'], tags: ['Application', 'HTTP'] },
+  { id: 't-lat', title: 'Latency (P95)', text: 'Slowest services', metric: 'latency', categories: ['applications'], tags: ['Application', 'HTTP'] },
+  { id: 't-jvm', title: 'JVM memory', text: 'Heap used per Java and Mule service', metric: 'jvm_heap', categories: ['applications'], tags: ['Application', 'Java'] },
+  { id: 't-dbconn', title: 'Database connections', text: 'Connections used against the maximum', metric: 'db_connections', categories: ['databases'], tags: ['PostgreSQL', 'MySQL'] },
+  { id: 't-dbtps', title: 'Database transactions', text: 'Transactions or queries per second', metric: 'db_tps', categories: ['databases'], tags: ['PostgreSQL', 'MySQL'] },
+  { id: 't-dbsize', title: 'Database size', text: 'Size of each database', metric: 'db_size', categories: ['databases'], tags: ['PostgreSQL'] },
+  { id: 't-if', title: 'Interface traffic', text: 'Traffic per switch, router and firewall', metric: 'if_traffic', categories: ['network'], tags: ['Network', 'SNMP'] },
+  { id: 't-ifdown', title: 'Interfaces down', text: 'Enabled ports that are down', metric: 'if_down', categories: ['network'], tags: ['Network', 'SNMP'] },
+  { id: 't-esxicpu', title: 'ESXi host CPU', text: 'CPU used per ESXi host', metric: 'esxi_cpu', categories: ['vmware'], tags: ['VMware', 'ESXi'] },
+  { id: 't-esximem', title: 'ESXi host memory', text: 'Memory used per ESXi host', metric: 'esxi_mem', categories: ['vmware'], tags: ['VMware', 'ESXi'] },
+  { id: 't-vm', title: 'Busiest VMs', text: 'Top virtual machines by CPU', metric: 'vm_cpu', topk: 10, categories: ['vmware'], tags: ['VMware', 'VM'] },
+  { id: 't-ds', title: 'Datastore usage', text: 'Space used per datastore', metric: 'datastore', categories: ['vmware'], tags: ['VMware', 'Storage'] },
 ];

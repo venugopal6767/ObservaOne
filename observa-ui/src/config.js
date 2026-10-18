@@ -19,6 +19,7 @@ function json(k, d) {
 export const config = {
   port: Number(env('PORT', 8080)),
   brand: env('UI_BRAND', 'ObservaOne'),
+  demoData: env('UI_DEMO_DATA', 'false') === 'true', // set by demo/docker-compose.demo.yml: shows a 'Demo data' chip (the data itself always comes from the real data sources)
   publicUrl: env('PUBLIC_URL', '').replace(/\/+$/, ''), // e.g. https://monitoring.example.local (SSO redirects, links in alerts)
 
   // ---- Single sign-on (each provider is on when its client id is set) ----

@@ -59,6 +59,20 @@ One Docker setup that gives you a monitoring website with login:
 
 > **Passwords from `.env` are only used the first time.** After that, users and passwords live in the database. Change them in **Settings → Users**, or each user changes their own in **Settings → My profile**.
 
+## 2b. Try it with demo data (optional, test only)
+
+To check every screen before real servers are connected, turn on the made-up demo company
+(19 servers, 3 Kubernetes clusters, 9 services, databases, VMware, network devices, 8 days of history,
+logs, traces and alerts). Your real Prometheus is not touched; the UI shows a **Demo data** chip.
+
+```bash
+echo 'COMPOSE_FILE=docker-compose.yml:demo/docker-compose.demo.yml' >> .env
+docker compose up -d --build
+```
+
+Turn it off: remove that line from `.env`, run `docker compose up -d --remove-orphans`.
+Details and full removal: [demo/README.md](demo/README.md).
+
 ## 3. Roles
 
 | Role | Can do |

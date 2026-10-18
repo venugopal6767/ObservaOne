@@ -1,0 +1,94 @@
+# DEMO alert rules over the made-up estate. Test data only; see demo/README.md to remove it.
+groups:
+  - name: demo-servers
+    rules:
+      - alert: HostDown
+        expr: up{job=~"linux|windows"} == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "Server {{ $labels.host }} is down"
+          description: "Prometheus cannot reach {{ $labels.host }} ({{ $labels.instance }})."
+      - alert: HighCPU
+        expr: (100 - avg by (host, env, os) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 85 or (100 - avg by (host, env, os) (rate(windows_cpu_time_total{mode="idle"}[5m])) * 100) > 85
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "CPU above 85% on {{ $labels.host }}"
+          description: "CPU usage is {{ $value | printf \"%.0f\" }}% on {{ $labels.host }}."
+      - alert: HighMemory
+        expr: 100 * (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) > 90 or 100 * (1 - windows_memory_available_bytes / windows_memory_physical_total_bytes) > 90
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Memory above 90% on {{ $labels.host }}"
+          description: "Memory usage is {{ $value | printf \"%.0f\" }}% on {{ $labels.host }}."
+      - alert: DiskSpaceLow
+        expr: 100 * node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay"} < 15 or 100 * windows_logical_disk_free_bytes / windows_logical_disk_size_bytes < 15
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "Disk {{ $labels.mountpoint }}{{ $labels.volume }} on {{ $labels.host }} has {{ $value | printf \"%.0f\" }}% free"
+      - alert: SystemdUnitFailed
+        expr: node_systemd_unit_state{state="failed"} == 1
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.name }} has failed on {{ $labels.host }}"
+
+  - name: demo-services
+    rules:
+      - alert: ServiceErrorRate
+        expr: 100 * sum by (service_name, env) (rate(http_server_request_duration_seconds_count{http_response_status_code=~"5.."}[5m])) / sum by (service_name, env) (rate(http_server_request_duration_seconds_count[5m])) > 2
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.service_name }} error rate is {{ $value | printf \"%.1f\" }}%"
+      - alert: ServiceLatencyHigh
+        expr: 1000 * histogram_quantile(0.95, sum by (service_name, env, le) (rate(http_server_request_duration_seconds_bucket[5m]))) > 1000
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.service_name }} P95 latency is {{ $value | printf \"%.0f\" }} ms"
+
+  - name: demo-kubernetes
+    rules:
+      - alert: PodCrashLooping
+        expr: increase(kube_pod_container_status_restarts_total[30m]) > 0
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} keeps restarting ({{ $labels.cluster }})"
+      - alert: PodNotRunning
+        expr: kube_pod_status_phase{phase=~"Pending|Failed"} == 1
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} is {{ $labels.phase }} ({{ $labels.cluster }})"
+      - alert: NodeNotReady
+        expr: kube_node_status_condition{condition="Ready", status="true"} == 0
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "Node {{ $labels.node }} is not ready ({{ $labels.cluster }})"
+      - alert: PersistentVolumeFilling
+        expr: 100 * kubelet_volume_stats_used_bytes / kubelet_volume_stats_capacity_bytes > 85
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "Volume {{ $labels.persistentvolumeclaim }} is {{ $value | printf \"%.0f\" }}% full ({{ $labels.cluster }})"
+
+  - name: demo-infra
+    rules:
+      - alert: DatastoreLow
+        expr: 100 * vmware_datastore_freespace_size / vmware_datastore_capacity_size < 15
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "Datastore {{ $labels.ds_name }} has {{ $value | printf \"%.0f\" }}% free"
+      - alert: InterfaceDown
+        expr: ifOperStatus == 2 and ifAdminStatus == 1
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Interface {{ $labels.ifName }} is down on {{ $labels.device }}"

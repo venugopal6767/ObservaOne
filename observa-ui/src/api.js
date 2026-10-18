@@ -79,6 +79,7 @@ api.get('/me', wrap(async (req, res) => {
     brand: config.brand,
     sessionIdleMinutes: config.sessionIdleMinutes,
     rulesEditable: !!config.rulesFile,
+    demoData: config.demoData,
     modules: await enabledModules(), // what this deployment shows; the UI also checks permissions
     prefs: await getPrefs(req.userId),
   });
@@ -379,7 +380,7 @@ api.get('/alerts', wrap(async (req, res) => {
 
 api.get('/alerts/count', wrap(async (req, res) => {
   const a = await am('/api/v2/alerts?active=true&silenced=false&inhibited=false');
-  res.json({ active: a.length, critical: a.filter((x) => x.labels.severity === 'critical').length });
+  res.json({ active: a.length, critical: a.filter((x) => x.labels.severity === 'critical').length, warning: a.filter((x) => x.labels.severity === 'warning').length });
 }));
 
 api.get('/rules', wrap(async (req, res) => {

@@ -112,7 +112,10 @@ export function TimeChart({ series, unit = 'none', area = false, stacked = false
               const values = datasets.map((d) => {
                 let best: { x: number; y: number | null } | null = null;
                 for (const p of d.data) if (!best || Math.abs(p.x - t) < Math.abs(best.x - t)) best = p;
-                return { label: d.label, color: d.borderColor as string, value: best?.y ?? null };
+                // a line with no point near the click (stopped reporting, or starts later) has no value there
+                const step = d.data.length > 1 ? Math.abs(d.data[1].x - d.data[0].x) : Infinity;
+                const close = best && Math.abs(best.x - t) <= 2.5 * step;
+                return { label: d.label, color: d.borderColor as string, value: close ? best!.y ?? null : null };
               }).filter((v) => !/^Threshold/.test(v.label)).sort((a, b) => (b.value ?? -Infinity) - (a.value ?? -Infinity));
               setInv({ t, values, unit: String(unit), query, metric, filters, hint: correlateHint });
             };
@@ -190,12 +193,12 @@ export function Sparkline({ points, lineColor }: { points: [number, string][]; l
   );
 }
 
-export function LegendRow({ labels }: { labels: string[] }) {
+export function LegendRow({ labels, colors }: { labels: string[]; colors?: (string | undefined)[] }) {
   useTheme(); // re-render with the new colours when the theme changes
   const pal = palette();
   return (
     <div className="legend-row">
-      {labels.map((l, i) => <span key={`${l}-${i}`} className="legend-item"><i style={{ background: pal[i % pal.length] }} />{l}</span>)}
+      {labels.map((l, i) => <span key={`${l}-${i}`} className="legend-item"><i style={{ background: colors?.[i] || pal[i % pal.length] }} />{l}</span>)}
     </div>
   );
 }
