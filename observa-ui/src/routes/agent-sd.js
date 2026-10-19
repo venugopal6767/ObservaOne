@@ -40,6 +40,7 @@ export function agentAddress(a) {
 export function sdLabels(a) {
   const l = { host: a.host, agent_id: a.id, platform: a.platform, os: 'linux', agent: 'observaone', job: a.platform };
   if (a.env) l.env = a.env;
+  if (a.tenant_id && a.tenant_id !== 't_default') l.tenant = a.tenant_id;
   if (a.role) l.role = a.role;
   for (const [k, v] of Object.entries(a.labels || {})) if (!(k in l)) l[k] = String(v);
   return l;
@@ -78,7 +79,7 @@ agentSdRouter.get('/v1/sd/agents', wrap(async (req, res) => {
     return res.status(401).json({ error: 'Service discovery token missing or wrong.' });
   }
   const kind = ['pull', 'ping', 'port'].includes(req.query.kind) ? req.query.kind : 'pull';
-  const { rows } = await q(`SELECT id, host, platform, env, role, labels, ip, mode, pull, addresses, blocked, credential_hash
+  const { rows } = await q(`SELECT id, host, platform, env, role, labels, ip, mode, pull, addresses, blocked, credential_hash, tenant_id
                             FROM agents WHERE credential_hash IS NOT NULL AND NOT blocked ORDER BY host`);
   res.set('Cache-Control', 'no-store');
   res.json(sdGroups(rows, kind));

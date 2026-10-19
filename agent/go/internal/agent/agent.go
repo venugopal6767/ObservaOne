@@ -196,6 +196,11 @@ func (a *Agent) Run(ctx context.Context, reload <-chan struct{}) error {
 			fctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			a.flush(fctx)
 			cancel()
+			if a.diskEnabled() {
+				if n := a.spillAll(); n > 0 {
+					a.Log.Info("kept unsent collections in the disk buffer", "collections", n)
+				}
+			}
 			if srv != nil {
 				_ = srv.Close()
 			}
@@ -265,9 +270,20 @@ func (a *Agent) collectOnce() {
 	a.lastText = out.Text(0)
 	a.states = states
 	if cfg.Mode == "push" { // pull mode: Prometheus reads lastText, nothing is buffered
-		if len(a.buf) >= cfg.BufferPayloads { // bounded: drop the OLDEST so memory never grows without limit
+		if len(a.buf) >= cfg.BufferPayloads { // bounded: the OLDEST goes to the disk buffer, or is dropped
+			oldest := a.buf[0]
 			a.buf = a.buf[1:]
-			a.dropped++
+			if cfg.DiskBuffer {
+				a.mu.Unlock()
+				err := a.spill(oldest)
+				a.mu.Lock()
+				if err != nil {
+					a.dropped++
+					a.Log.Warn("disk buffer write failed; collection dropped", "error", err.Error())
+				}
+			} else {
+				a.dropped++
+			}
 		}
 		a.buf = append(a.buf, payload{text: text, collectedAt: now.UnixMilli()})
 	}
@@ -326,8 +342,11 @@ func (a *Agent) uploadLoop(ctx context.Context) {
 	}
 }
 
-// flush sends buffered payloads oldest first. Stops at the first retryable error.
+// flush sends buffered payloads oldest first (disk buffer, then memory). Stops at the first retryable error.
 func (a *Agent) flush(ctx context.Context) error {
+	if err := a.flushDisk(ctx); err != nil {
+		return err
+	}
 	for {
 		a.mu.Lock()
 		if len(a.buf) == 0 {
@@ -383,6 +402,7 @@ type hbAnswer struct {
 	Config           map[string]string `json:"config"`
 	ConfigVersion    int64             `json:"configVersion"` // 0 = the server has no settings layer (older server)
 	Actions          []Action          `json:"actions"`
+	Rotate           bool              `json:"rotate"` // the server wants this agent to take a new credential
 }
 
 func (a *Agent) appliedVersion() int64 {
@@ -424,15 +444,21 @@ func (a *Agent) heartbeatOnce(ctx context.Context, bo *core.Backoff) time.Durati
 		"hostLocked":        a.cfg.HostLocked(),
 		"mode":              a.cfg.Mode,
 		"configVersion":     a.applied,
+		"diskBuffered":      0,
 		"configError":       a.cfgErr,
 	}
 	pullMode := a.cfg.Mode == "pull"
+	diskOn := a.cfg.DiskBuffer
 	if !a.lastPushOK.IsZero() {
 		body["lastUploadAgoSeconds"] = int(time.Since(a.lastPushOK).Seconds())
 	}
 	a.mu.Unlock()
 	if pullMode {
 		body["pull"] = a.pullReport()
+	}
+	if diskOn {
+		n, sz := a.diskStats()
+		body["diskBuffered"], body["diskBufferedBytes"] = n, sz
 	}
 	if ips, _ := pullAddresses(&core.Config{}); len(ips) > 0 {
 		body["addresses"] = ips // for reachability probes from the server (ping / TCP)
@@ -472,6 +498,9 @@ func (a *Agent) heartbeatOnce(ctx context.Context, bo *core.Backoff) time.Durati
 	interval = a.hbInterval
 	a.mu.Unlock()
 	a.applyServerSettings(ans)
+	if ans.Rotate {
+		a.rotateCredential(ctx)
+	}
 	a.handleActions(ctx, ans.Actions)
 	a.checkUpgradeResult(ctx)
 	a.writeStatus()
@@ -616,6 +645,7 @@ type Status struct {
 	BufferedPayloads int                        `json:"bufferedPayloads"`
 	DroppedPayloads  uint64                     `json:"droppedPayloads"`
 	UploadFailures   uint64                     `json:"uploadFailures"`
+	DiskBuffered     int                        `json:"diskBuffered,omitempty"`
 	LastError        string                     `json:"lastError"`
 	Collectors       map[string]collector.State `json:"collectors"`
 	PID              int                        `json:"pid"`
@@ -635,7 +665,13 @@ func (a *Agent) snapshot() Status {
 	for k, v := range a.states {
 		cs[k] = v
 	}
-	return Status{Version: a.Version, AgentID: a.id.AgentID, Host: a.id.Host, Server: a.cfg.Server, ServerStatus: a.serverState,
+	disk := 0
+	if a.cfg.DiskBuffer {
+		a.mu.Unlock()
+		disk, _ = a.diskStats()
+		a.mu.Lock()
+	}
+	return Status{Version: a.Version, AgentID: a.id.AgentID, Host: a.id.Host, Server: a.cfg.Server, ServerStatus: a.serverState, DiskBuffered: disk,
 		LastHeartbeatOK: t(a.lastHBOK), LastUploadOK: t(a.lastPushOK), BufferedPayloads: len(a.buf), DroppedPayloads: a.dropped,
 		UploadFailures: a.pushFailed, LastError: a.lastErr, Collectors: cs, PID: os.Getpid(), WrittenAt: time.Now()}
 }

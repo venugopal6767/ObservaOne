@@ -70,6 +70,7 @@ export const config = {
     onlineSeconds: Number(env('AGENT_ONLINE_SECONDS', '150')),   // no heartbeat for longer = "Not reporting"
     offlineSeconds: Number(env('AGENT_OFFLINE_SECONDS', '900')), // no heartbeat for longer = "Offline"
     heartbeatSeconds: Number(env('AGENT_HEARTBEAT_SECONDS', '30')), // told to agents at enrollment / every heartbeat
+    credentialDays: Number(env('AGENT_CREDENTIAL_DAYS', '90')),        // agents (1.3+) get a new credential after this many days; 0 = never
     minVersion: env('AGENT_MIN_VERSION', '1.0.0'),                // older agents are flagged "Needs attention"
     enrollPerIpPer10Min: Number(env('AGENT_ENROLL_RATE', '300')),          // all enrollments per address / 10 min
     enrollFailuresPer10Min: Number(env('AGENT_ENROLL_FAILURES', '10')),

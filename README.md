@@ -141,7 +141,7 @@ Nothing on the server has to be reachable from the monitoring server (no inbound
 
 | Platform | Agent | What it collects |
 |---|---|---|
-| **Linux** (systemd) | **ObservaOne Go agent 1.2** (new) | CPU, memory, filesystems, disk and network I/O, load, uptime, OS info. Logs and traces: not yet (use the previous agent where needed) |
+| **Linux** (systemd) | **ObservaOne Go agent 1.3** (new) | CPU, memory, filesystems, disk and network I/O, load, uptime, OS info. Logs and traces: not yet (use the previous agent where needed) |
 | **Windows** Server 2016+ | previous agent (OpenTelemetry Collector) | windows_exporter metrics · event logs · your log files · traces |
 | **Docker host** | previous agent | the host + every container (cAdvisor) · container logs · traces |
 | **Kubernetes / OpenShift** | previous agent | nodes, containers, pod logs, events, kube-state-metrics · traces |
@@ -168,6 +168,7 @@ address from the server: a laptop or WSL install is not reachable from cloud VMs
 - Previous agent (Windows / Docker / Kubernetes): the token is checked on every upload. Revoking it stops every agent using it within a minute.
 - Self-signed certificate? The command pins your server's certificate fingerprint. Agents refuse any other server, so there is no "ignore certificate errors".
 - Every download is checked against a fixed SHA-256 before it is installed.
+- Linux 1.3: **Infrastructure → Add target** walks you through install and shows when the server is connected; settings per environment / agent, diagnostics, restart and **upgrade with automatic rollback** from the Agents page; top processes, Docker, Nginx, JVM and local exporters; credential rotation and signed releases; optional disk buffer; tenants (Settings → Tenants) and site gateways for networks that cannot reach ObservaOne (`gateway/`).
 - Linux: push (default, outbound 443 only) or **pull** (`--mode pull`: Prometheus scrapes the agent over mutual TLS on port 9110, certificates issued by ObservaOne). The Agents page shows *why* an agent looks the way it does (host down, agent stopped, firewall, certificate), from heartbeats, scrapes and ping/TCP probes (blackbox exporter).
 - Linux: runs as the unprivileged user `observaone-agent` in a hardened systemd unit (read-only system, 128 MB memory cap); its diagnostics page listens on 127.0.0.1 only.
 - Windows: windows_exporter listens on 127.0.0.1 only. The token file is readable by SYSTEM and Administrators only.

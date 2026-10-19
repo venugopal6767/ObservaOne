@@ -14,7 +14,7 @@ import { toneClass } from '@/lib/theme';
 import { useApp, usePlainQuery } from '@/app/AppContext';
 import { ErrorState, Field, InfoBox, Modal, PageHead, Pill, Select, StateBanner, StateView, TableFoot, TableWrap, Tabs, Time, copyText, toast, useDialogs, usePager, type Tone } from '@/components/ui';
 import { StatCard } from '@/components/StatCard';
-import { AgentManagePanel, FleetSettings } from '@/components/AgentManage';
+import { AgentManagePanel, FleetSettings, GatewaysPanel } from '@/components/AgentManage';
 
 type Platform = 'linux' | 'windows' | 'docker' | 'kubernetes';
 type Status = 'online' | 'attention' | 'not_reporting' | 'offline' | 'pending' | 'blocked';
@@ -23,10 +23,10 @@ interface Agent {
   kernel: string; labels: Record<string, string>; token: string | null; enrolled: boolean; enrolledAt: string | null; lastHeartbeat: string | null;
   lastData: string | null; lastSeen: string | null; bootTime: string | null; status: Status; statusReason: string; problems: string[];
   outdated: boolean; cpu: number | null; mem: number | null; diskFree: number | null;
-  mode: 'push' | 'pull' | null; address: string | null; addresses: string[];
+  mode: 'push' | 'pull' | null; address: string | null; addresses: string[]; gatewayId?: string | null; tenant?: string;
   pull: { port: number | null; ips: string[]; dns: string[]; listening: boolean | null; scrapes: number | null; lastScrapeAgoSeconds: number | null; certNotAfter: string | null; refused: number | null; error: string } | null;
   diagnosis: Diagnosis | null;
-  diag?: { collectors: Record<string, string> | null; collectorErrors?: Record<string, string>; uploadFailures: number | null; lastError: string; uptimeSeconds: number | null };
+  diag?: { collectors: Record<string, string> | null; collectorErrors?: Record<string, string>; uploadFailures: number | null; lastError: string; uptimeSeconds: number | null; diskBuffered?: number | null };
 }
 type Severity = 'ok' | 'info' | 'warning' | 'critical';
 interface Diagnosis { code: string; severity: Severity; title: string; detail: string; evidence: { signal: string; value: string; ok: boolean | null }[] }
@@ -60,7 +60,7 @@ const DISTROS: Record<string, [string, string]> = {
   amazon: ['Amazon Linux 2 / 2023', 'sudo yum install -y curl'],
   suse: ['SUSE / openSUSE', 'sudo zypper install -y curl'],
 };
-type TabKey = 'overview' | Platform | 'settings' | 'tokens';
+type TabKey = 'overview' | Platform | 'settings' | 'gateways' | 'tokens';
 type StatusFilter = 'all' | Status;
 
 const counts = (list: Agent[]) => ({
@@ -85,7 +85,7 @@ export default function Agents() {
     const t = params.get('tab');
     if (t === 'install') return (params.get('platform') as Platform) || 'linux';
     if (t === 'fleet') return 'overview';
-    if (t && (t === 'tokens' || t === 'settings' || t in PLATFORMS)) return t as TabKey;
+    if (t && (t === 'tokens' || t === 'settings' || t === 'gateways' || t in PLATFORMS)) return t as TabKey;
     return 'overview';
   })();
   const view = params.get('view') === 'install' || params.get('tab') === 'install' ? 'install' : 'agents';
@@ -100,7 +100,7 @@ export default function Agents() {
     actions={canManage ? <><Link className="btn" to="/infrastructure/add"><Plus size={15} />Add target</Link><button className="btn btn-primary" onClick={() => go(tab in PLATFORMS ? tab : 'linux', 'install')}><Plus size={15} />Install agent</button></> : undefined} />;
 
   const tabs: [TabKey, string][] = [['overview', `All platforms${d ? ` (${d.agents.length})` : ''}`], ...PLATFORM_KEYS.map((p) => [p, `${PLATFORMS[p].label}${d ? ` (${d.agents.filter((a) => a.platform === p).length})` : ''}`] as [TabKey, string])];
-  if (canManage) tabs.push(['settings', 'Settings'], ['tokens', 'Enrollment tokens']);
+  if (canManage) tabs.push(['settings', 'Settings'], ['gateways', 'Gateways'], ['tokens', 'Enrollment tokens']);
 
   return (
     <>
@@ -108,6 +108,7 @@ export default function Agents() {
       <div className="toolbar"><Tabs items={tabs} active={tab} onChange={(k) => go(k)} label="Agent platforms" /></div>
       {tab === 'tokens' ? (canManage ? <Tokens /> : null)
         : tab === 'settings' ? <FleetSettings canManage={canManage} />
+        : tab === 'gateways' ? <GatewaysPanel canManage={canManage} />
         : q.isPending ? <TableWrap label="Agents"><StateView kind="loading" skeleton="table" /></TableWrap>
           : q.isError ? <TableWrap label="Agents"><ErrorState error={q.error} what="Agents" /></TableWrap>
             : tab === 'overview' ? <Overview data={d!} canManage={canManage} go={go} />
@@ -220,7 +221,7 @@ function Fleet({ agents, data, canManage, showPlatform, platform, status, setSta
           <tbody>
             {pager.rows.length ? pager.rows.map((a) => (
               <tr key={a.id} className="clickable" tabIndex={0} onClick={(e) => { if (!(e.target as HTMLElement).closest('button, a')) showDetail(a); }} onKeyDown={(e) => { if (e.key === 'Enter') showDetail(a); }}>
-                <td><b style={{ fontWeight: 600 }}>{a.host}</b>{a.mode === 'pull' && <span className="chip mode-chip" title="Prometheus scrapes this agent (pull mode)">pull</span>}<div className="dim" style={{ fontSize: 11 }}>{[a.os, a.arch].filter(Boolean).join(' · ') || a.id}</div></td>
+                <td><b style={{ fontWeight: 600 }}>{a.host}</b>{a.mode === 'pull' && <span className="chip mode-chip" title="Prometheus scrapes this agent (pull mode)">pull</span>}{a.gatewayId && <span className="chip mode-chip" title="Reports through a site gateway">via gateway</span>}<div className="dim" style={{ fontSize: 11 }}>{[a.os, a.arch].filter(Boolean).join(' · ') || a.id}</div></td>
                 {showPlatform && <td>{PLATFORMS[a.platform]?.label || a.platform}</td>}
                 <td><StatusPill a={a} />{a.diagnosis && a.diagnosis.severity !== 'ok' && a.diagnosis.code !== 'rebooted'
                   ? <div className={a.diagnosis.severity === 'critical' ? 'c-red' : a.diagnosis.severity === 'warning' ? 'c-orange' : 'dim'} style={{ fontSize: 11, marginTop: 3, maxWidth: 260 }} title={a.diagnosis.detail}>{a.diagnosis.title}</div>
@@ -322,6 +323,7 @@ function AgentDetail({ id, host, canManage, onClose }: { id: string; host: strin
                 {row('Last data', when(d.lastData))}{d.enrolled && row('Host booted', when(d.bootTime))}
                 {row('CPU', fmt(d.cpu, 'percent'))}{row('Memory', fmt(d.mem, 'percent'))}{row('Lowest disk free', fmt(d.diskFree, 'percent'))}
                 {d.enrolled && row('Upload failures', d.diag?.uploadFailures != null ? String(d.diag.uploadFailures) : null)}
+                {d.enrolled && (d.diag?.diskBuffered ?? 0) > 0 && row('Disk buffer', `${d.diag!.diskBuffered} collections waiting`)}
                 {d.enrolled && row('Agent error', d.diag?.lastError || null)}
                 {d.mode === 'pull' && d.pull && <>
                   {row('Scraped at', d.address)}

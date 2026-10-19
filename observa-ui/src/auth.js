@@ -95,6 +95,7 @@ export function publicUser(u) {
     createdAt: u.created_at?.toISOString?.() || u.created_at,
     lastLogin: u.last_login ? new Date(u.last_login).toISOString() : null,
     permissions: [...permsOf(u.role)],
+    tenant: u.tenant_id || 't_default',
   };
 }
 
@@ -483,6 +484,7 @@ async function apiKeyAuth(req, res, next, key) {
     permissions: perms,
     apiKey: { id: k.id, name: k.name, prefix: k.prefix },
     authSource: 'apikey',
+    tenant: owner?.tenant_id || 't_default',
   };
   req.userId = owner?.id ?? null;
   req.apiKeyId = k.id;

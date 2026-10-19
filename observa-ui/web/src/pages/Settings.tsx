@@ -9,23 +9,24 @@ import { ago, browserName, dateTime, dateTimeZ, timeHeader, timeTitle } from '@/
 import { useApp } from '@/app/AppContext';
 import { ErrorState, Field, InfoBox, Modal, PageHead, Panel, Pill, Select, StateView, Tabs, TableWrap, Time, copyText, toast, useDialogs } from '@/components/ui';
 import { MfaSetup, RecoveryCodes } from './Mfa';
-import { UsersTab, RolesTab, TeamsTab, SecurityTab, ModulesTab, AuditTab } from './SettingsAdmin';
+import { UsersTab, RolesTab, TeamsTab, SecurityTab, ModulesTab, AuditTab, TenantsTab } from './SettingsAdmin';
 
 const ALL_TABS: [string, string, string | null][] = [
   ['profile', 'My profile', null], ['sessions', 'Sessions', null], ['apikeys', 'API keys', null],
-  ['users', 'Users', 'users.manage'], ['roles', 'Roles', 'users.manage'], ['teams', 'Teams', null],
+  ['users', 'Users', 'users.manage'], ['roles', 'Roles', 'users.manage'], ['teams', 'Teams', null], ['tenants', 'Tenants', 'users.manage'],
   ['security', 'Security', 'settings.manage'], ['modules', 'Modules', 'settings.manage'], ['audit', 'Audit log', 'audit.read'],
   ['api', 'API reference', null], ['about', 'About', null],
 ];
 
 export default function Settings() {
-  const { can } = useApp();
+  const { can, me } = useApp();
   const [params, setParams] = useSearchParams();
-  const tabs = ALL_TABS.filter(([, , p]) => !p || can(p));
+  const provider = ((me.user as { tenant?: string }).tenant || 't_default') === 't_default';
+  const tabs = ALL_TABS.filter(([k, , p]) => (!p || can(p)) && (k !== 'tenants' || provider));
   const want = params.get('tab') || 'profile';
   const tab = tabs.some(([k]) => k === want) ? want : 'profile';
   const setTab = (k: string) => { const n = new URLSearchParams(params); n.set('tab', k); setParams(n, { replace: true }); };
-  const Body = { profile: Profile, sessions: Sessions, apikeys: ApiKeys, users: UsersTab, roles: RolesTab, teams: TeamsTab, security: SecurityTab, modules: ModulesTab, audit: AuditTab, api: ApiRef, about: About }[tab]!;
+  const Body = { profile: Profile, sessions: Sessions, apikeys: ApiKeys, users: UsersTab, roles: RolesTab, teams: TeamsTab, tenants: TenantsTab, security: SecurityTab, modules: ModulesTab, audit: AuditTab, api: ApiRef, about: About }[tab]!;
   return (
     <>
       <PageHead title="Settings" sub="Your account, security, users, roles, teams and API access" />

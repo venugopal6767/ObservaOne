@@ -1,4 +1,4 @@
-# ObservaOne Linux Agent (Go agent 1.2)
+# ObservaOne Linux Agent (Go agent 1.3)
 
 One small Go binary per Linux server (about 7 MB, about 11 MB of RAM, standard library only). It enrolls once, sends a
 heartbeat every 30 s and sends host metrics every 15 s, all over HTTPS to the ObservaOne server. No port is opened
@@ -6,6 +6,10 @@ on the monitored server.
 
 **Pull mode** (1.2, optional): Prometheus scrapes the agent instead, over mutual TLS with certificates that ObservaOne
 issues automatically. Heartbeats still go out over HTTPS. See [Pull mode](#13-pull-mode).
+
+**1.3** adds management from ObservaOne (Add Target wizard, settings per environment / target / agent, diagnostics,
+restart and upgrade with rollback), application collectors (top processes, Docker, Nginx, JVM, local exporters),
+credential rotation, signed releases, an optional disk buffer, tenants and site gateways: sections 14-19.
 
 Status: **built and tested end to end on Linux in a lab** (see [Test results](#test-results)). Not yet run on a real
 cloud VM with real systemd: follow [Testing on a real VM](#testing-on-a-real-vm).
@@ -124,9 +128,9 @@ or short-lived tokens, and revoke any token that leaked. Revoking only stops new
 Files are read in this order. Later wins, and the host always has the final say:
 
 1. built-in defaults
-2. settings sent by the ObservaOne server in the heartbeat answer (only: `collect_interval`, `heartbeat_interval`,
-   `disable`, `buffer_payloads`, `env`, `role`, `label.*`; saved in `/var/lib/observaone-agent/server-settings.json`).
-   The agent supports this already; the server-side screen to set them is the next step, so today this layer is empty.
+2. settings from ObservaOne (environment → target → agent, set on the Agents page; see section 14). Only
+   `collect_interval`, `heartbeat_interval`, `disable`, `buffer_payloads`, `processes.top` and `docker.enabled`;
+   saved in `/var/lib/observaone-agent/server-settings.json` with their version.
 3. `/etc/observaone-agent/agent.yaml`
 4. `/etc/observaone-agent/conf.d/*.yaml` (name order)
 
@@ -316,10 +320,11 @@ Probes that cannot run are "not measured", never "down".
   `observaone-node-exporter` and removes the old binaries, config and token.
 * **1.1 → 1.2:** the installer converts `agent.conf` to `agent.yaml` with the new binary. If the 1.2 agent does not send
   a heartbeat within 45 s, the rollback also restores `agent.conf` and the old unit (the 1.1 binary reads only that).
+* **From the Agents page (1.3+):** agent → **Upgrade to x.y.z**. See section 14.
 * **Server side:** `docker compose up -d --build`. The `agent-build` service compiles the agent (Go 1.24 image) into
-  `agent/files/` before Nginx starts; `agent-pki-init` creates the agent CA before Prometheus starts. Database
-  migrations 5-7 only add columns, tables and indexes, so going back to the previous version is safe; the new columns
-  are simply ignored.
+  `agent/files/` and signs `SHA256SUMS` (section 16) before Nginx starts; `agent-pki-init` creates the agent CA before
+  Prometheus starts. Database migrations 5-9 only add columns, tables and indexes, so going back to the previous
+  version is safe; the new columns are simply ignored.
 
 ## 12. Testing on a real VM
 
@@ -333,8 +338,9 @@ sudo reboot
 sudo bash vm-check.sh --reboot-check
 ```
 
-Paste the output back. On the ObservaOne server, `agent/test/scenarios.sh` runs the server-side scenario suite and
-`agent/test/pull-scenarios.sh` the 1.2 / pull-mode suite (see the headers of the scripts).
+Paste the output back. On the ObservaOne server, `agent/test/scenarios.sh` runs the server-side scenario suite,
+`agent/test/pull-scenarios.sh` the 1.2 / pull-mode suite, `agent/test/manage-scenarios.sh` the management suite and
+`agent/test/phase6-scenarios.sh` rotation, signatures, disk buffer, tenants and the gateway (see the script headers).
 
 ## 13. Pull mode
 
@@ -361,6 +367,104 @@ The ObservaOne agent CA, the Prometheus client certificate and the discovery tok
 
 When to use pull: Prometheus must own the scrape schedule, or policy forbids monitored hosts from pushing data. Otherwise
 push is simpler: no inbound port, and it buffers through short outages (in pull mode a missed scrape is a gap).
+
+## 14. Managing agents from ObservaOne
+
+**Add a server:** Infrastructure → **Add target**. Choose the type (Linux today), describe it (name, environment, role,
+labels, push or pull), and the wizard creates a one-use, short-lived token and shows the two install lines (or the
+`--token-file` version for Ansible / cloud-init). It then shows a live checklist while the agent connects:
+enrolled → first heartbeat → first metrics → Prometheus has data; a stuck step says its likely cause. When all are
+done, **Start monitoring** opens the host view. The agent is bound to the target and takes its environment, role and
+labels where the installer did not set them.
+
+**Settings:** layers, later wins: environment (Agents → Settings) → target → agent (agent detail → Configure) →
+files on the host. Only `collect_interval`, `heartbeat_interval`, `buffer_payloads`, `disable`, `processes.top` and
+`docker.enabled` can be set from ObservaOne; never the server address, trust, paths, network settings or any URL the
+agent would read. Every change gets a new version; the agent applies a newer version at its next heartbeat, checks it
+against its files and reports the version it applied. The detail shows **Pending** until it does, **Applied**
+afterwards, or **Refused** with the agent's reason (the agent then keeps its previous settings). Settings set in a file
+on the host are shown as locked: the file wins.
+
+**Actions** (agent detail; a fixed list, never a command):
+
+| Action | What happens |
+|---|---|
+| Request diagnostics | The agent uploads a bundle (≤ 1 MB): status, settings in effect and where each comes from, collectors, system facts, state folder listing (names only), DNS / TLS check to the server, the last 300 log lines. No credential, token, key, environment or command line; the server scrubs anything that looks like a secret again. The 5 newest bundles are kept, viewable and downloadable. |
+| Restart agent | The agent reports, then exits with code 75; systemd (`Restart=on-failure`) starts it again in about 10 s. Done actions are remembered on disk, so it never restarts twice. |
+| Upgrade to x.y.z | The agent writes `upgrade-request.json`; the root-owned **updater** (`observaone-agent-updater.path` → `.service`, installed by the installer) downloads the published build from the same server with the same trust settings, checks `SHA256SUMS` and its signature, runs `check-config` with the new binary as the agent user, swaps it (keeping `.prev`), restarts and waits 60 s for a heartbeat from the new version. Otherwise it **rolls back** and keeps the failed binary as `.failed`. The result appears on the Agents page. The agent itself never replaces its binary and never runs as root; the updater reads only the action id from the request (the version installed is whatever the server publishes). |
+| Rotate credential | See section 16. |
+
+Actions are delivered with the next heartbeat, expire after 24 hours, and are refused for blocked agents. A host
+view (`/metrics/host/<host>`) shows a health strip: overall diagnosis, agent status, metrics, reachability, last metric
+and agent version, with the diagnosis line when they disagree.
+
+## 15. Application collectors
+
+| Collector | Default | Metrics | Set with |
+|---|---|---|---|
+| processes | on, top 10 | `namedprocess_namegroup_cpu_seconds_total{groupname,mode}`, `namedprocess_namegroup_memory_bytes{groupname,memtype}`, `namedprocess_namegroup_num_procs`, `observaone_processes_total` (process-exporter names: the host view's Processes tab works unchanged) | `processes.top` (0 = off; also from ObservaOne) |
+| docker | off | `container_cpu_usage_seconds_total`, `container_memory_usage_bytes`, `container_memory_working_set_bytes`, `container_spec_memory_limit_bytes` (cAdvisor names, labels `name`, `image`), `observaone_docker_container_info{state}`, `observaone_docker_containers{state}` | installer `--docker-metrics` (adds the agent user to the docker group: **root-equivalent**; the agent only sends GET requests), or `docker.enabled: true` |
+| nginx | off | `nginx_up`, `nginx_connections_{active,reading,writing,waiting,accepted,handled}`, `nginx_http_requests_total` (nginx-prometheus-exporter names) | `nginx.status_url` / `--nginx-status URL` (stub_status) |
+| jvm | off | `jvm_memory_{used,committed,limit}_bytes{jvm_memory_type}`, `jvm_thread_count`, `jvm_gc_collections_total`, `jvm_gc_collection_seconds_total`, `jvm_uptime_seconds`, `observaone_jvm_up` with `service_name` (OpenTelemetry names: the JVM heap metric in Metrics works) | `jolokia.<service>: URL` / `--jolokia name=URL` (Jolokia agent; user:password@ in the URL is supported and never shown) |
+| exporters | off | everything a local exporter publishes, with `exporter="<name>"`; identity labels it sends are dropped | `exporters.<name>: URL` / `--exporter name=URL` (≤ 5,000 series, 4 MB) |
+
+Addresses are host-only settings; the server can turn a collector off (`disable`) or switch processes / Docker,
+never point the agent at an address. Reads have a 4-second timeout, a size limit and follow no redirects. Process
+CPU counters only grow (a process that exits takes nothing away), so `rate()` never sees fake resets.
+
+## 16. Credentials and releases
+
+* **Credential rotation (1.3):** agent detail → **Rotate credential**, or automatically when the credential is older
+  than `AGENT_CREDENTIAL_DAYS` (default 90; 0 = never). The heartbeat answer says `rotate`; the agent asks for a new
+  credential (only with its current one), saves it atomically, and only then uses it. The server accepts the old one
+  until **10 minutes after the new one is first used**, so an agent that fails to save never locks itself out.
+* **Signed releases:** `agent-build` signs `SHA256SUMS` with an Ed25519 release key (created on the first build in the
+  `agent-signing` volume; `.agent-keys/` for manual builds; never served) and publishes `SHA256SUMS.sig` and
+  `release.pub`. The installer checks the signature (with the agent already installed, or openssl 3) and **pins**
+  `release.pub` in `/etc/observaone-agent` on the first install. Later, the installer and the updater refuse a build
+  not signed by the pinned key, and the installer refuses a different key unless run with `--trust-new-release-key`.
+  On a first install on a host without openssl 3, the download is trusted through the pinned TLS connection and
+  `SHA256SUMS` (the installer says so). Back up the `agent-signing` volume: losing the key means re-pinning every host.
+
+## 17. Disk buffer
+
+For sites with outages longer than the 10-minute memory buffer (push mode):
+
+```yaml
+disk_buffer:
+  enabled: true      # installer: --disk-buffer
+  max_mb: 100        # oldest dropped first
+  max_age: 2h        # at most 2h: Prometheus accepts samples up to 2 h late (out_of_order_time_window)
+```
+
+A collection that would be dropped from memory, and whatever is still waiting when the agent stops, goes to
+`/var/lib/observaone-agent/buffer` (gzip, 0600). Uploads send the disk buffer first, oldest first. `observaone-agent
+status` and the agent detail show how many collections wait.
+
+## 18. Tenants
+
+For one ObservaOne serving several organisations (Settings → Tenants; platform admins only).
+
+* Every agent, token, target and settings layer belongs to a tenant; an agent belongs to the tenant of its token.
+* Users of the **Default** tenant run the platform and see everything. Users of another tenant see only their own
+  agents, tokens, targets and gateways; another tenant's ids answer 404.
+* Series from a non-default tenant's agents carry `tenant="<id>"`, set by the server; a `tenant` label sent by an
+  agent is dropped. Every PromQL query a tenant user runs through ObservaOne (Metrics, dashboards, host views, alert
+  previews, label pickers) is rewritten so each selector also matches their tenant; a query that cannot be read is
+  refused rather than run unscoped.
+* Environment settings layers are per tenant. Two tenants cannot both have an enrolled host with the same name (the
+  second becomes `name-2`).
+* Not tenant-scoped yet: logs (Loki), traces (Tempo) and Alertmanager alerts (the Go agent sends none of them).
+
+## 19. Site gateways
+
+An **ObservaOne Gateway** relays the agents of a site that cannot reach ObservaOne, and keeps heartbeats and metrics
+while the link is down (spooled up to 1 GB / 2 h, replayed oldest first, heartbeats replayed with the time they were
+received). Create it in Agents → Gateways (the token is shown once), run `gateway/docker-compose.yml` in the site
+(see `gateway/README.md`), and install the site's agents with `--server https://<gateway>`. The centre still checks
+every credential and payload; only credentials the centre accepted recently are spooled; a tenant's gateway relays
+only that tenant's agents. The Agents page shows each gateway's state and spool, and "via gateway" on its agents.
+Pull mode does not go through a gateway.
 
 ## Test results
 
@@ -465,8 +569,11 @@ in dark and light.
 * Not yet run on a real cloud VM or with real systemd (S46, S67, S73).
 * arm64 binary built but not run.
 * Windows, Docker and Kubernetes still use the previous-generation agent; their tokens are sent with every upload.
-* Changing settings from the UI (server → agent): the agent applies settings sent in the heartbeat answer, but the server
-  does not send any yet (Agents → agent → Configuration is the next step).
+* Add Target offers Linux only; Windows, Kubernetes, VMware and network devices are shown as "not yet".
+* Tenants: logs, traces and Alertmanager alerts are not tenant-scoped; Prometheus queried directly (not through
+  ObservaOne) is not scoped either: keep Prometheus behind ObservaOne for tenant users.
+* The updater needs systemd path units (every supported distribution has them); hosts installed before 1.3 get the
+  updater on their next installer run.
 * Logs and traces are not collected by the Go agent yet. Use the previous agent where you need them.
 * A host monitored by both a Prometheus scrape and the agent is shown once, but its data exists twice in Prometheus:
   remove the scrape target.

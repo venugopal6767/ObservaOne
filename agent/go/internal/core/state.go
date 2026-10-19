@@ -22,6 +22,11 @@ type Identity struct {
 
 var credRE = regexp.MustCompile(`^oac_[0-9a-f]{20}_[A-Za-z0-9_-]{43}$`)
 
+// ValidCredential: well-formed and for this agent (oac_<the agent id's 20 hex digits>_<secret>).
+func ValidCredential(c, agentID string) bool {
+	return credRE.MatchString(c) && len(agentID) == 24 && c[4:24] == agentID[4:]
+}
+
 func identityPath(dir string) string   { return filepath.Join(dir, "identity.json") }
 func credentialPath(dir string) string { return filepath.Join(dir, "credential") }
 

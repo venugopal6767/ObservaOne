@@ -20,11 +20,12 @@ import { sha256, randomToken } from '../secrets.js';
 import { requirePerm, httpError } from '../auth.js';
 import { promInstant } from '../datasources.js';
 import { compareVersions } from '../health.js';
-import { SETTINGS, ACTIONS, validateSettings, saveLayer, effectiveFor, queueAction, actionRow } from '../agentmgmt.js';
-import { AGENT_LATEST, describeAgent } from './agent-control.js';
+import { SETTINGS, ACTIONS, validateSettings, saveLayer, effectiveFor, queueAction, actionRow, envScopeId } from '../agentmgmt.js';
+import { AGENT_LATEST, describeAgent, forgetAgentCredential } from './agent-control.js';
 import { serverUrl, certInfo } from './agents.js';
 
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+const tn = (req) => req.user?.tenant || 't_default'; // default-tenant users see all tenants, others only their own
 const ENV_RE = /^[A-Za-z0-9._-]{1,64}$/;
 const LABEL_KEY_RE = /^[a-z][a-z0-9_]{0,30}$/;
 const LABEL_VAL_RE = /^[A-Za-z0-9._-]{0,64}$/;
@@ -32,8 +33,8 @@ const RESERVED = new Set(['host', 'job', 'instance', 'agent', 'agent_id', 'platf
 
 export const agentMgmtRouter = express.Router();
 
-async function agentOr404(id) {
-  const a = await one('SELECT * FROM agents WHERE id = $1', [id]);
+async function agentOr404(id, req) {
+  const a = await one(`SELECT * FROM agents WHERE id = $1 AND ($2 = 't_default' OR tenant_id = $2)`, [id, tn(req)]);
   if (!a) throw httpError(404, 'Agent not found.');
   return a;
 }
@@ -41,7 +42,7 @@ async function agentOr404(id) {
 const schema = () => Object.fromEntries(Object.entries(SETTINGS).map(([k, s]) => [k, { ...s }]));
 
 agentMgmtRouter.get('/agents/:id/manage', requirePerm('view'), wrap(async (req, res) => {
-  const a = await agentOr404(req.params.id);
+  const a = await agentOr404(req.params.id, req);
   const eff = await effectiveFor(a);
   const [actions, bundles, aliases, target] = await Promise.all([
     q('SELECT * FROM agent_actions WHERE agent_id = $1 ORDER BY id DESC LIMIT 20', [a.id]),
@@ -53,6 +54,7 @@ agentMgmtRouter.get('/agents/:id/manage', requirePerm('view'), wrap(async (req, 
   res.json({
     agentId: a.id,
     enrolled: !!a.credential_hash,
+    credential: { issuedAt: a.credential_issued_at, rotateRequested: !!a.rotate_requested, previousValidUntil: a.credential_prev_until },
     supportsActions: !!a.version && compareVersions(a.version, '1.3.0') >= 0,
     latest: AGENT_LATEST,
     config: {
@@ -77,37 +79,42 @@ async function putLayer(req, res, scope, scopeId, what) {
 }
 
 agentMgmtRouter.put('/agents/:id/config', requirePerm('integrations.manage'), wrap(async (req, res) => {
-  const a = await agentOr404(req.params.id);
+  const a = await agentOr404(req.params.id, req);
   if (!a.credential_hash) throw httpError(409, 'Only enrolled ObservaOne agents (Linux 1.1+) take settings from here.');
   await putLayer(req, res, 'agent', a.id, a.host);
 }));
 
 agentMgmtRouter.get('/agent-config', requirePerm('view'), wrap(async (req, res) => {
+  // each user sees the environment layers of their own tenant (the default tenant's are stored without a prefix)
+  const t = tn(req);
   const [layers, envs] = await Promise.all([
     q(`SELECT * FROM agent_configuration WHERE scope = 'env' ORDER BY scope_id`),
-    q(`SELECT env, count(*)::int AS agents FROM agents WHERE credential_hash IS NOT NULL AND env <> '' GROUP BY env ORDER BY env`),
+    q(`SELECT env, count(*)::int AS agents FROM agents WHERE credential_hash IS NOT NULL AND env <> '' AND tenant_id = $1 GROUP BY env ORDER BY env`, [t]),
   ]);
   const byEnv = new Map(envs.rows.map((r) => [r.env, { env: r.env, agents: r.agents, settings: {}, version: 0 }]));
+  const prefix = t === 't_default' ? '' : `${t}/`;
   for (const l of layers.rows) {
-    const cur = byEnv.get(l.scope_id) || { env: l.scope_id, agents: 0 };
-    byEnv.set(l.scope_id, { ...cur, settings: l.settings, version: Number(l.version), updatedBy: l.updated_by, updatedAt: l.updated_at });
+    if (prefix ? !l.scope_id.startsWith(prefix) : l.scope_id.includes('/')) continue;
+    const env = l.scope_id.slice(prefix.length);
+    const cur = byEnv.get(env) || { env, agents: 0 };
+    byEnv.set(env, { ...cur, settings: l.settings, version: Number(l.version), updatedBy: l.updated_by, updatedAt: l.updated_at });
   }
   res.json({ environments: [...byEnv.values()].sort((x, y) => x.env.localeCompare(y.env)), schema: schema() });
 }));
 
 agentMgmtRouter.put('/agent-config/env/:env', requirePerm('integrations.manage'), wrap(async (req, res) => {
   if (!ENV_RE.test(req.params.env)) throw httpError(400, 'Environment name: letters, digits, . _ - (max 64).');
-  await putLayer(req, res, 'env', req.params.env, `environment ${req.params.env}`);
+  await putLayer(req, res, 'env', envScopeId(tn(req), req.params.env), `environment ${req.params.env}`);
 }));
 
 agentMgmtRouter.put('/targets/:id/config', requirePerm('integrations.manage'), wrap(async (req, res) => {
-  const t = await one('SELECT id, name FROM targets WHERE id = $1', [req.params.id]);
+  const t = await one(`SELECT id, name FROM targets WHERE id = $1 AND ($2 = 't_default' OR tenant_id = $2)`, [req.params.id, tn(req)]);
   if (!t) throw httpError(404, 'Target not found.');
   await putLayer(req, res, 'target', t.id, `target ${t.name}`);
 }));
 
 agentMgmtRouter.post('/agents/:id/actions', requirePerm('integrations.manage'), wrap(async (req, res) => {
-  const a = await agentOr404(req.params.id);
+  const a = await agentOr404(req.params.id, req);
   const action = String(req.body?.action || '');
   if (!ACTIONS.includes(action)) throw httpError(400, `action must be one of ${ACTIONS.join(', ')}.`);
   if (!a.credential_hash) throw httpError(409, 'Only enrolled ObservaOne agents take actions.');
@@ -123,9 +130,22 @@ agentMgmtRouter.post('/agents/:id/actions', requirePerm('integrations.manage'), 
   res.status(201).json({ ok: true, action: r.action, deliveredWithin: 'the next heartbeat' });
 }));
 
+// Ask the agent to take a new credential at its next heartbeat (agent 1.3+). The old one keeps working until
+// 10 minutes after the new one is first used, so nothing is lost if the agent is away.
+agentMgmtRouter.post('/agents/:id/rotate-credential', requirePerm('integrations.manage'), wrap(async (req, res) => {
+  const a = await agentOr404(req.params.id, req);
+  if (!a.credential_hash) throw httpError(409, 'Only enrolled ObservaOne agents have a credential.');
+  if (!a.version || compareVersions(a.version, '1.3.0') < 0) throw httpError(409, 'Credential rotation needs agent 1.3.0 or newer.');
+  await q('UPDATE agents SET rotate_requested = TRUE WHERE id = $1', [a.id]);
+  forgetAgentCredential(a.id);
+  audit(req, 'agent.credential.rotate_request', { id: a.id, host: a.host });
+  res.json({ ok: true });
+}));
+
 agentMgmtRouter.get('/agents/:id/diagnostics/:did', requirePerm('integrations.manage'), wrap(async (req, res) => {
-  const r = await one('SELECT d.*, a.host FROM agent_diagnostics d JOIN agents a ON a.id = d.agent_id WHERE d.id = $1 AND d.agent_id = $2',
-    [Number(req.params.did) || 0, req.params.id]);
+  const r = await one(`SELECT d.*, a.host FROM agent_diagnostics d JOIN agents a ON a.id = d.agent_id
+                       WHERE d.id = $1 AND d.agent_id = $2 AND ($3 = 't_default' OR a.tenant_id = $3)`,
+    [Number(req.params.did) || 0, req.params.id, tn(req)]);
   if (!r) throw httpError(404, 'Bundle not found (only the 5 newest are kept).');
   audit(req, 'agent.diagnostics.read', { id: req.params.id, diagnosticsId: Number(r.id) });
   if (req.query.download === '1') {
@@ -169,11 +189,11 @@ agentMgmtRouter.post('/targets', requirePerm('integrations.manage'), wrap(async 
   const prefix = crypto.randomBytes(4).toString('hex');
   const token = `oat_${prefix}_${randomToken(24)}`;
   const out = await tx(async (c) => {
-    const t = (await c.query(`INSERT INTO agent_tokens (name, prefix, token_hash, env, created_by, expires_at, max_uses, target_id)
-                              VALUES ($1, $2, $3, $4, $5, now() + make_interval(hours => $6::int), $7, $8) RETURNING id, expires_at`,
-    [`Target ${v.name}`.slice(0, 60), prefix, sha256(token), v.env, req.user.username, v.hours, v.uses, id])).rows[0];
-    await c.query(`INSERT INTO targets (id, kind, name, env, role, labels, mode, token_id, created_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-      [id, v.kind, v.name, v.env, v.role, JSON.stringify(v.labels), v.mode, t.id, req.user.username]);
+    const t = (await c.query(`INSERT INTO agent_tokens (name, prefix, token_hash, env, created_by, expires_at, max_uses, target_id, tenant_id)
+                              VALUES ($1, $2, $3, $4, $5, now() + make_interval(hours => $6::int), $7, $8, $9) RETURNING id, expires_at`,
+    [`Target ${v.name}`.slice(0, 60), prefix, sha256(token), v.env, req.user.username, v.hours, v.uses, id, tn(req)])).rows[0];
+    await c.query(`INSERT INTO targets (id, kind, name, env, role, labels, mode, token_id, created_by, tenant_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      [id, v.kind, v.name, v.env, v.role, JSON.stringify(v.labels), v.mode, t.id, req.user.username, tn(req)]);
     return t;
   });
   audit(req, 'target.create', { id, name: v.name, env: v.env, mode: v.mode, tokenPrefix: prefix, validHours: v.hours, maxUses: v.uses });
@@ -186,13 +206,14 @@ agentMgmtRouter.post('/targets', requirePerm('integrations.manage'), wrap(async 
 
 agentMgmtRouter.get('/targets', requirePerm('view'), wrap(async (req, res) => {
   const { rows } = await q(`SELECT t.*, (SELECT json_agg(json_build_object('id', a.id, 'host', a.host)) FROM agents a WHERE a.target_id = t.id) AS agents
-                            FROM targets t ORDER BY t.created_at DESC LIMIT 500`);
+                            FROM targets t WHERE ($1 = 't_default' OR t.tenant_id = $1) ORDER BY t.created_at DESC LIMIT 500`, [tn(req)]);
   res.json({ targets: rows.map((t) => ({ id: t.id, name: t.name, kind: t.kind, env: t.env, role: t.role, labels: t.labels, mode: t.mode, createdBy: t.created_by, createdAt: t.created_at, agents: t.agents || [] })) });
 }));
 
 // The wizard's live checklist. Every step says what it is waiting for and, when stuck, the likely cause.
 agentMgmtRouter.get('/targets/:id/progress', requirePerm('view'), wrap(async (req, res) => {
-  const t = await one(`SELECT t.*, k.uses, k.max_uses, k.expires_at, k.revoked FROM targets t LEFT JOIN agent_tokens k ON k.id = t.token_id WHERE t.id = $1`, [req.params.id]);
+  const t = await one(`SELECT t.*, k.uses, k.max_uses, k.expires_at, k.revoked FROM targets t LEFT JOIN agent_tokens k ON k.id = t.token_id
+                       WHERE t.id = $1 AND ($2 = 't_default' OR t.tenant_id = $2)`, [req.params.id, tn(req)]);
   if (!t) throw httpError(404, 'Target not found.');
   const a = await one('SELECT * FROM agents WHERE target_id = $1 ORDER BY enrolled_at DESC NULLS LAST LIMIT 1', [t.id]);
   const age = Date.now() - new Date(t.created_at).getTime();

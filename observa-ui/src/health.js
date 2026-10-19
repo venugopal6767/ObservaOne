@@ -67,6 +67,7 @@ export function agentProblems({ version, minVersion, diag = {}, nowMs, lastDataM
   for (const k of failing) out.push(`Collector ${k} is failing${errs[k] ? `: ${errs[k]}` : ''}.`);
   if (Number(diag.droppedPayloads) > 0 && Number(diag.bufferedPayloads) > 0) out.push(`Upload backlog: ${diag.bufferedPayloads} collections waiting, ${diag.droppedPayloads} dropped (buffer full).`);
   if (Number(diag.uploadFailures) > 0) out.push(`${diag.uploadFailures} uploads failed since the last heartbeat.`);
+  if (Number(diag.diskBuffered) > 0) out.push(`${diag.diskBuffered} collections waiting in the disk buffer (they are sent oldest first once uploads work).`);
   // heartbeat fine but no data arriving = the data path (Nginx/Prometheus/token) is broken, not the agent.
   // (pull mode: the agent uploads nothing; whether Prometheus scrapes it is judged by diagnoseAgent)
   if (diag.mode !== 'pull' && lastHeartbeatMs &&nowMs - lastHeartbeatMs <= onlineSeconds * 1000 && diag.collectors && (!lastDataMs || nowMs - lastDataMs > 3 * onlineSeconds * 1000)) {

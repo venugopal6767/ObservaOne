@@ -27,6 +27,8 @@ export const AGENT_VERSIONS = {
 export const PLATFORMS = ['linux', 'windows', 'docker', 'kubernetes'];
 const TOKEN_RE = /^oat_[0-9a-f]{8}_[A-Za-z0-9_-]{20,64}$/;
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+// default-tenant users see every tenant; anyone else only their own (another tenant's ids answer 404)
+const tn = (req) => req.user?.tenant || 't_default';
 
 // ---------------- token check (called by Nginx auth_request, not reachable from outside) ----------------
 const tokenCache = new Map(); // token hash -> { id, env, exp }
@@ -143,7 +145,8 @@ async function safeByHost(query) {
 }
 
 const publicDiag = (d = {}) => ({
-  collectors: d.collectors || null, uploadFailures: d.uploadFailures ?? null, lastError: d.lastError || '', uptimeSeconds: d.uptimeSeconds ?? null,
+  collectors: d.collectors || null, collectorErrors: d.collectorErrors || {}, uploadFailures: d.uploadFailures ?? null, lastError: d.lastError || '', uptimeSeconds: d.uptimeSeconds ?? null,
+  diskBuffered: d.diskBuffered ?? null, hostLocked: d.hostLocked || [],
 });
 
 function toAgent(a, now, m) {
@@ -163,6 +166,7 @@ function toAgent(a, now, m) {
     outdated: !!a.version && compareVersions(a.version, a.platform === 'linux' ? AGENT_VERSIONS.agent : AGENT_VERSIONS.previous) < 0,
     cpu: get(m.cpu), mem: get(m.mem), diskFree: get(m.disk),
     sendFailures: get(m.fails), queue: get(m.queue),
+    gatewayId: a.gateway_id || null, tenant: a.tenant_id || 't_default',
     mode: enrolled ? a.mode || 'push' : null,
     pull: a.mode === 'pull' ? publicPull(a.pull) : null,
     addresses: Array.isArray(a.addresses) ? a.addresses : [],
@@ -192,7 +196,8 @@ export const agentsRouter = express.Router();
 
 agentsRouter.get('/agents', requirePerm('view'), wrap(async (req, res) => {
   const { rows } = await q(`SELECT a.*, t.name AS token_name, EXTRACT(EPOCH FROM (now() - a.last_seen))::int AS age
-                        FROM agents a LEFT JOIN agent_tokens t ON t.id = a.token_id ORDER BY a.host`);
+                        FROM agents a LEFT JOIN agent_tokens t ON t.id = a.token_id
+                        WHERE ($1 = 't_default' OR a.tenant_id = $1) ORDER BY a.host`, [tn(req)]);
   const [cpu, mem, disk, fails, queue, signals] = await Promise.all([
     safeByHost(cpuByHost()), safeByHost(memByHost()), safeByHost(diskFreeByHost()),
     safeByHost('sum by (host) (increase({__name__=~"otelcol_exporter_send_failed_(metric_points|log_records|spans)_total", agent="observaone"}[15m]))'),
@@ -224,7 +229,8 @@ agentsRouter.get('/agents', requirePerm('view'), wrap(async (req, res) => {
 // One agent with its full diagnostics
 agentsRouter.get('/agents/:id', requirePerm('view'), wrap(async (req, res, next) => {
   if (req.params.id === 'install-info') return next();
-  const a = await one(`SELECT a.*, t.name AS token_name FROM agents a LEFT JOIN agent_tokens t ON t.id = a.token_id WHERE a.id = $1`, [req.params.id]);
+  const a = await one(`SELECT a.*, t.name AS token_name FROM agents a LEFT JOIN agent_tokens t ON t.id = a.token_id
+                       WHERE a.id = $1 AND ($2 = 't_default' OR a.tenant_id = $2)`, [req.params.id, tn(req)]);
   if (!a) throw httpError(404, 'Agent not found.', { state: 'not_found' });
   // same values as the list: this host's CPU / memory / disk (missing or stale = null, shown as "-")
   const [cpu, mem, disk, signals] = await Promise.all([safeByHost(cpuByHost()), safeByHost(memByHost()), safeByHost(diskFreeByHost()), safeSignals()]);
@@ -238,7 +244,7 @@ const HOST_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/;
 agentsRouter.patch('/agents/:id', requirePerm('integrations.manage'), wrap(async (req, res) => {
   const host = String(req.body?.host || '').trim();
   if (!HOST_NAME_RE.test(host)) throw httpError(400, 'Name: letters, digits, . _ - (max 63), starting with a letter or digit.');
-  const cur = await one('SELECT host, platform, credential_hash FROM agents WHERE id = $1', [req.params.id]);
+  const cur = await one(`SELECT host, platform, credential_hash FROM agents WHERE id = $1 AND ($2 = 't_default' OR tenant_id = $2)`, [req.params.id, tn(req)]);
   if (!cur) throw httpError(404, 'Agent not found.');
   if (!cur.credential_hash) throw httpError(409, 'Only enrolled agents can be renamed here (older agents send their name themselves).');
   if (cur.host === host) return res.json({ ok: true, host });
@@ -259,7 +265,7 @@ agentsRouter.get('/agents/install-info', requirePerm('view'), wrap(async (req, r
 }));
 
 agentsRouter.post('/agents/:id/block', requirePerm('integrations.manage'), wrap(async (req, res) => {
-  const r = await one('UPDATE agents SET blocked = TRUE WHERE id = $1 RETURNING host', [req.params.id]);
+  const r = await one(`UPDATE agents SET blocked = TRUE WHERE id = $1 AND ($2 = 't_default' OR tenant_id = $2) RETURNING host`, [req.params.id, tn(req)]);
   if (!r) throw httpError(404, 'Agent not found.');
   seen.delete(req.params.id);
   forgetAgentCredential(req.params.id);
@@ -268,7 +274,7 @@ agentsRouter.post('/agents/:id/block', requirePerm('integrations.manage'), wrap(
 }));
 
 agentsRouter.post('/agents/:id/unblock', requirePerm('integrations.manage'), wrap(async (req, res) => {
-  const r = await one('UPDATE agents SET blocked = FALSE WHERE id = $1 RETURNING host', [req.params.id]);
+  const r = await one(`UPDATE agents SET blocked = FALSE WHERE id = $1 AND ($2 = 't_default' OR tenant_id = $2) RETURNING host`, [req.params.id, tn(req)]);
   if (!r) throw httpError(404, 'Agent not found.');
   seen.delete(req.params.id);
   forgetAgentCredential(req.params.id);
@@ -278,7 +284,7 @@ agentsRouter.post('/agents/:id/unblock', requirePerm('integrations.manage'), wra
 
 // Forget an agent that was uninstalled. If it is still sending with a valid token it comes back.
 agentsRouter.delete('/agents/:id', requirePerm('integrations.manage'), wrap(async (req, res) => {
-  const r = await one('DELETE FROM agents WHERE id = $1 RETURNING host', [req.params.id]);
+  const r = await one(`DELETE FROM agents WHERE id = $1 AND ($2 = 't_default' OR tenant_id = $2) RETURNING host`, [req.params.id, tn(req)]);
   if (!r) throw httpError(404, 'Agent not found.');
   seen.delete(req.params.id);
   forgetAgentCredential(req.params.id);
@@ -289,7 +295,7 @@ agentsRouter.delete('/agents/:id', requirePerm('integrations.manage'), wrap(asyn
 // ---- enrollment tokens ----
 agentsRouter.get('/agent-tokens', requirePerm('integrations.manage'), wrap(async (req, res) => {
   const { rows } = await q(`SELECT t.*, (SELECT count(*) FROM agents a WHERE a.token_id = t.id) AS agents
-                        FROM agent_tokens t ORDER BY t.revoked, t.created_at DESC`);
+                        FROM agent_tokens t WHERE ($1 = 't_default' OR t.tenant_id = $1) ORDER BY t.revoked, t.created_at DESC`, [tn(req)]);
   res.json({ tokens: rows.map(tokenRow), purgeMinutes: config.agent.tokenPurgeMinutes });
 }));
 
@@ -303,9 +309,9 @@ agentsRouter.post('/agent-tokens', requirePerm('integrations.manage'), wrap(asyn
   if (!Number.isInteger(days) || days < 0 || days > 3650) throw httpError(400, 'Expiry must be 0 (never) to 3650 days.');
   const prefix = crypto.randomBytes(4).toString('hex');
   const token = `oat_${prefix}_${randomToken(24)}`;
-  const r = await one(`INSERT INTO agent_tokens (name, prefix, token_hash, env, created_by, expires_at, max_uses)
-                       VALUES ($1,$2,$3,$4,$5, CASE WHEN $6::int > 0 THEN now() + make_interval(days => $6::int) END, $7) RETURNING *`,
-  [name, prefix, sha256(token), env, req.user.username, days, maxUses]);
+  const r = await one(`INSERT INTO agent_tokens (name, prefix, token_hash, env, created_by, expires_at, max_uses, tenant_id)
+                       VALUES ($1,$2,$3,$4,$5, CASE WHEN $6::int > 0 THEN now() + make_interval(days => $6::int) END, $7, $8) RETURNING *`,
+  [name, prefix, sha256(token), env, req.user.username, days, maxUses, tn(req)]);
   audit(req, 'agent.token.create', { name, prefix, env, expiresDays: days || null, maxUses });
   res.set('Cache-Control', 'no-store'); // the only time the token is ever sent
   res.json({ token, ...tokenRow(r) });
@@ -315,8 +321,8 @@ agentsRouter.post('/agent-tokens', requirePerm('integrations.manage'), wrap(asyn
 // so this can never cut off a working agent. Agents enrolled with it keep running (their token link becomes empty);
 // the audit log keeps the record of the token.
 agentsRouter.delete('/agent-tokens/:id/permanently', requirePerm('integrations.manage'), wrap(async (req, res) => {
-  const r = await one(`DELETE FROM agent_tokens WHERE id = $1 AND (revoked OR (expires_at IS NOT NULL AND expires_at < now()))
-                       RETURNING name, prefix`, [Number(req.params.id) || 0]);
+  const r = await one(`DELETE FROM agent_tokens WHERE id = $1 AND ($2 = 't_default' OR tenant_id = $2) AND (revoked OR (expires_at IS NOT NULL AND expires_at < now()))
+                       RETURNING name, prefix`, [Number(req.params.id) || 0, tn(req)]);
   if (!r) throw httpError(409, 'Only revoked or expired tokens can be deleted. Revoke the token first.');
   tokenCache.clear();
   audit(req, 'agent.token.delete', { name: r.name, prefix: r.prefix });
@@ -324,7 +330,7 @@ agentsRouter.delete('/agent-tokens/:id/permanently', requirePerm('integrations.m
 }));
 
 agentsRouter.delete('/agent-tokens/:id', requirePerm('integrations.manage'), wrap(async (req, res) => {
-  const r = await one('UPDATE agent_tokens SET revoked = TRUE, revoked_at = now() WHERE id = $1 AND NOT revoked RETURNING name, prefix', [Number(req.params.id) || 0]);
+  const r = await one(`UPDATE agent_tokens SET revoked = TRUE, revoked_at = now() WHERE id = $1 AND ($2 = 't_default' OR tenant_id = $2) AND NOT revoked RETURNING name, prefix`, [Number(req.params.id) || 0, tn(req)]);
   if (!r) throw httpError(404, 'Token not found or already revoked.');
   tokenCache.clear();
   seen.clear();

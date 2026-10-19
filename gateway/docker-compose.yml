@@ -1,0 +1,59 @@
+# ObservaOne Gateway: for a site whose servers cannot (or should not) reach the central ObservaOne directly.
+# Agents in the site use --server https://<this machine>; the gateway relays to the centre and keeps heartbeats and
+# metrics while the link is down (spooled to disk, replayed oldest first). See README.md.
+#
+#   cp .env.example .env    # GATEWAY_UPSTREAM, GATEWAY_TOKEN (Settings > Gateways in the central ObservaOne)
+#   docker compose up -d --build
+name: observaone-gateway
+
+services:
+  certs-init:
+    image: alpine/openssl:3.5.9
+    entrypoint: ["/bin/sh", "/scripts/make-cert.sh"]
+    environment:
+      SERVER_NAME: ${SERVER_NAME:-localhost}
+    volumes:
+      - ../scripts/make-cert.sh:/scripts/make-cert.sh:ro
+      - ./certs:/certs
+    restart: "no"
+
+  gateway:
+    build: ../observa-ui
+    image: observa-ui:2.0.0
+    # runs as the unprivileged node user; /data (spool, cached installers) belongs to it
+    entrypoint: ["/sbin/tini", "--", "sh", "-c", "mkdir -p /data && chown -R node:node /data && exec su-exec node node /app/src/gateway.js"]
+    environment:
+      GATEWAY_UPSTREAM: ${GATEWAY_UPSTREAM:?set GATEWAY_UPSTREAM in .env (https://your-central-observaone)}
+      GATEWAY_TOKEN: ${GATEWAY_TOKEN:?set GATEWAY_TOKEN in .env (Settings > Gateways)}
+      GATEWAY_CA_FILE: ${GATEWAY_CA_FILE:-}            # e.g. /certs/central.crt when the centre uses a self-signed certificate
+      GATEWAY_SPOOL_MB: ${GATEWAY_SPOOL_MB:-1024}
+      GATEWAY_SPOOL_HOURS: ${GATEWAY_SPOOL_HOURS:-2}   # the centre's Prometheus accepts samples up to 2 h late
+      GATEWAY_SPOOL_DIR: /data/spool
+      GATEWAY_CACHE_DIR: /data/agent-files
+      PORT: "8080"
+    volumes:
+      - gateway-data:/data
+      - ./certs:/certs:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:1.30-alpine
+    ports:
+      - "${HTTPS_PORT:-443}:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./certs:/etc/nginx/certs:ro
+    depends_on:
+      certs-init:
+        condition: service_completed_successfully
+      gateway:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  gateway-data:

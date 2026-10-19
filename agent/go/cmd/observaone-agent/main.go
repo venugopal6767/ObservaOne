@@ -8,6 +8,7 @@
 //	observaone-agent config migrate [--config FILE]   turn an old agent.conf into agent.yaml
 //	observaone-agent reload         [--config FILE]   apply config changes without a restart (SIGHUP)
 //	observaone-agent diagnostics    [--config FILE]   print the diagnostics bundle (what "Request diagnostics" uploads)
+//	observaone-agent verify-release --key PUB --sums SHA256SUMS --sig SHA256SUMS.sig   (used by the installer and updater)
 //	observaone-agent version
 package main
 
@@ -48,6 +49,9 @@ func main() {
 	cfgPath := fs.String("config", core.DefaultConfigPath(), "configuration file (agent.yaml; an old agent.conf is still read)")
 	tokenFile := fs.String("token-file", "", "enroll: read the enrollment token from this file (deleted after a successful enrollment)")
 	force := fs.Bool("force", false, "enroll: enroll again even if this agent already has an identity")
+	relKey := fs.String("key", "", "verify-release: the pinned release public key")
+	relSums := fs.String("sums", "", "verify-release: SHA256SUMS")
+	relSig := fs.String("sig", "", "verify-release: SHA256SUMS.sig")
 	_ = fs.Parse(args)
 	ring := core.NewLogRing(300)
 	log := slog.New(slog.NewJSONHandler(io.MultiWriter(os.Stderr, ring), &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -61,6 +65,10 @@ func main() {
 		}
 	case "diagnostics":
 		err = diagnostics(*cfgPath, log)
+	case "verify-release":
+		if err = core.VerifyRelease(*relKey, *relSums, *relSig); err == nil {
+			fmt.Println("signature OK")
+		}
 	case "enroll":
 		err = enroll(*cfgPath, *tokenFile, *force, log)
 	case "status":
@@ -93,7 +101,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: observaone-agent run|enroll|status|check-config|config show|config migrate|reload|diagnostics|version [--config FILE]")
+	fmt.Fprintln(os.Stderr, "usage: observaone-agent run|enroll|status|check-config|config show|config migrate|reload|diagnostics|verify-release|version [--config FILE]")
 }
 
 func diagnostics(cfgPath string, log *slog.Logger) error {
@@ -205,6 +213,9 @@ func status(cfgPath string) error {
 	fmt.Printf("Version    %s (pid %d, status written %s)\n", st.Version, st.PID, ago(&st.WrittenAt))
 	fmt.Printf("Server says %s\nHeartbeat  %s\nUpload     %s  (buffered %d, dropped %d, failures %d)\n",
 		nz(st.ServerStatus, "-"), ago(st.LastHeartbeatOK), ago(st.LastUploadOK), st.BufferedPayloads, st.DroppedPayloads, st.UploadFailures)
+	if st.DiskBuffered > 0 {
+		fmt.Printf("Disk buffer %d collections waiting\n", st.DiskBuffered)
+	}
 	if st.LastError != "" {
 		fmt.Printf("Last error %s\n", st.LastError)
 	}

@@ -8,10 +8,10 @@ global:
   external_labels:
     site: dc1            # change to your data-centre name
 
-# Agents push metrics; accept samples that arrive up to 30 min late (after a network outage)
+# Agents push metrics; accept samples that arrive up to 2 h late (after a network outage)
 storage:
   tsdb:
-    out_of_order_time_window: 30m
+    out_of_order_time_window: 2h      # late samples: agent buffers (memory 10 min, optional disk 2 h) and site gateways
 
 rule_files:
   - /etc/prometheus/rules/*.yml

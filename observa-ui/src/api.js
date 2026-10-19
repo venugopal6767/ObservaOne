@@ -1,4 +1,5 @@
 // All /api routes.
+import { tenantContext } from './tenancy.js';
 import express from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -56,6 +57,7 @@ api.post('/login/mfa', wrap(async (req, res) => {
 api.use(ssoRouter); // /auth/providers, /auth/:provider/login, /auth/:provider/callback
 
 api.use(requireAuth); // ---- everything below needs a session or an API key ----
+api.use(tenantContext); // the user's tenant scopes agent lists and every Prometheus query (tenancy.js)
 
 // ---- module guards: a disabled module's API answers 404, whatever the user's role ----
 // (role permissions are still checked on each route below; both must allow the request)
@@ -66,7 +68,7 @@ api.use('/traces', requireModule('traces'));
 api.use('/services', requireModule('services'));
 for (const p of ['/alerts', '/rules', '/silences', '/notifications']) api.use(p, requireModule('alerting'));
 api.use('/dashboards', requireModule('dashboards'));
-for (const p of ['/agents', '/agent-tokens', '/agent-config', '/targets']) api.use(p, requireModule('agents'));
+for (const p of ['/agents', '/agent-tokens', '/agent-config', '/targets', '/gateways']) api.use(p, requireModule('agents'));
 
 api.post('/logout', wrap(async (req, res) => {
   audit(req, 'logout');
@@ -212,7 +214,8 @@ api.get('/prom/targets', wrap(async (req, res) => {
   // from "Prometheus cannot scrape the host". Agents enrolled but without data yet are listed too.
   let enrolled = [], known = null;
   try {
-    enrolled = (await q("SELECT * FROM agents WHERE platform IN ('linux', 'windows')")).rows;
+    const t = req.user?.tenant || 't_default';
+    enrolled = (await q(`SELECT * FROM agents WHERE platform IN ('linux', 'windows') AND ($1 = 't_default' OR tenant_id = $1)`, [t])).rows;
     known = new Set((await q('SELECT id FROM agents')).rows.map((r) => r.id));
   } catch { /* database problem: show what Prometheus knows */ }
   const now = Date.now();

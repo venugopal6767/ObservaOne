@@ -253,4 +253,42 @@ export const EXTRA_MIGRATIONS = [
       CREATE INDEX IF NOT EXISTS agent_aliases_agent_idx ON agent_aliases (agent_id);
     `,
   },
+  {
+    id: 9,
+    name: 'agents: credential rotation, tenants, site gateways',
+    sql: `
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS credential_prev_hash TEXT;              -- still accepted until credential_prev_until
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS credential_prev_until TIMESTAMPTZ;
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS credential_issued_at TIMESTAMPTZ;
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS rotate_requested BOOLEAN NOT NULL DEFAULT FALSE;
+      UPDATE agents SET credential_issued_at = COALESCE(enrolled_at, first_seen) WHERE credential_hash IS NOT NULL AND credential_issued_at IS NULL;
+      CREATE TABLE IF NOT EXISTS tenants (
+        id          TEXT PRIMARY KEY,                       -- t_...
+        name        TEXT NOT NULL,
+        created_by  TEXT NOT NULL DEFAULT '',
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      INSERT INTO tenants (id, name, created_by) VALUES ('t_default', 'Default', 'migration-9') ON CONFLICT DO NOTHING;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 't_default' REFERENCES tenants(id);
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 't_default' REFERENCES tenants(id);
+      ALTER TABLE agent_tokens ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 't_default' REFERENCES tenants(id);
+      ALTER TABLE targets ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 't_default' REFERENCES tenants(id);
+      CREATE INDEX IF NOT EXISTS agents_tenant_idx ON agents (tenant_id, last_seen);
+      -- site gateways: an ObservaOne Gateway in a site that cannot reach this server directly relays its agents
+      CREATE TABLE IF NOT EXISTS gateways (
+        id          TEXT PRIMARY KEY,                       -- gw_...
+        name        TEXT NOT NULL,
+        token_hash  TEXT NOT NULL UNIQUE,
+        tenant_id   TEXT NOT NULL DEFAULT 't_default' REFERENCES tenants(id),
+        created_by  TEXT NOT NULL DEFAULT '',
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+        last_seen   TIMESTAMPTZ,
+        last_ip     TEXT NOT NULL DEFAULT '',
+        version     TEXT NOT NULL DEFAULT '',
+        stats       JSONB NOT NULL DEFAULT '{}'::jsonb,
+        revoked     BOOLEAN NOT NULL DEFAULT FALSE
+      );
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS gateway_id TEXT;                        -- set while it reports through a gateway
+    `,
+  },
 ];

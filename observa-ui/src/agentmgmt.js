@@ -80,8 +80,11 @@ export function mergeLayers(layers) {
   return { settings: out, from, version };
 }
 
+// Environment layers are per tenant: "prod" of one tenant never configures another tenant's agents.
+export const envScopeId = (tenant, env) => (!tenant || tenant === 't_default' ? env : `${tenant}/${env}`);
+
 export async function layersFor(agentRow) {
-  const keys = [['env', agentRow.env || ''], ['target', agentRow.target_id || ''], ['agent', agentRow.id]].filter(([, id]) => id);
+  const keys = [['env', agentRow.env ? envScopeId(agentRow.tenant_id, agentRow.env) : ''], ['target', agentRow.target_id || ''], ['agent', agentRow.id]].filter(([, id]) => id);
   if (!keys.length) return [];
   const { rows } = await q(`SELECT * FROM agent_configuration WHERE (scope, scope_id) IN (${keys.map((_, i) => `($${i * 2 + 1}, $${i * 2 + 2})`).join(', ')})`, keys.flat());
   return SCOPES.map((sc) => rows.find((r) => r.scope === sc)).filter(Boolean).map((r) => ({

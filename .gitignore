@@ -7,3 +7,6 @@ nginx/certs/*.crt
 # built by scripts/build-agent.sh (agent-build service)
 agent/files/observaone-agent-*
 agent/files/SHA256SUMS
+
+# agent release signing key for manual builds (scripts/build-agent.sh creates it; keep it private and backed up)
+.agent-keys/

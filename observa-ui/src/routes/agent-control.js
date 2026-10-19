@@ -23,6 +23,7 @@ import { ds } from '../datasources.js';
 import { parseExposition, writeToPrometheus } from '../promwrite.js';
 import { parseCertRequest, issueAgentCert } from '../agentpki.js';
 import { effectiveFor, toAgentMap, deliverActions, recordResult, storeDiagnostics, scrubBundle } from '../agentmgmt.js';
+import { DEFAULT_TENANT } from '../tenancy.js';
 
 // the version this server publishes in agent/files (AGENT_LATEST_VERSION overrides it, e.g. for a lab or a pinned release)
 export const AGENT_LATEST = /^\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(process.env.AGENT_LATEST_VERSION || '') ? process.env.AGENT_LATEST_VERSION : '1.3.0';
@@ -154,6 +155,8 @@ function parseHeartbeat(b) {
       lastUploadAgoSeconds: n(b.lastUploadAgoSeconds, 1e9),
       collectors, collectorErrors, hostLocked, mode, addresses, pull,
       configVersion: n(b.configVersion, 9e15),
+      diskBuffered: n(b.diskBuffered, 1e7),
+      diskBufferedBytes: n(b.diskBufferedBytes, 1e13),
       configError: text(b.configError, 300),
       lastError: text(b.lastError, 300),
       kernel: text(b.kernel, 100),
@@ -172,15 +175,29 @@ export async function agentForCredential(cred) {
   const id = `agt_${m[1]}`;
   let c = credCache.get(id);
   if (!c || c.exp < Date.now()) {
-    const row = await one('SELECT id, host, platform, blocked, credential_hash FROM agents WHERE id = $1 AND credential_hash IS NOT NULL', [id]);
+    const row = await one(`SELECT id, host, platform, blocked, credential_hash, credential_prev_hash, credential_prev_until, credential_issued_at,
+                                  rotate_requested, tenant_id, version
+                           FROM agents WHERE id = $1 AND credential_hash IS NOT NULL`, [id]);
     if (!row) { credCache.delete(id); return null; }
     c = { row, exp: Date.now() + 30_000 };
     if (credCache.size > 20_000) credCache.clear();
     credCache.set(id, c);
   }
-  const a = Buffer.from(sha256(cred)), b = Buffer.from(c.row.credential_hash);
-  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
-  return c.row;
+  const given = Buffer.from(sha256(cred));
+  const same = (h) => { const b = Buffer.from(h || ''); return given.length === b.length && crypto.timingSafeEqual(given, b); };
+  const r = c.row;
+  if (same(r.credential_hash)) {
+    // first use of a rotated credential: the old one keeps working for 10 more minutes, then never again
+    if (r.credential_prev_hash && !r.credential_prev_until) {
+      await q(`UPDATE agents SET credential_prev_until = now() + interval '10 minutes' WHERE id = $1 AND credential_prev_until IS NULL`, [r.id]);
+      credCache.delete(r.id);
+    }
+    return { ...r, usedPrevious: false };
+  }
+  if (r.credential_prev_hash && same(r.credential_prev_hash) && (!r.credential_prev_until || new Date(r.credential_prev_until) > new Date())) {
+    return { ...r, usedPrevious: true };
+  }
+  return null;
 }
 
 const bearer = (req) => (/^Bearer\s+(\S+)$/i.exec(req.get('authorization') || '') || [])[1] || '';
@@ -190,15 +207,57 @@ function pathMismatch(req, agent) {
   return req.params.id !== undefined && req.params.id !== agent.id;
 }
 
+// ---------------- site gateways ----------------
+// An ObservaOne Gateway relays agents of a site that cannot reach this server. It authenticates itself with
+// X-ObservaOne-Gateway (its own token, from Settings > Gateways); only then are its X-Gateway-Client-IP (the agent's
+// address) and X-Gateway-Received-At (when the gateway got a request it replays later) believed.
+const gwCache = new Map(); // token hash -> { row, exp }
+export const GATEWAY_TOKEN_RE = /^ogw_[0-9a-f]{8}_[A-Za-z0-9_-]{30,64}$/;
+export async function gatewayForToken(token) {
+  if (!GATEWAY_TOKEN_RE.test(token || '')) return null;
+  const h = sha256(token);
+  const c = gwCache.get(h);
+  if (c && c.exp > Date.now()) return c.row;
+  const row = await one('SELECT id, name, tenant_id FROM gateways WHERE token_hash = $1 AND NOT revoked', [h]);
+  if (gwCache.size > 1000) gwCache.clear();
+  gwCache.set(h, { row, exp: Date.now() + 30_000 });
+  return row;
+}
+export function forgetGateways() { gwCache.clear(); }
+
+async function identifyGateway(req, res, next) {
+  try {
+    const t = req.get('x-observaone-gateway');
+    if (t) {
+      req.gateway = await gatewayForToken(t);
+      if (!req.gateway) return fail(res, 401, 'invalid_gateway', 'Gateway token missing, wrong or revoked.');
+    }
+    next();
+  } catch (e) { next(e); }
+}
+
+// the agent's address: the gateway tells it (only an authenticated gateway is believed)
+function agentIp(req) {
+  const fwd = req.gateway ? String(req.get('x-gateway-client-ip') || '') : '';
+  return fwd && net.isIP(fwd) ? fwd : clientIp(req);
+}
+// when the request really happened: a gateway replaying after an outage says so (max 2 h back)
+function receivedAt(req) {
+  const t = req.gateway ? Number(req.get('x-gateway-received-at')) : NaN;
+  const now = Date.now();
+  return Number.isFinite(t) && t <= now && t > now - 2 * 3600_000 ? t : now;
+}
+
 // ---------------- router ----------------
 export const agentControlRouter = express.Router();
+agentControlRouter.use(['/agent/v1', '/v1/agents'], identifyGateway);
 // small bodies only (the main API allows 200 kB; nothing here needs more than a few hundred bytes)
 const json8k = express.json({ limit: '8kb', type: () => true });
 agentControlRouter.use(['/agent/v1/enroll', '/agent/v1/heartbeat', '/v1/agents/register'], json8k);
 agentControlRouter.use(/^\/v1\/agents\/agt_[0-9a-f]{20}\/(heartbeat|pull-certificate)$/, json8k);
 
 const enrollHandler = wrap(async (req, res) => {
-  const ip = clientIp(req);
+  const ip = agentIp(req);
   // Failed attempts are what an attacker produces: 10 per 10 min per address. Successful enrollments have a
   // much higher cap, so a whole fleet behind one NAT address can enroll at once.
   const failed = () => rateLimited(`enrollfail:${ip}`, Number.MAX_SAFE_INTEGER, 600_000);
@@ -239,7 +298,8 @@ const enrollHandler = wrap(async (req, res) => {
     if (v.machine) {
       reuse = (await c.query(`SELECT id, host, last_heartbeat FROM agents
                               WHERE platform = $1 AND machine_hash = $2 AND lower(host) = lower($3) AND credential_hash IS NOT NULL
-                              FOR UPDATE`, [v.platform, v.machine, v.hostname])).rows[0] || null;
+                                AND tenant_id = $4   -- never take over another tenant's record
+                              FOR UPDATE`, [v.platform, v.machine, v.hostname, t.tenant_id || DEFAULT_TENANT])).rows[0] || null;
       if (reuse && reuse.last_heartbeat && Date.now() - new Date(reuse.last_heartbeat).getTime() < config.agent.onlineSeconds * 1000) {
         return { deny: 'agent_online', status: 409, msg: `An agent for ${reuse.host} on this machine is online right now. Uninstall it there, or remove it on the Agents page, before enrolling again.` };
       }
@@ -260,9 +320,10 @@ const enrollHandler = wrap(async (req, res) => {
     if (reuse) {
       await c.query(`UPDATE agents SET credential_hash = $2, os = $3, arch = $4, version = $5, env = $6, role = $7, labels = $8,
                        kernel = $9, ip = $10, token_id = $11, enrolled_at = now(), last_heartbeat = NULL, blocked = FALSE, diag = '{}',
-                       mode = $12, pull = '{}', target_id = COALESCE($13, target_id)
+                       mode = $12, pull = '{}', target_id = COALESCE($13, target_id), tenant_id = $14,
+                       credential_prev_hash = NULL, credential_prev_until = NULL, credential_issued_at = now(), rotate_requested = FALSE
                      WHERE id = $1`,
-      [id, sha256(credential), v.os, v.arch, v.version, v.env, v.role, JSON.stringify(v.labels), v.kernel, ip, t.id, v.mode, target?.id || null]);
+      [id, sha256(credential), v.os, v.arch, v.version, v.env, v.role, JSON.stringify(v.labels), v.kernel, ip, t.id, v.mode, target?.id || null, t.tenant_id || DEFAULT_TENANT]);
       host = reuse.host;
     } else {
       // Another machine already uses this host name: never overwrite it, give this one a distinct name.
@@ -271,9 +332,9 @@ const enrollHandler = wrap(async (req, res) => {
         await c.query('SAVEPOINT ins');
         try {
           await c.query(`INSERT INTO agents (id, host, platform, os, arch, version, env, role, labels, kernel, ip, token_id,
-                                             credential_hash, machine_hash, mode, target_id, enrolled_at, first_seen, last_seen)
-                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16, now(), now(), now())`,
-          [id, name, v.platform, v.os, v.arch, v.version, v.env, v.role, JSON.stringify(v.labels), v.kernel, ip, t.id, sha256(credential), v.machine, v.mode, target?.id || null]);
+                                             credential_hash, machine_hash, mode, target_id, tenant_id, credential_issued_at, enrolled_at, first_seen, last_seen)
+                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17, now(), now(), now(), now())`,
+          [id, name, v.platform, v.os, v.arch, v.version, v.env, v.role, JSON.stringify(v.labels), v.kernel, ip, t.id, sha256(credential), v.machine, v.mode, target?.id || null, t.tenant_id || DEFAULT_TENANT]);
           await c.query('RELEASE SAVEPOINT ins');
           host = name;
           break;
@@ -317,7 +378,7 @@ export async function purgeNonces() {
 
 // Credential check shared by every per-agent call. Sends the error answer itself and returns null on failure.
 async function authAgent(req, res, failKey) {
-  const ip = clientIp(req);
+  const ip = agentIp(req);
   const cred = bearer(req);
   const agent = cred ? await agentForCredential(cred) : null;
   if (!agent) {
@@ -327,6 +388,9 @@ async function authAgent(req, res, failKey) {
     return null;
   }
   if (pathMismatch(req, agent)) { fail(res, 403, 'agent_mismatch', 'The agent id in the path is not this credential\'s agent.'); return null; }
+  if (req.gateway && req.gateway.tenant_id !== DEFAULT_TENANT && agent.tenant_id !== req.gateway.tenant_id) {
+    fail(res, 403, 'gateway_tenant', 'This gateway relays agents of another tenant only.'); return null;
+  }
   if (agent.blocked) { fail(res, 403, 'blocked', 'This agent is blocked on the Agents page.'); return null; }
   return agent;
 }
@@ -334,7 +398,8 @@ async function authAgent(req, res, failKey) {
 const lastWrite = new Map(); // agent id -> ms of the last heartbeat written (bursts are answered, not written)
 
 const heartbeatHandler = wrap(async (req, res) => {
-  const ip = clientIp(req);
+  const ip = agentIp(req);
+  const at = receivedAt(req); // a replayed heartbeat counts for when the gateway received it
   const agent = await authAgent(req, res, 'heartbeat');
   if (!agent) return;
   const p = parseHeartbeat(req.body);
@@ -362,15 +427,17 @@ const heartbeatHandler = wrap(async (req, res) => {
       uptimeSeconds: v.uptimeSeconds,
       agentIp: ip,
       mode: v.mode,
+      diskBuffered: v.diskBuffered,
+      diskBufferedBytes: v.diskBufferedBytes,
     };
     // server time only, and never backwards (GREATEST) even if requests arrive out of order
-    await q(`UPDATE agents SET last_heartbeat = GREATEST(COALESCE(last_heartbeat, now()), now()), heartbeats = heartbeats + 1,
+    await q(`UPDATE agents SET last_heartbeat = GREATEST(COALESCE(last_heartbeat, to_timestamp($12::float8 / 1000)), to_timestamp($12::float8 / 1000)), heartbeats = heartbeats + 1,
                version = COALESCE($2, version), boot_time = CASE WHEN $3::float8 IS NULL THEN boot_time ELSE to_timestamp($3::float8) END,
                kernel = CASE WHEN $4 = '' THEN kernel ELSE $4 END, diag = $5, ip = $6,
                mode = $7, pull = $8, addresses = $9,
-               config_applied = COALESCE($10, config_applied), config_error = $11
+               config_applied = COALESCE($10, config_applied), config_error = $11, gateway_id = $13
              WHERE id = $1`, [agent.id, v.version, v.bootTime, v.kernel, JSON.stringify(diag), ip, v.mode, JSON.stringify(v.pull || {}), JSON.stringify(v.addresses),
-      v.configVersion, v.configError || '']);
+      v.configVersion, v.configError || '', at, req.gateway?.id || null]);
     // address changes are kept as history (search, joining old data)
     if (prevRow && prevRow.ip && prevRow.ip !== ip) {
       await q(`INSERT INTO agent_aliases (agent_id, kind, value, seen_from) VALUES ($1, 'ip', $2, $3)`, [agent.id, prevRow.ip, prevRow.last_heartbeat]);
@@ -388,7 +455,13 @@ const heartbeatHandler = wrap(async (req, res) => {
     config: toAgentMap(eff.settings),
     configVersion: eff.version,
   };
-  if (compareVersions(v.version || row.version || '0.0.0', '1.3.0') >= 0) answer.actions = await deliverActions(agent.id);
+  if (compareVersions(v.version || row.version || '0.0.0', '1.3.0') >= 0) {
+    answer.actions = await deliverActions(agent.id);
+    // a new credential when an admin asked for it or the current one is older than AGENT_CREDENTIAL_DAYS
+    const days = config.agent.credentialDays;
+    const old = days > 0 && row.credential_issued_at && Date.now() - new Date(row.credential_issued_at).getTime() > days * 86_400_000;
+    if (!agent.usedPrevious && (row.rotate_requested || old)) answer.rotate = true;
+  }
   res.json(answer);
 });
 agentControlRouter.post('/v1/agents/:id/heartbeat', heartbeatHandler);
@@ -440,14 +513,43 @@ agentControlRouter.post('/v1/agents/:id/diagnostics', express.json({ limit: '1mb
   res.status(201).json({ ok: true, id: r.id });
 }));
 
+// Credential rotation (agent 1.3+). Only the CURRENT credential can ask; the old one stays valid until 10 minutes
+// after the new one is first used (see agentForCredential), so an agent that fails to save the new one is not lost.
+agentControlRouter.post('/v1/agents/:id/credential/rotate', json8k, wrap(async (req, res) => {
+  const agent = await authAgent(req, res, 'rotate');
+  if (!agent) return;
+  if (agent.usedPrevious) return fail(res, 409, 'use_current', 'Rotate with the current credential.');
+  if (rateLimited(`rotate:${agent.id}`, 5, 3_600_000)) { res.set('Retry-After', '600'); return fail(res, 429, 'rate_limited', 'Too many rotations (5 per hour).'); }
+  const credential = `oac_${agent.id.slice(4)}_${randomToken(32)}`;
+  await q(`UPDATE agents SET credential_prev_hash = credential_hash, credential_prev_until = NULL, credential_hash = $2,
+             credential_issued_at = now(), rotate_requested = FALSE WHERE id = $1`, [agent.id, sha256(credential)]);
+  forgetAgentCredential(agent.id);
+  audit(req, 'agent.credential.rotate', { username: 'agent', id: agent.id, host: agent.host });
+  res.set('Cache-Control', 'no-store');
+  res.json({ credential });
+}));
+
+// Gateway status (every 30 s): spool size, relayed agents, link state. Shown on Settings > Gateways.
+agentControlRouter.post('/v1/gateways/heartbeat', json8k, wrap(async (req, res) => {
+  const gw = await gatewayForToken(req.get('x-observaone-gateway'));
+  if (!gw) return fail(res, 401, 'invalid_gateway', 'Gateway token missing, wrong or revoked.');
+  const b = req.body && typeof req.body === 'object' ? req.body : {};
+  const n = (x) => (Number.isFinite(x) && x >= 0 ? x : null);
+  const stats = { agents: n(b.agents), spooledFiles: n(b.spooledFiles), spooledBytes: n(b.spooledBytes), pendingHeartbeats: n(b.pendingHeartbeats),
+    replayed: n(b.replayed), dropped: n(b.dropped), lastUpstreamError: text(b.lastUpstreamError, 300) };
+  await q('UPDATE gateways SET last_seen = now(), last_ip = $2, version = $3, stats = $4 WHERE id = $1',
+    [gw.id, clientIp(req), str(b.version, /^\d{1,3}\.\d{1,3}\.\d{1,3}$/, 16) || '', JSON.stringify(stats)]);
+  res.json({ ok: true, gatewayId: gw.id, name: gw.name });
+}));
+
 // ---------------- metrics intake ----------------
 // The agent POSTs the Prometheus text format (gzip). The server, not the agent, decides the identity labels:
 // host, agent_id, job, platform, env, role and the agent's custom labels come from the database, so one
 // agent can never write series that look like another host's. Then the samples go to Prometheus
 // (remote write). If Prometheus is down the agent gets 503 and keeps the data in its buffer;
 // heartbeats keep working because they do not depend on Prometheus.
-const IDENTITY_LABELS = new Set(['host', 'agent_id', 'job', 'instance', 'agent', 'os', 'platform', 'env', 'role', 'cluster']);
-const MAX_PAST_MS = 30 * 60_000; // Prometheus accepts out-of-order samples up to 30 min old (prometheus.yml)
+const IDENTITY_LABELS = new Set(['host', 'agent_id', 'job', 'instance', 'agent', 'os', 'platform', 'env', 'role', 'cluster', 'tenant', 'gateway']);
+const MAX_PAST_MS = 2 * 3600_000; // Prometheus accepts out-of-order samples up to 2 h old (prometheus.yml); agent disk buffers keep 2 h
 const lastDataWrite = new Map();
 
 export function remoteWriteUrl() {
@@ -464,6 +566,7 @@ export function relabel(series, agentRow, { nowMs, skewMs = 0 }) {
   };
   if (agentRow.env) fixed.env = agentRow.env;
   if (agentRow.role) fixed.role = agentRow.role;
+  if (agentRow.tenant_id && agentRow.tenant_id !== DEFAULT_TENANT) fixed.tenant = agentRow.tenant_id; // never from the agent
   const custom = agentRow.labels || {};
   const out = [];
   let dropped = 0, newest = 0;
@@ -493,9 +596,9 @@ const metricsHandler = wrap(async (req, res) => {
 
   const now = Date.now();
   const agentTime = Number(req.get('x-agent-time'));
-  const skew = Number.isFinite(agentTime) && agentTime > 0 ? now - agentTime : 0;
+  const skew = Number.isFinite(agentTime) && agentTime > 0 ? receivedAt(req) - agentTime : 0;
   const skewMs = Math.abs(skew) > 5000 ? skew : 0; // small differences are network delay, not clock error
-  const row = await one('SELECT id, host, platform, env, role, labels FROM agents WHERE id = $1', [agent.id]);
+  const row = await one('SELECT id, host, platform, env, role, labels, tenant_id FROM agents WHERE id = $1', [agent.id]);
   const { out, dropped } = relabel(parsed.series, row, { nowMs: now, skewMs });
   if (!out.length) return res.json({ accepted: 0, dropped: dropped + parsed.errors.length, reason: 'all samples too old or in the future' });
 

@@ -3,7 +3,7 @@
 // and anything locked by the host is shown as such. There is no command field anywhere.
 import { Fragment, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Download, FileSearch, RotateCcw, ArrowUpCircle, Settings2, Eye } from 'lucide-react';
+import { Download, FileSearch, RotateCcw, ArrowUpCircle, Settings2, Eye, KeyRound } from 'lucide-react';
 import { api } from '@/lib/api';
 import { ago, dateTime } from '@/lib/format';
 import { ErrorState, Field, InfoBox, Modal, Pill, StateView, Time, toast, useDialogs, type Tone } from '@/components/ui';
@@ -14,6 +14,7 @@ interface Layer { scope: 'env' | 'target' | 'agent'; scopeId: string; settings: 
 interface ActionRow { id: number; action: string; state: string; requestedBy: string; requestedAt: string; doneAt: string | null; result: { ok: boolean; message: string; version?: string; diagnosticsId?: number } | null }
 export interface Manage {
   agentId: string; enrolled: boolean; supportsActions: boolean; latest: string;
+  credential: { issuedAt: string | null; rotateRequested: boolean; previousValidUntil: string | null };
   config: { effective: Settings; from: Record<string, string>; version: number; applied: number; error: string; state: 'none' | 'applied' | 'pending' | 'refused'; layers: Layer[]; hostLocked: string[] };
   schema: Record<string, SettingSchema>;
   actions: ActionRow[];
@@ -147,6 +148,8 @@ export function AgentManagePanel({ id, host, canManage }: { id: string; host: st
           <div className="toolbar" style={{ marginBottom: 10, flexWrap: 'wrap' }}>
             <button className="btn btn-sm" disabled={busy('diagnostics')} onClick={() => act('diagnostics', 'Request diagnostics?', 'The agent uploads a bundle: status, settings in effect, collectors, system facts, connectivity checks and recent log lines. No secrets.')}><FileSearch size={13} />Request diagnostics</button>
             <button className="btn btn-sm" disabled={busy('restart')} onClick={() => act('restart', `Restart the agent on ${host}?`, 'The agent stops and systemd starts it again within about 10 seconds. Collection pauses briefly; nothing else on the host is touched.')}><RotateCcw size={13} />Restart agent</button>
+            <button className="btn btn-sm" disabled={m.credential.rotateRequested} title="The agent takes a new credential at its next heartbeat; the old one stops working 10 minutes after the new one is first used"
+              onClick={async () => { if (!(await confirm(`Rotate the credential of ${host}?`, 'The agent gets a new credential at its next heartbeat. Nothing to do on the host.', 'Rotate', false))) return; try { await api(`/agents/${encodeURIComponent(id)}/rotate-credential`, { method: 'POST' }); toast('Rotation requested'); refresh(); } catch (e) { toast((e as Error).message, 'err'); } }}><KeyRound size={13} />{m.credential.rotateRequested ? 'Rotation pending' : 'Rotate credential'}</button>
             <button className="btn btn-sm" disabled={busy('upgrade')} onClick={() => act('upgrade', `Upgrade ${host} to ${m.latest}?`, 'The updater on the host downloads the new version from this server, checks it, installs it and restarts the agent. If the new version does not report within 60 seconds it rolls back automatically.')}><ArrowUpCircle size={13} />Upgrade to {m.latest}</button>
           </div>
         )}
@@ -174,6 +177,7 @@ export function AgentManagePanel({ id, host, canManage }: { id: string; host: st
             ))}</ul>
           </>
         )}
+        {m.credential.issuedAt && <div className="dim" style={{ fontSize: 12, marginTop: 10 }}>Credential issued {ago(m.credential.issuedAt)}{m.credential.previousValidUntil ? ` · previous one valid until ${dateTime(Date.parse(m.credential.previousValidUntil)).slice(11, 16)}` : ''}</div>}
         {m.pastNames.length > 0 && <div className="dim" style={{ fontSize: 12, marginTop: 10 }}>Previously: {m.pastNames.map((p) => `${p.value} (${p.kind === 'ip' ? 'address' : 'name'})`).join(', ')}</div>}
       </section>
     </div>
@@ -248,6 +252,58 @@ export function FleetSettings({ canManage }: { canManage: boolean }) {
           <button className="btn" disabled={!/^[A-Za-z0-9._-]{1,64}$/.test(newEnv)} onClick={() => edit(newEnv, {})}>Set its settings</button>
         </div>
       )}
+    </section>
+  );
+}
+
+// ------------------------------------------------------------ site gateways (Agents -> Gateways)
+interface GatewayRow { id: string; name: string; createdBy: string; createdAt: string; lastSeen: string | null; lastIp: string; version: string; revoked: boolean; agents: number; online: boolean;
+  stats: { agents?: number; spooledFiles?: number; spooledBytes?: number; pendingHeartbeats?: number; replayed?: number; dropped?: number; lastUpstreamError?: string } }
+export function GatewaysPanel({ canManage }: { canManage: boolean }) {
+  const qc = useQueryClient();
+  const { open, confirm } = useDialogs();
+  const q = useQuery({ queryKey: ['gateways'], queryFn: () => api<{ gateways: GatewayRow[] }>('/gateways'), refetchInterval: 15000 });
+  const [name, setName] = useState('');
+  if (q.isPending) return <StateView kind="loading" skeleton="table" />;
+  if (q.isError) return <ErrorState error={q.error} what="Gateways" />;
+  const add = async () => {
+    try {
+      const r = await api<{ id: string; name: string; token: string }>('/gateways', { method: 'POST', body: { name } });
+      setName(''); qc.invalidateQueries({ queryKey: ['gateways'] });
+      open((close) => (
+        <Modal title={`Gateway ${r.name} created`} onClose={close} actions={[{ label: 'Done', primary: true }]}>
+          <p>Put this token in the gateway's <code>.env</code> as <code>GATEWAY_TOKEN</code>. It is shown only now.</p>
+          <pre className="code" style={{ overflowWrap: 'anywhere', whiteSpace: 'pre-wrap' }}>{r.token}</pre>
+          <p className="dim">Then on the gateway machine: <code>cd gateway && docker compose up -d --build</code> (see gateway/README.md).</p>
+        </Modal>
+      ));
+    } catch (e) { toast((e as Error).message, 'err'); }
+  };
+  return (
+    <section className="panel">
+      <div className="panel-head"><h3>Site gateways</h3></div>
+      <p className="muted" style={{ marginTop: 0 }}>A gateway relays the agents of a site that cannot reach this server, and keeps their heartbeats and metrics while the link is down (replayed when it is back). Agents there are installed with the gateway's address.</p>
+      <table className="tbl">
+        <thead><tr><th>Gateway</th><th>Status</th><th className="num">Agents</th><th>Spooled</th><th>Last seen</th><th /></tr></thead>
+        <tbody>
+          {q.data.gateways.map((g) => (
+            <tr key={g.id}>
+              <td><b>{g.name}</b><div className="dim" style={{ fontSize: 11 }}>{g.id}{g.version ? ` · ${g.version}` : ''}{g.lastIp ? ` · ${g.lastIp}` : ''}</div></td>
+              <td>{g.revoked ? <Pill tone="muted">revoked</Pill> : g.online ? <Pill tone="green">online</Pill> : g.lastSeen ? <Pill tone="red">not reporting</Pill> : <Pill tone="muted">never connected</Pill>}
+                {g.stats?.lastUpstreamError && <div className="c-orange" style={{ fontSize: 11 }}>{g.stats.lastUpstreamError}</div>}</td>
+              <td className="num">{g.agents}</td>
+              <td>{g.stats?.spooledFiles ? `${g.stats.spooledFiles} uploads (${Math.round((g.stats.spooledBytes || 0) / 1024)} kB)` : <span className="dim">nothing waiting</span>}{g.stats?.pendingHeartbeats ? ` · ${g.stats.pendingHeartbeats} heartbeats` : ''}</td>
+              <td className="dim">{g.lastSeen ? ago(g.lastSeen) : '-'}</td>
+              <td className="num">{canManage && !g.revoked && <button className="btn btn-sm" onClick={async () => {
+                if (!(await confirm(`Revoke ${g.name}?`, 'The gateway can no longer relay anything. Its agents stop reporting until they reach this server another way.', 'Revoke'))) return;
+                try { await api(`/gateways/${g.id}`, { method: 'DELETE' }); qc.invalidateQueries({ queryKey: ['gateways'] }); } catch (e) { toast((e as Error).message, 'err'); }
+              }}>Revoke</button>}</td>
+            </tr>
+          ))}
+          {!q.data.gateways.length && <tr><td colSpan={6} className="dim">No gateways. Most sites do not need one: agents talk to this server directly.</td></tr>}
+        </tbody>
+      </table>
+      {canManage && <div className="toolbar" style={{ marginTop: 10 }}><input className="input" placeholder="Gateway name, e.g. Mumbai DC" aria-label="Gateway name" value={name} onChange={(e) => setName(e.target.value)} style={{ width: 260 }} /><button className="btn" disabled={!name.trim()} onClick={add}>Add gateway</button></div>}
     </section>
   );
 }

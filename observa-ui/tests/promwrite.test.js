@@ -46,7 +46,7 @@ test('relabel: clock skew is corrected; too old / future samples are dropped', (
   // host clock 10 min behind: its "now" is server now - 600 s; skew +600 s brings it back
   let r = relabel([s(now - 600_000)], row, { nowMs: now, skewMs: 600_000 });
   assert.equal(r.out[0].ts, now);
-  r = relabel([s(now - 3_600_000), s(now + 3_600_000), s(now)], row, { nowMs: now });
+  r = relabel([s(now - 3 * 3_600_000), s(now + 3_600_000), s(now - 3_600_000), s(now)], row, { nowMs: now }); // 1 h late is kept (disk buffers, gateways), 3 h is not
   assert.equal(r.dropped, 2);
 });
 
@@ -57,4 +57,14 @@ test('remote write encoding round-trips through snappy', () => {
   // labels are written sorted by name: __name__ (0x5f) < a < b
   const s = body.toString('latin1');
   assert.ok(s.indexOf('__name__') < s.indexOf('\na') || s.indexOf('__name__') < s.indexOf('a\u0012'));
+});
+
+test('relabel: the tenant label comes from the agent record, never from the agent', () => {
+  const now = 1_800_000_000_000;
+  const series = [{ name: 'm', labels: { tenant: 't_evil', gateway: 'x' }, value: 1, ts: now }];
+  const a = relabel(series, { id: 'a', host: 'h', platform: 'linux', labels: {}, tenant_id: 't_acme' }, { nowMs: now });
+  assert.equal(a.out[0].labels.tenant, 't_acme');
+  assert.equal(a.out[0].labels.gateway, undefined);
+  const d = relabel(series, { id: 'a', host: 'h', platform: 'linux', labels: {}, tenant_id: 't_default' }, { nowMs: now });
+  assert.equal(d.out[0].labels.tenant, undefined, 'default tenant: no label (no change for existing series)');
 });

@@ -73,13 +73,15 @@ services:
     image: golang:1.24-alpine
     working_dir: /src
     entrypoint: ["/bin/sh", "/src/scripts/build-agent.sh"]
+    volumes:
+      - ./agent:/src/agent
+      - ./scripts:/src/scripts:ro
+      - agent-signing:/keys            # release signing key (created on first build; never served)
     environment:
       GOTOOLCHAIN: local
       GOCACHE: /tmp/gocache
       GOFLAGS: -mod=mod
-    volumes:
-      - ./agent:/src/agent
-      - ./scripts:/src/scripts:ro
+      RELEASE_KEY: /keys/release-signing.key
     restart: "no"
 
   # ---- Long-running services ---------------------------------------------
@@ -457,6 +459,7 @@ volumes:
   observa-db-data:
   ui-rules:
   agent-pull:
+  agent-signing:
   loki-data:
   tempo-data:
   agent-data:

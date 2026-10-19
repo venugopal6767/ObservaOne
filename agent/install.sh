@@ -23,6 +23,8 @@
 #   --nginx-status URL  read Nginx stub_status, e.g. http://127.0.0.1/nginx_status
 #   --jolokia NAME=URL  read a JVM through Jolokia (NAME becomes service_name), may be repeated
 #   --exporter NAME=URL read a local Prometheus exporter and forward it, may be repeated
+#   --disk-buffer       push mode: keep up to 100 MB / 2 h of collections on disk during long outages
+#   --trust-new-release-key  accept a release signing key that differs from the one pinned at first install
 #   --files-dir DIR     take the agent binary from this folder (no download)
 #   --docker            Docker host: uses the previous-generation installer (install-legacy.sh)
 #   --uninstall         stop and remove the agent (only its own files, user and service)
@@ -42,7 +44,7 @@ UNIT=/etc/systemd/system/observaone-agent.service
 
 SERVER="" TOKEN_FILE="" CA_SHA="" CA_FILE_IN="" HOST_NAME="" ENV_NAME="" ROLE="" FILES_DIR="" UNINSTALL=0 DOCKER=0
 MODE="" PULL_PORT="" PULL_ADVERTISE="" DOCKER_METRICS=0 NGINX_URL=""
-JOLOKIA=() EXPORTERS=()
+JOLOKIA=() EXPORTERS=() NEW_RELKEY=0 DISK_BUFFER=0
 LABELS=() PULL_ALLOW=()
 ORIG_ARGS=("$@")
 
@@ -70,10 +72,12 @@ while [ $# -gt 0 ]; do
     --nginx-status) NGINX_URL="$2"; shift 2 ;;
     --jolokia) JOLOKIA+=("$2"); shift 2 ;;
     --exporter) EXPORTERS+=("$2"); shift 2 ;;
+    --trust-new-release-key) NEW_RELKEY=1; shift ;;
+    --disk-buffer) DISK_BUFFER=1; shift ;;
     --files-dir) FILES_DIR="$2"; shift 2 ;;
     --docker) DOCKER=1; shift ;;
     --uninstall) UNINSTALL=1; shift ;;
-    -h|--help) sed -n '2,33p' "$0" 2>/dev/null || true; exit 0 ;;
+    -h|--help) sed -n '2,35p' "$0" 2>/dev/null || true; exit 0 ;;
     *) die "Unknown option: $1 (see --help)" ;;
   esac
 done
@@ -160,9 +164,43 @@ BIN="observaone-agent-linux-$ARCH"
 say "Installing ObservaOne Agent $AGENT_VERSION on $(hostname) ($OS_NAME, $ARCH)"
 if [ -n "$FILES_DIR" ]; then
   cp "$FILES_DIR/$BIN" "$TMP/$BIN" && cp "$FILES_DIR/SHA256SUMS" "$TMP/SHA256SUMS" || die "$BIN or SHA256SUMS missing in $FILES_DIR"
+  cp "$FILES_DIR/SHA256SUMS.sig" "$TMP/" 2>/dev/null || true; cp "$FILES_DIR/release.pub" "$TMP/" 2>/dev/null || true
 else
   "${SRV_CURL[@]}" -o "$TMP/SHA256SUMS" "$SERVER/agent/files/SHA256SUMS" || die "Cannot download SHA256SUMS from $SERVER/agent/files/ (did the server build the agent? see agent-build in docker compose)"
   "${SRV_CURL[@]}" -o "$TMP/$BIN" "$SERVER/agent/files/$BIN" || die "Cannot download $BIN from $SERVER/agent/files/"
+  "${SRV_CURL[@]}" -o "$TMP/SHA256SUMS.sig" "$SERVER/agent/files/SHA256SUMS.sig" 2>/dev/null || rm -f "$TMP/SHA256SUMS.sig"
+  "${SRV_CURL[@]}" -o "$TMP/release.pub" "$SERVER/agent/files/release.pub" 2>/dev/null || rm -f "$TMP/release.pub"
+fi
+# ---- release signature: SHA256SUMS must be signed by the release key pinned at the first install ----
+# Verifier: the agent ALREADY installed here (trusted), else openssl (3.x); on a first install without either,
+# the download is trusted through the pinned TLS connection and SHA256SUMS only, and the key is pinned now.
+PINNED="$ETC/release.pub"
+if [ -s "$PINNED" ] && [ -s "$TMP/release.pub" ] && ! cmp -s "$PINNED" "$TMP/release.pub"; then
+  [ "$NEW_RELKEY" -eq 1 ] || die "The server's release signing key differs from the one pinned at install ($PINNED). If the server was rebuilt on purpose, run again with --trust-new-release-key; otherwise stop: this may not be your server's build."
+  warn "Trusting a new release signing key (--trust-new-release-key)"
+  PINNED_NEW=1
+fi
+KEY="$PINNED"; { [ -s "$KEY" ] && [ "${PINNED_NEW:-0}" -eq 0 ]; } || KEY="$TMP/release.pub"
+if [ -s "$TMP/SHA256SUMS.sig" ] && [ -s "$KEY" ]; then
+  IV="$("$PREFIX/bin/observaone-agent" version 2>/dev/null | awk '{print $2}')"
+  # the installed agent verifies if it knows the command (1.3+; older ones answer with their usage line)
+  VR="$("$PREFIX/bin/observaone-agent" verify-release 2>&1 || true)"
+  if [ -n "$IV" ] && ! grep -q '^usage:' <<<"$VR"; then
+    "$PREFIX/bin/observaone-agent" verify-release --key "$KEY" --sums "$TMP/SHA256SUMS" --sig "$TMP/SHA256SUMS.sig" >/dev/null 2>&1 \
+      || die "SIGNATURE MISMATCH: SHA256SUMS was not signed by the release key. Not installing."
+    ok "Release signature verified (by the installed agent $IV)"
+  elif command -v openssl >/dev/null && openssl pkeyutl -help 2>&1 | grep -q rawin; then
+    base64 -d "$TMP/SHA256SUMS.sig" > "$TMP/sig.bin" 2>/dev/null || die "Release signature unreadable. Not installing."
+    openssl pkeyutl -verify -pubin -inkey "$KEY" -rawin -in "$TMP/SHA256SUMS" -sigfile "$TMP/sig.bin" >/dev/null 2>&1 \
+      || die "SIGNATURE MISMATCH: SHA256SUMS was not signed by the release key. Not installing."
+    ok "Release signature verified (openssl)"
+  else
+    warn "No signature verifier on this host yet (first install, openssl < 3): trusting the pinned TLS connection and SHA256SUMS; later upgrades are signature-checked"
+  fi
+elif [ -s "$PINNED" ]; then
+  die "The server publishes no release signature, but this host pinned a release key. Not installing an unsigned build."
+else
+  warn "The server publishes no release signature (older server build): trusting the pinned TLS connection and SHA256SUMS"
 fi
 WANT="$(awk -v f="$BIN" '$2==f || $2=="*"f {print $1}' "$TMP/SHA256SUMS")"
 GOT="$(sha256sum "$TMP/$BIN" | cut -d' ' -f1)"
@@ -266,11 +304,12 @@ if [ "$NEW_CONF" -eq 0 ] && { [ ${#LABELS[@]} -gt 0 ] || [ -n "$PULL_PORT$PULL_A
   chown root:"$SVC_USER" "$OPT"; chmod 0640 "$OPT"
 fi
 # application collectors from the command line go to their own file (re-running with none keeps the file)
-if [ "$DOCKER_METRICS" -eq 1 ] || [ -n "$NGINX_URL" ] || [ ${#JOLOKIA[@]} -gt 0 ] || [ ${#EXPORTERS[@]} -gt 0 ]; then
+if [ "$DOCKER_METRICS" -eq 1 ] || [ -n "$NGINX_URL" ] || [ ${#JOLOKIA[@]} -gt 0 ] || [ ${#EXPORTERS[@]} -gt 0 ] || [ "$DISK_BUFFER" -eq 1 ]; then
   COL="$ETC/conf.d/60-collectors.yaml"
   {
     echo "# Written by the installer from its command-line options (last run: $(date -u +%Y-%m-%dT%H:%MZ))."
     if [ "$DOCKER_METRICS" -eq 1 ]; then printf 'docker:\n  enabled: true\n'; fi
+    if [ "$DISK_BUFFER" -eq 1 ]; then printf 'disk_buffer:\n  enabled: true\n  max_mb: 100\n  max_age: 2h\n'; fi
     if [ -n "$NGINX_URL" ]; then printf 'nginx:\n  status_url: "%s"\n' "$NGINX_URL"; fi
     if [ ${#JOLOKIA[@]} -gt 0 ]; then echo "jolokia:"; for j in "${JOLOKIA[@]}"; do printf '  %s: "%s"\n' "${j%%=*}" "${j#*=}"; done; fi
     if [ ${#EXPORTERS[@]} -gt 0 ]; then echo "exporters:"; for j in "${EXPORTERS[@]}"; do printf '  %s: "%s"\n' "${j%%=*}" "${j#*=}"; done; fi
@@ -285,6 +324,8 @@ if [ "$DOCKER_METRICS" -eq 1 ]; then
   fi
 fi
 if [ -n "$CA_FILE" ] && [ "$CA_FILE" != "$ETC/ca.crt" ]; then install -m 0644 "$CA_FILE" "$ETC/ca.crt"; fi
+# pin the release signing key (first install, or --trust-new-release-key): the updater only installs builds it signed
+if [ -s "$TMP/release.pub" ] && { [ ! -s "$ETC/release.pub" ] || [ "${PINNED_NEW:-0}" -eq 1 ]; }; then install -m 0644 "$TMP/release.pub" "$ETC/release.pub"; fi
 [ -s "$ETC/ca.crt" ] && ysetkey ca_file "$ETC/ca.crt"
 chown root:"$SVC_USER" "$CONF"; chmod 0640 "$CONF"
 
@@ -401,7 +442,11 @@ CURL=(curl -fsS --connect-timeout 15 --max-time 300); [ -n "$CA" ] && CURL+=(--c
 TMPD="$(mktemp -d /var/tmp/observaone-upgrade.XXXXXX)"; chmod 0755 "$TMPD"   # check-config runs as the agent user
 "${CURL[@]}" -o "$TMPD/SHA256SUMS" "$SERVER/agent/files/SHA256SUMS" || result false "cannot download SHA256SUMS from $SERVER" "$OLDV"
 "${CURL[@]}" -o "$TMPD/$BIN" "$SERVER/agent/files/$BIN" || result false "cannot download $BIN from $SERVER" "$OLDV"
-# SIGNATURE-CHECK
+if [ -s "$ETC/release.pub" ]; then
+  "${CURL[@]}" -o "$TMPD/SHA256SUMS.sig" "$SERVER/agent/files/SHA256SUMS.sig" || result false "the server publishes no signature for this build; nothing changed" "$OLDV"
+  "$AGENT" verify-release --key "$ETC/release.pub" --sums "$TMPD/SHA256SUMS" --sig "$TMPD/SHA256SUMS.sig" >/dev/null 2>&1 \
+    || result false "SHA256SUMS is not signed by the pinned release key; nothing changed" "$OLDV"
+fi
 WANT="$(awk -v f="$BIN" '$2==f || $2=="*"f {print $1}' "$TMPD/SHA256SUMS")"; GOT="$(sha256sum "$TMPD/$BIN" | cut -d' ' -f1)"
 [ -n "$WANT" ] && [ "$WANT" = "$GOT" ] || result false "checksum mismatch for $BIN; nothing changed" "$OLDV"
 chmod 0755 "$TMPD/$BIN"

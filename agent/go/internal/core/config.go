@@ -81,6 +81,12 @@ type Config struct {
 	NginxURL      string            // stub_status URL, e.g. http://127.0.0.1/nginx_status (empty = off)
 	Jolokia       map[string]string // service name -> Jolokia URL (JVM metrics)
 	Exporters     map[string]string // name -> URL of a local Prometheus exporter to read and forward
+
+	// Disk buffer (push mode): collections that do not fit the memory buffer, or are still waiting when the agent
+	// stops, are kept in <state_dir>/buffer (gzip), bounded by size and age, and sent oldest first. Host-only.
+	DiskBuffer    bool
+	DiskBufferMB  int
+	DiskBufferTTL time.Duration
 }
 
 var labelValRE = regexp.MustCompile(`^[A-Za-z0-9._-]{0,64}$`)
@@ -93,7 +99,8 @@ func Defaults() *Config {
 		CollectInterval: 15 * time.Second, HeartbeatInterval: 30 * time.Second, BufferPayloads: 40, Version: 1,
 		ProcPath: "/proc", SysPath: "/sys", RootPath: "/", Sources: map[string]string{},
 		Mode: "push", PullListen: DefaultPullListen,
-		ProcessesTop: 10, DockerSocket: "/var/run/docker.sock", Jolokia: map[string]string{}, Exporters: map[string]string{}}
+		ProcessesTop: 10, DockerSocket: "/var/run/docker.sock", Jolokia: map[string]string{}, Exporters: map[string]string{},
+		DiskBufferMB: 100, DiskBufferTTL: 2 * time.Hour}
 }
 
 // RemoteKeys are the ONLY settings the ObservaOne server may change (from the UI). Everything that decides
@@ -247,6 +254,14 @@ func (c *Config) set(k, v, src string) error {
 		c.Mode = v
 	case v == "" && (k == "processes" || k == "docker" || k == "nginx" || k == "jolokia" || k == "exporters"):
 		return nil // a section header with nothing under it
+	case k == "disk_buffer" && v == "":
+		return nil
+	case k == "disk_buffer" || k == "disk_buffer.enabled":
+		c.DiskBuffer, err = strconv.ParseBool(v)
+	case k == "disk_buffer.max_mb":
+		c.DiskBufferMB, err = strconv.Atoi(v)
+	case k == "disk_buffer.max_age":
+		c.DiskBufferTTL, err = time.ParseDuration(v)
 	case k == "processes.top":
 		c.ProcessesTop, err = strconv.Atoi(v)
 	case k == "docker.enabled":
@@ -321,7 +336,9 @@ func (c *Config) Effective() [][3]string {
 		{"mode", c.Mode, src("mode")}, {"pull.listen", c.PullListen, src("pull.listen")},
 		{"pull.advertise", c.PullAdvertise, src("pull.advertise")}, {"pull.allow", c.pullAllowString(), src("pull.allow")},
 		{"processes.top", strconv.Itoa(c.ProcessesTop), src("processes.top")}, {"docker.enabled", strconv.FormatBool(c.DockerEnabled), src("docker.enabled")},
-		{"docker.socket", c.DockerSocket, src("docker.socket")}, {"nginx.status_url", c.NginxURL, src("nginx.status_url")},
+		{"docker.socket", c.DockerSocket, src("docker.socket")}, {"nginx.status_url", redactURL(c.NginxURL), src("nginx.status_url")},
+		{"disk_buffer.enabled", strconv.FormatBool(c.DiskBuffer), src("disk_buffer.enabled")}, {"disk_buffer.max_mb", strconv.Itoa(c.DiskBufferMB), src("disk_buffer.max_mb")},
+		{"disk_buffer.max_age", c.DiskBufferTTL.String(), src("disk_buffer.max_age")},
 	}
 	lk := make([]string, 0, len(c.Labels))
 	for k := range c.Labels {
@@ -433,6 +450,12 @@ func (c *Config) Validate() error {
 		if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
 			return fmt.Errorf("listen must be a loopback address (e.g. 127.0.0.1:9109); host metrics are not exposed to the network (use mode: pull for Prometheus scrapes)")
 		}
+	}
+	if c.DiskBufferMB < 1 || c.DiskBufferMB > 2048 {
+		return fmt.Errorf("disk_buffer.max_mb must be 1..2048")
+	}
+	if c.DiskBufferTTL < time.Minute || c.DiskBufferTTL > 2*time.Hour {
+		return fmt.Errorf("disk_buffer.max_age must be 1m..2h (the server accepts samples up to 2 h late)")
 	}
 	if c.ProcessesTop < 0 || c.ProcessesTop > 50 {
 		return fmt.Errorf("processes.top must be 0..50 (0 = off)")

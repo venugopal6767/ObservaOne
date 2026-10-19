@@ -1,5 +1,6 @@
 // Data sources: where each kind of data comes from. Always real backends: there is no demo/sample mode.
 // Admin changes are stored in PostgreSQL; a small in-memory copy keeps lookups fast.
+import { currentTenant, isScoped, scopePromQL, scopeMatchers } from './tenancy.js';
 import { config } from './config.js';
 import { q } from './db.js';
 import { httpError } from './auth.js';
@@ -91,6 +92,17 @@ export async function fetchJson(url, { method = 'GET', body, headers = {}, timeo
 // ---- Prometheus ----
 export async function prom(path, params = {}) {
   const base = ds('prometheus').url;
+  // a user of a non-default tenant only ever queries that tenant's series (tenancy.js)
+  const tenant = currentTenant();
+  if (isScoped(tenant)) {
+    params = { ...params };
+    try {
+      if (params.query) params.query = scopePromQL(params.query, tenant);
+      if (path.startsWith('/api/v1/label') || path === '/api/v1/series') params['match[]'] = scopeMatchers(params['match[]'], tenant);
+    } catch (e) {
+      throw httpError(400, `This query cannot be run for your organisation: ${e.message}`);
+    }
+  }
   const body = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) {
     if (Array.isArray(v)) v.forEach((x) => body.append(k, x));
@@ -102,6 +114,9 @@ export async function prom(path, params = {}) {
     ? { method: 'POST', body, headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
     : {});
   if (r?.status !== 'success') throw httpError(400, r?.error || 'Prometheus error');
+  if (isScoped(tenant) && path === '/api/v1/targets' && r.data?.activeTargets) {
+    return { ...r.data, activeTargets: r.data.activeTargets.filter((t) => t.labels?.tenant === tenant), droppedTargets: [] };
+  }
   return r.data;
 }
 

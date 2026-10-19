@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -112,5 +113,46 @@ func TestDiagnosticsHasNoSecrets(t *testing.T) {
 	}(), " "))
 	if !strings.Contains(s, "credential") || strings.Contains(s, "oac_00000000000000000001_"+strings.Repeat("A", 43)) {
 		t.Fatalf("state dir listing must name files, never show their content: %s", s)
+	}
+}
+
+func TestDiskBufferSpillPruneOrder(t *testing.T) {
+	a := testAgent(t, "disk_buffer:\n  enabled: true\n  max_mb: 1\n  max_age: 10m\nbuffer_payloads: 1\n")
+	now := time.Now().UnixMilli()
+	for i, at := range []int64{now - 20*60_000, now - 3000, now - 2000, now - 1000} { // the first is older than max_age
+		if err := a.spill(payload{text: strings.Repeat("x 1\n", 10+i), collectedAt: at}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a.diskPrune(0)
+	l := a.diskList()
+	if len(l) != 3 || l[0].collectedAt != now-3000 || l[2].collectedAt != now-1000 {
+		t.Fatalf("expected the 3 recent entries, oldest first: %+v", l)
+	}
+	// size cap: 300 kB of noise each, 1 MB limit -> the oldest go first
+	noise := make([]byte, 300<<10)
+	for i := range noise {
+		noise[i] = byte('a' + (i*7919)%26)
+	}
+	for i := 0; i < 5; i++ {
+		_ = a.spill(payload{text: string(noise) + strconv.Itoa(i), collectedAt: now + int64(i)})
+	}
+	_, sz := a.diskStats()
+	if sz > 1<<20 {
+		t.Fatalf("disk buffer over its cap: %d bytes", sz)
+	}
+	// memory overflow goes to disk instead of being dropped
+	b := testAgent(t, "disk_buffer:\n  enabled: true\nbuffer_payloads: 1\n")
+	b.wake = make(chan struct{}, 1)
+	b.collectOnce()
+	b.collectOnce()
+	b.collectOnce()
+	if n, _ := b.diskStats(); n != 2 || len(b.buf) != 1 || b.dropped != 0 {
+		t.Fatalf("overflow: disk=%d mem=%d dropped=%d", n, len(b.buf), b.dropped)
+	}
+	// stopping keeps the rest
+	b.spillAll()
+	if n, _ := b.diskStats(); n != 3 || len(b.buf) != 0 {
+		t.Fatalf("spillAll: disk=%d mem=%d", n, len(b.buf))
 	}
 }

@@ -2,8 +2,10 @@
 // "private" ones run after the sign-in check.
 import { agentsRouter } from './agents.js';
 import { agentMgmtRouter } from './agent-mgmt.js';
+import { tenantsRouter } from './tenants.js';
+import { gatewaysRouter } from './gateways.js';
 
 export const extraRouters = {
   public: [],
-  private: [agentsRouter, agentMgmtRouter],
+  private: [agentsRouter, agentMgmtRouter, tenantsRouter, gatewaysRouter],
 };
