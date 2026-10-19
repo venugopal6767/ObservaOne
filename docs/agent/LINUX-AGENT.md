@@ -380,7 +380,7 @@ an `agent.conf`) was upgraded by the installer: the config was converted, the id
   refused), Prometheus scrapes with the same labels as push, diagnosis for a firewalled pull port, blocked outbound
   HTTPS and a stopped agent, rename reaching Prometheus through discovery, config migration.
 * Also checked by hand: `pull.allow` excluding ObservaOne → "The agent refuses ObservaOne".
-* `agent/test/scenarios.sh` against the 1.2 agent in push mode: see below.
+* `agent/test/scenarios.sh` against the 1.2 agent in push mode: **41 PASS, 0 FAIL** (old 1.1 paths still served).
 * Go unit tests (YAML parser, migration round trip, certificate renewal rules), server unit tests (diagnosis matrix,
   discovery, replay check, the CA): all pass.
 
