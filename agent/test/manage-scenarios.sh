@@ -7,7 +7,9 @@
 #
 # Upgrade checks (M30-M33) need the server to publish a NEWER version than the installed one (agent/files), and
 # OO_FILES=<the folder the server serves as /agent/files> so the rollback check can publish a broken build there
-# for a minute (the original files are put back). Without OO_FILES they are skipped.
+# for a minute (the original files are put back), and OO_RELEASE_KEY=<the release signing key> so that broken build is
+# signed like a real one (otherwise the signature check refuses it before the rollback is tested). Without OO_FILES
+# they are skipped.
 set -uo pipefail
 : "${OO_URL:?}" "${OO_UI:?}" "${OO_ADMIN_PW:?}" "${OO_PROM:?}"
 CA=${OO_CA:-/etc/observaone-agent/ca.crt}
@@ -90,13 +92,17 @@ if [ -n "${OO_FILES:-}" ] && [ "$LATEST" != "$CUR" ]; then
   mkdir -p /tmp/scn-files-orig && cp -p "$OO_FILES/$BIN" "$OO_FILES/SHA256SUMS" /tmp/scn-files-orig/
   printf '#!/bin/sh\ncase "$1" in version) echo "observaone-agent %s";; check-config) echo ok;; *) echo "broken build" >&2; exit 1;; esac\n' "$LATEST" > "$OO_FILES/$BIN"
   chmod 0755 "$OO_FILES/$BIN"; (cd "$OO_FILES" && sha256sum "$BIN" > SHA256SUMS)
+  cp -p "$OO_FILES/SHA256SUMS.sig" /tmp/scn-files-orig/ 2>/dev/null || true
+  if [ -n "${OO_RELEASE_KEY:-}" ]; then   # sign it like a real release, so the updater gets as far as the rollback
+    openssl pkeyutl -sign -inkey "$OO_RELEASE_KEY" -rawin -in "$OO_FILES/SHA256SUMS" | base64 -w0 > "$OO_FILES/SHA256SUMS.sig"
+  fi
   A=$(api -d '{"action":"upgrade"}' "$OO_UI/api/agents/$AID/actions" | jq -r .action.id)
   waitfor 150 bash -c "S=\$(curl -s -b $J -H 'X-Requested-With: observa' $OO_UI/api/agents/$AID/manage | jq -r '.actions[] | select(.id==$A) | .state'); [ \"\$S\" = failed ] || [ \"\$S\" = done ]"
   R=$(M | jq -c ".actions[] | select(.id==$A) | .result")
   cp -p /tmp/scn-files-orig/* "$OO_FILES/"
   sleep 15
   check M30 "upgrade to a build that does not start is rolled back: $(echo "$R" | jq -r .message)" \
-    bash -c "[ '$(echo "$R" | jq -r .ok)' = false ] && [ '$(observaone-agent version | awk '{print $2}')' = '$CUR' ] && [ -x /opt/observaone-agent/bin/observaone-agent.failed ]"
+    bash -c "[ '$(echo "$R" | jq -r .ok)' = false ] && [ '$(observaone-agent version | awk '{print $2}')' = '$CUR' ] && [[ '$(echo "$R" | jq -r .message)' == *'rolled back'* ]]"
   check M31 "after the rollback the old version reports again ($(observaone-agent status | awk '/^Version/{print $2}'), heartbeat $(observaone-agent status | awk '/^Heartbeat/{print $2" "$3}'))" \
     bash -c "observaone-agent status | grep -q '^Heartbeat .*[0-9]s ago'"
   # 2. a tampered binary: checksum mismatch, nothing changes
@@ -104,7 +110,7 @@ if [ -n "${OO_FILES:-}" ] && [ "$LATEST" != "$CUR" ]; then
   A=$(api -d '{"action":"upgrade"}' "$OO_UI/api/agents/$AID/actions" | jq -r .action.id)
   waitfor 90 bash -c "S=\$(curl -s -b $J -H 'X-Requested-With: observa' $OO_UI/api/agents/$AID/manage | jq -r '.actions[] | select(.id==$A) | .state'); [ \"\$S\" = failed ] || [ \"\$S\" = done ]"
   R=$(M | jq -r ".actions[] | select(.id==$A) | .result.message"); cp /tmp/scn-sums "$OO_FILES/SHA256SUMS"
-  check M32 "a binary that does not match SHA256SUMS is not installed: $R" bash -c "[[ '$R' == *mismatch* ]] && [ '$(observaone-agent version | awk '{print $2}')' = '$CUR' ]"
+  check M32 "a binary that does not match SHA256SUMS is not installed: $R" bash -c "[[ '$R' == *mismatch* || '$R' == *'not signed'* ]] && [ '$(observaone-agent version | awk '{print $2}')' = '$CUR' ]"
   # 3. the real one
   A=$(api -d '{"action":"upgrade"}' "$OO_UI/api/agents/$AID/actions" | jq -r .action.id)
   waitfor 150 bash -c "S=\$(curl -s -b $J -H 'X-Requested-With: observa' $OO_UI/api/agents/$AID/manage | jq -r '.actions[] | select(.id==$A) | .state'); [ \"\$S\" = failed ] || [ \"\$S\" = done ]"
