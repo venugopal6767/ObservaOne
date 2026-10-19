@@ -40,9 +40,16 @@ containers can run; an advisory lock lets one write per round. History is kept 3
 * **Alerting → All Alerts / Firing / Pending / Resolved**: Severity, Alert Name, State (with Silenced / Muted),
   Host / Resource, Current Value (peak for resolved ones), Duration, Team, Actions (Details, Silence). Filters: text,
   severity, and the time range at the top for resolved alerts (active ones always show).
-* **Create alert**: name, PromQL query, threshold (comparison + value), *for* duration, severity, labels, notification
-  policy (team), runbook link, message. **Test query** runs it now: "Query is valid – N instances affected" (with the
-  matching hosts) or the parse error. Nothing is created until *Create alert*.
+* **Create alert**, no query needed (default, *Pick a metric*): choose a metric by name (CPU usage, Memory usage,
+  Disk usage, Network, Load, pod / service / database / VMware metrics ...), the environment and server (or all), the
+  threshold (comparison + value, with the metric's unit; defaults from the metric's critical level), *for*, severity
+  and team. The form says it in a sentence ("Alert when CPU usage is above 80% on all servers for 5 minutes") and shows
+  **Values now**: each server's current value, the ones past the threshold in red, "N would alert now". ObservaOne
+  writes the PromQL with the same definitions as every screen (keeps `host` and `env`), names the alert
+  (`HighCPUUsage`, editable), and adds a readable summary ("CPU usage is 94.0% on server-01 (> 80%)").
+  *Advanced (PromQL)* keeps the query field, prefilled from the picked metric, with **Test query** ("Query is valid –
+  N instances affected" or the parse error). Labels and runbook link are under *More options*. Nothing is created
+  until *Create alert*.
 * **Alert details** (`/alerting/alert/<id>`): state, host, current value, threshold, started, duration, *for*, team;
   tabs Overview, Metric Graph (the rule's value for this alert's series with the threshold line, from 1 h before it
   started), History (earlier episodes of the same alert), Labels, Annotations; on the right the server now (CPU, top
@@ -107,7 +114,7 @@ New rules can use them: `observaone:host_cpu_usage:percent > 85`.
 | `tests/alerting.test.js` | alert identity, threshold parsing, rule expressions, units, rows (state, duration, value) | 5 / 5 |
 | `tests/alerting-api.test.js` (needs `OBSERVA_TEST_URL`) | test query (valid / parse error / range vector refused), rule with team + labels + runbook, tenant rule scoped and labelled, tenant cannot see or open platform alerts, tenant silences, per-state lists and details | 6 / 6 |
 | `tests/metrics-consistency.test.js` | ran with the rest (94 tests: 92 pass, 1 skip) | the process-share check failed once while the lab agent was cut off and catching up; passed on rerun, not reproduced: watch it |
-| Lab, live | HighCPU created from the form → Pending → Firing → Resolved after the rule was removed (peak 68.9%, fired 2 m 34 s); grouping 10 servers → 1 notification; `team=infra` → infra-team | pass |
+| Lab, live | metric form: CPU usage on prod-app-01 > 50% -> "1 would alert now (67.7%)", rule stored with the generated query + `unit=percent`, Pending within one evaluation; HighCPU created from the form → Pending → Firing → Resolved after the rule was removed (peak 68.9%, fired 2 m 34 s); grouping 10 servers → 1 notification; `team=infra` → infra-team | pass |
 
 ## Next
 

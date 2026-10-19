@@ -460,3 +460,12 @@ a.list-row:hover, button.list-row:hover { background: var(--accent-soft); text-d
 .rel-row > :nth-child(3) { margin-left: auto; }
 .alert-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .row-current td { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.create-alert .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; margin-bottom: 14px; }
+.create-alert .seg button { background: transparent; border: 0; color: var(--text-2); padding: 8px 14px; font: inherit; cursor: pointer; min-height: 36px; }
+.create-alert .seg button.on { background: var(--accent); color: #fff; }
+.alert-sentence { border: 1px dashed var(--border-2); border-radius: 8px; padding: 10px 12px; margin: 2px 0 14px; color: var(--text-2); }
+.alert-now { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; margin: 0 0 14px; background: var(--panel-2); }
+.alert-now-head { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; margin-bottom: 8px; }
+.alert-now-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.alert-now-item { display: inline-flex; gap: 8px; align-items: baseline; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--border); font-size: 12.5px; }
+.alert-now-item.hit { border-color: var(--red); background: color-mix(in srgb, var(--red) 12%, transparent); }
