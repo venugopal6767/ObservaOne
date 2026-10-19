@@ -10,7 +10,7 @@ groups:
           summary: "Server {{ $labels.host }} is down"
           description: "Prometheus cannot reach {{ $labels.host }} ({{ $labels.instance }})."
       - alert: HighCPU
-        expr: (100 - avg by (host, env, os) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 85 or (100 - avg by (host, env, os) (rate(windows_cpu_time_total{mode="idle"}[5m])) * 100) > 85
+        expr: 100 * (1 - sum by (host, env, os) (rate(node_cpu_seconds_total{mode="idle"}[5m])) / sum by (host, env, os) (rate(node_cpu_seconds_total[5m]))) > 85 or 100 * (1 - sum by (host, env, os) (rate(windows_cpu_time_total{mode="idle",core!=""}[5m])) / sum by (host, env, os) (rate(windows_cpu_time_total{core!=""}[5m]))) > 85
         for: 5m
         labels: { severity: critical }
         annotations:

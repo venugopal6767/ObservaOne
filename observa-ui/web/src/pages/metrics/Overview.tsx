@@ -46,7 +46,7 @@ function OverviewBody() {
   const targets = usePlainQuery(['ov-targets'], () => api<Target[]>('/prom/targets'), { enabled: moduleOn('infrastructure') });
   const alerts = usePlainQuery(['ov-alerts'], () => api<{ active: number; critical: number; warning?: number }>('/alerts/count'), { enabled: moduleOn('alerting') });
   const hostNow = useRangeQuery(['ov-hostnow', JSON.stringify(f)], async () => {
-    const q = (m: string) => api<{ result: PromVector }>('/prom/query', { query: { query: buildQuery({ metric: m, filters: f }) } }).then((r) => new Map(r.result.map((x) => [x.metric.host, Number(x.value[1])]))).catch(() => new Map<string, number>());
+    const q = (m: string) => api<{ result: PromVector }>('/prom/query', { query: { query: buildQuery({ metric: m, filters: f }) } }).then((r) => new Map(r.result.map((x) => [x.metric.host, Number(x.value[1])])));  // a failure is an error, never "all healthy"
     const [c, m, d] = await Promise.all([q('cpu'), q('memory'), q('disk')]);
     return { c, m, d };
   });
@@ -61,6 +61,7 @@ function OverviewBody() {
   for (const s of servers) {
     if (s.health === 'down') { health.critical++; continue; }
     if (s.health !== 'up') { health.unknown++; continue; }
+    if (!hostNow.data) { health.unknown++; continue; } // values not known (loading or the query failed): not counted as healthy
     const vals = [['cpu', hostNow.data?.c.get(s.host)], ['memory', hostNow.data?.m.get(s.host)], ['disk', hostNow.data?.d.get(s.host)]] as const;
     let level = 0;
     for (const [id, v] of vals) { const d = metricById(id)!; if (v === undefined) continue; if (v >= d.crit!) level = 2; else if (v >= d.warn! && level < 1) level = 1; }
@@ -118,7 +119,7 @@ function OverviewBody() {
           )}
         </Panel>
         <Panel title="Top 5 hosts by CPU usage" right={<Link to={explore('cpu', '&topk=10')}>View all</Link>}>
-          {hostNow.isPending ? <StateView kind="loading" /> : !topCpu.length ? <StateView kind="empty" title="No CPU data for these filters" /> : (
+          {hostNow.isPending ? <StateView kind="loading" /> : hostNow.isError ? <ErrorState error={hostNow.error} what="CPU by host" /> : !topCpu.length ? <StateView kind="empty" title="No CPU data for these filters" /> : (
             <div className="hbars">
               {topCpu.map(([h, v]) => (
                 <Link key={h} className="hbar" to={`/metrics/host/${encodeURIComponent(h)}`} title={`Open ${h}`}>

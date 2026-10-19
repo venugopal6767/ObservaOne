@@ -21,6 +21,7 @@ import { cpuByHost, memByHost, diskFreeByHost, SERVERS_UP } from './queries.js';
 import { classifyService, summarizeServices, agentHostHealth } from './health.js';
 import { MODULES, enabledModules, moduleSettings, setEnabledModules, requireModule } from './modules.js';
 import { describeAgent } from './routes/agent-control.js';
+import { currentTenant } from './tenancy.js';
 
 export const api = express.Router();
 api.use(express.json({ limit: '200kb' }));
@@ -121,34 +122,39 @@ api.get('/prom/query_range', wrap(async (req, res) => {
   res.json(await prom('/api/v1/query_range', { query: req.query.query, start, end, step }));
 }));
 
-let metricNamesCache = { at: 0, names: [] };
+// Caches are kept per tenant: prom() scopes each tenant's lookup, so one tenant's answer is never served to another.
+const metricNamesCache = new Map(); // tenant -> { at, names }
 api.get('/prom/metric-names', wrap(async (req, res) => {
-  if (Date.now() - metricNamesCache.at > 60_000) {
-    metricNamesCache = { at: Date.now(), names: await prom('/api/v1/label/__name__/values') };
+  const t = currentTenant();
+  let c = metricNamesCache.get(t);
+  if (!c || Date.now() - c.at > 60_000) {
+    c = { at: Date.now(), names: await prom('/api/v1/label/__name__/values') };
+    metricNamesCache.set(t, c);
   }
-  res.json(metricNamesCache.names);
+  res.json(c.names);
 }));
 
 // Every metric seen in the last hour, with its type and description when Prometheus knows them
 // (scraped data has them; pushed data often does not: the type is then guessed from the name).
-let metricCatalogCache = { at: 0, list: [] };
+const metricCatalogCache = new Map(); // tenant -> { at, list }
 api.get('/prom/metric-catalog', wrap(async (req, res) => {
-  if (Date.now() - metricCatalogCache.at > 60_000) {
+  const t = currentTenant();
+  if (!metricCatalogCache.has(t) || Date.now() - metricCatalogCache.get(t).at > 60_000) {
     const end = nowSec();
     const [names, meta] = await Promise.all([
       prom('/api/v1/label/__name__/values', { start: end - 3600, end }),
       prom('/api/v1/metadata').catch(() => ({})),
     ]);
-    metricCatalogCache = {
+    metricCatalogCache.set(t, {
       at: Date.now(),
       list: names.map((name) => {
         const m = meta?.[name]?.[0] || {};
         return { name, type: m.type || (/_total$/.test(name) ? 'counter' : /_bucket$/.test(name) ? 'histogram' : 'gauge'), help: m.help || '' };
       }),
-    };
+    });
   }
   res.set('Cache-Control', 'no-store');
-  res.json(metricCatalogCache.list);
+  res.json(metricCatalogCache.get(t).list);
 }));
 
 api.get('/prom/label-values', wrap(async (req, res) => {
@@ -595,15 +601,20 @@ function rowToDash(r) {
   };
 }
 
+// Custom dashboards belong to a tenant: users of the default tenant (the platform) see all of them, users of another
+// tenant only their own; another tenant's dashboard answers 404 for reading, changing and deleting alike.
+const DASH_TENANT = `($T = 't_default' OR tenant_id = $T)`;
+const dashScope = (n) => DASH_TENANT.replaceAll('$T', `$${n}`);
+
 async function customDashboards() {
-  const { rows } = await q('SELECT * FROM dashboards ORDER BY lower(title)');
+  const { rows } = await q(`SELECT * FROM dashboards WHERE ${dashScope(1)} ORDER BY lower(title)`, [currentTenant()]);
   return rows.map(rowToDash);
 }
 
 async function findDashboard(id) {
   const b = builtinDashboards().find((x) => x.id === id);
   if (b) return b;
-  const r = await one('SELECT * FROM dashboards WHERE id = $1', [id]);
+  const r = await one(`SELECT * FROM dashboards WHERE id = $1 AND ${dashScope(2)}`, [id, currentTenant()]);
   return r ? rowToDash(r) : null;
 }
 
@@ -636,16 +647,16 @@ api.post('/dashboards', requirePerm('dashboards.edit'), wrap(async (req, res) =>
   const { title, description = '' } = req.body || {};
   if (!title || String(title).length > 60) throw httpError(400, 'Title is required (max 60 chars).');
   const id = `c-${crypto.randomBytes(5).toString('hex')}`;
-  const r = await one(`INSERT INTO dashboards (id, title, description, owner) VALUES ($1,$2,$3,$4) RETURNING *`,
-    [id, String(title), String(description).slice(0, 200), req.user.username]);
+  const r = await one(`INSERT INTO dashboards (id, title, description, owner, tenant_id) VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+    [id, String(title), String(description).slice(0, 200), req.user.username, currentTenant()]);
   audit(req, 'dashboard.create', { id, title: r.title });
   res.json(rowToDash(r));
 }));
 
 api.post('/dashboards/:id/panels', requirePerm('dashboards.edit'), wrap(async (req, res) => {
   const panel = cleanPanel(req.body);
-  const r = await one(`UPDATE dashboards SET panels = panels || $2::jsonb, updated_at = now() WHERE id = $1 RETURNING *`,
-    [req.params.id, JSON.stringify([panel])]);
+  const r = await one(`UPDATE dashboards SET panels = panels || $2::jsonb, updated_at = now() WHERE id = $1 AND ${dashScope(3)} RETURNING *`,
+    [req.params.id, JSON.stringify([panel]), currentTenant()]);
   if (!r) throw httpError(404, 'Only custom dashboards can be changed. System dashboards are managed as files.');
   audit(req, 'dashboard.panel.add', { id: r.id, title: panel.title });
   res.json(rowToDash(r));
@@ -654,14 +665,14 @@ api.post('/dashboards/:id/panels', requirePerm('dashboards.edit'), wrap(async (r
 api.delete('/dashboards/:id/panels/:idx', requirePerm('dashboards.edit'), wrap(async (req, res) => {
   const idx = Number(req.params.idx);
   if (!Number.isInteger(idx) || idx < 0) throw httpError(400, 'Bad panel index');
-  const r = await one(`UPDATE dashboards SET panels = panels - $2::int, updated_at = now() WHERE id = $1 RETURNING *`, [req.params.id, idx]);
+  const r = await one(`UPDATE dashboards SET panels = panels - $2::int, updated_at = now() WHERE id = $1 AND ${dashScope(3)} RETURNING *`, [req.params.id, idx, currentTenant()]);
   if (!r) throw httpError(404, 'Dashboard not found');
   audit(req, 'dashboard.panel.delete', { id: r.id, idx });
   res.json(rowToDash(r));
 }));
 
 api.delete('/dashboards/:id', requirePerm('dashboards.edit'), wrap(async (req, res) => {
-  const r = await q('DELETE FROM dashboards WHERE id = $1', [req.params.id]);
+  const r = await q(`DELETE FROM dashboards WHERE id = $1 AND ${dashScope(2)}`, [req.params.id, currentTenant()]);
   if (!r.rowCount) throw httpError(404, 'Only custom dashboards can be deleted.');
   audit(req, 'dashboard.delete', { id: req.params.id });
   res.json({ ok: true });

@@ -13,6 +13,7 @@ import { useApp, usePlainQuery, useRangeQuery } from '@/app/AppContext';
 import { ErrorState, HealthPill, PageHead, Panel, Pill, Select, StateView, Tabs, TableWrap, Time, useDialogs, type Tone } from '@/components/ui';
 import { Sparkline, TimeChart, LegendRow } from '@/components/charts';
 import { AlertWizard } from '@/components/AlertWizard';
+import { ProcessTable, useProcesses } from '@/components/ProcessTable';
 
 type Tab = 'overview' | 'cpu' | 'memory' | 'disk' | 'network' | 'processes' | 'services' | 'alerts' | 'logs';
 interface Target { job: string; host: string; os: string; env: string; role: string; health: string; lastScrape: string | null; instance: string; source: string; lastError: string }
@@ -59,11 +60,11 @@ export default function HostView() {
       <HealthStrip host={host} scrape={t} />
       <div className="toolbar"><Tabs items={tabs} active={tab} onChange={setTab} label="Host sections" /></div>
 
-      {tab === 'overview' && <HostOverview f={f} h={h} win={win} onAlert={alert} />}
+      {tab === 'overview' && <HostOverview f={f} host={host} win={win} onAlert={alert} />}
       {tab === 'cpu' && (
         <>
           <CpuTab f={f} onAlert={() => alert('cpu')} />
-          <div style={{ marginTop: 14 }}><ChartPanel title="CPU by core" unit="percent" max={100} f={f} query={win ? `100 - rate(windows_cpu_time_total{mode="idle", ${h}}[5m]) * 100` : `100 - rate(node_cpu_seconds_total{mode="idle", ${h}}[5m]) * 100`} legend={win ? 'core {{core}}' : 'core {{cpu}}'} metric="cpu" /></div>
+          <div style={{ marginTop: 14 }}><ChartPanel title="CPU by core" unit="percent" max={100} f={f} query={win ? `clamp(100 * (1 - sum by (core) (rate(windows_cpu_time_total{mode="idle", ${h}}[5m])) / sum by (core) (rate(windows_cpu_time_total{${h}}[5m]))), 0, 100)` : `clamp(100 * (1 - sum by (cpu) (rate(node_cpu_seconds_total{mode="idle", ${h}}[5m])) / sum by (cpu) (rate(node_cpu_seconds_total{${h}}[5m]))), 0, 100)`} legend={win ? 'core {{core}}' : 'core {{cpu}}'} metric="cpu" /></div>
         </>
       )}
       {tab === 'memory' && <ChartPanel title="Memory used and available" unit="bytes" f={f} metric="memory"
@@ -73,7 +74,7 @@ export default function HostView() {
       {tab === 'network' && <ChartPanel title="Network traffic per interface (in + out)" unit="Bps" f={f} metric="network"
         query={win ? `rate(windows_net_bytes_total{${h}}[5m])` : `rate(node_network_receive_bytes_total{device!~"lo|veth.*|docker.*|br-.*", ${h}}[5m]) + rate(node_network_transmit_bytes_total{device!~"lo|veth.*|docker.*|br-.*", ${h}}[5m])`}
         legend={win ? '{{nic}}' : '{{device}}'} />}
-      {tab === 'processes' && <Processes h={h} win={win} full />}
+      {tab === 'processes' && <Processes host={host} win={win} full />}
       {tab === 'services' && <Services h={h} win={win} />}
       {tab === 'alerts' && <HostAlerts host={host} onCreate={() => alert('cpu')} />}
       {tab === 'logs' && <HostLogs h={h} />}
@@ -81,7 +82,7 @@ export default function HostView() {
   );
 }
 
-function HostOverview({ f, h, win, onAlert }: { f: Filters; h: string; win: boolean; onAlert: (m: string) => void }) {
+function HostOverview({ f, host, win, onAlert }: { f: Filters; host: string; win: boolean; onAlert: (m: string) => void }) {
   const pal = palette();
   const cpu = useRange('cpu', buildQuery({ metric: 'cpu', filters: f }));
   const mem = useRange('mem', buildQuery({ metric: 'memory', filters: f }));
@@ -112,7 +113,7 @@ function HostOverview({ f, h, win, onAlert }: { f: Filters; h: string; win: bool
             </>
           )}
         </Panel>
-        <Processes h={h} win={win} />
+        <Processes host={host} win={win} />
       </div>
     </>
   );
@@ -157,26 +158,9 @@ function DiskTab({ h, win, f }: { h: string; win: boolean; f: Filters }) {
   );
 }
 
-function Processes({ h, win, full }: { h: string; win: boolean; full?: boolean }) {
-  const n = full ? 25 : 6;
-  const cpu = useInstant('pcpu', win ? `topk(${n}, sum by (process) (rate(windows_process_cpu_time_total{${h}}[5m])) * 100)` : `topk(${n}, sum by (groupname) (rate(namedprocess_namegroup_cpu_seconds_total{${h}}[5m])) * 100)`);
-  const mem = useInstant('pmem', win ? `sum by (process) (windows_process_working_set_private_bytes{${h}})` : `sum by (groupname) (namedprocess_namegroup_memory_bytes{memtype="resident", ${h}})`);
-  const memMap = new Map((mem.data?.result || []).map((r) => [r.metric.process || r.metric.groupname, Number(r.value[1])]));
-  const rows = (cpu.data?.result || []).map((r) => ({ name: r.metric.process || r.metric.groupname || '?', cpu: Number(r.value[1]), mem: memMap.get(r.metric.process || r.metric.groupname) })).sort((a, b) => b.cpu - a.cpu);
-  return (
-    <Panel title="Top processes by CPU" right={<Pill tone="muted" title="Current value">Now</Pill>}>
-      {cpu.isPending ? <StateView kind="loading" skeleton="table" /> : cpu.isError ? <ErrorState error={cpu.error} what="Processes" /> : !rows.length ? (
-        <StateView kind="empty" title="No process data for this host" text={win ? 'Enable the process collector in windows_exporter to see processes.' : 'Install process-exporter (namedprocess) next to node_exporter to see processes.'} />
-      ) : (
-        <TableWrap label="Processes">
-          <table className="tbl compact">
-            <thead><tr><th>Process</th><th className="num">CPU</th><th className="num">Memory</th></tr></thead>
-            <tbody>{rows.map((r) => <tr key={r.name}><td className="mono">{r.name}</td><td className={`num ${toneClass(r.cpu)}`}>{r.cpu.toFixed(1)}%</td><td className="num">{r.mem === undefined ? '-' : fmt(r.mem, 'bytes')}</td></tr>)}</tbody>
-          </table>
-        </TableWrap>
-      )}
-    </Panel>
-  );
+function Processes({ host, win, full }: { host: string; win: boolean; full?: boolean }) {
+  const q = useProcesses(host, win, full ? 25 : 6);
+  return <Panel title="Top processes by CPU" right={<Pill tone="muted" title="Current value">Now</Pill>}><ProcessTable q={q} win={win} /></Panel>;
 }
 
 function HostLogs({ h }: { h: string }) {

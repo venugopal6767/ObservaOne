@@ -310,4 +310,13 @@ export const EXTRA_MIGRATIONS = [
       CREATE INDEX IF NOT EXISTS agents_removed_cred_idx ON agents_removed (credential_hash);
     `,
   },
+  {
+    id: 11,
+    name: 'dashboards belong to a tenant',
+    sql: `
+      -- custom dashboards were shared by every tenant (list, view, edit, delete); existing ones stay with the platform
+      ALTER TABLE dashboards ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 't_default' REFERENCES tenants(id);
+      CREATE INDEX IF NOT EXISTS dashboards_tenant_idx ON dashboards (tenant_id);
+    `,
+  },
 ];

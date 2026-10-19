@@ -68,42 +68,88 @@ function either(m: Matchers, linux: string, windows: string): string {
 }
 const sel = (inner: string) => `{${inner.replace(/^, /, '')}}`;
 
+// ---- one definition per server metric, shared by every screen (Overview, Explorer, host view, Investigation) ----
+// The same rules as the server's own queries (src/queries.js, unit-tested in tests/queries.test.js):
+//   - CPU = 1 - idle time / total time, both rates over the same window. "100 - rate(idle) * 100" assumes the counters
+//     cover the whole 5-minute window and reads 20 to 80 points too high for 5 minutes after any gap (new host,
+//     agent restart, outage, Prometheus restart); the ratio cancels that out. The ObservaOne Go agent sends its own
+//     computed value (observaone_cpu_utilization_ratio), used as is.
+//   - Pushed series get no stale marker when an agent stops: values must be from the last FRESH seconds, otherwise
+//     the server has no value (a gap, never its last value repeated).
+//   - Each server is reduced to ONE value first (labels host, env, role), and only then combined (avg / max / ...)
+//     across servers, so Linux and Windows servers of the same environment are combined together.
+export const FRESH = 120;
+const PER_HOST = 'host, env, role';
+const NOT_GO = 'agent_id=""'; // node_* series that are not from the Go agent (it sends its own computed CPU value)
+const LNX_FS = 'fstype!~"tmpfs|overlay|squashfs|ramfs|nsfs|fuse.*"';
+const WIN_VOL = 'volume!~"HarddiskVolume.*"';
+const recent = (metric: string) => `last_over_time(${metric}[${FRESH}s])`;
+const freshHosts = (metric: string) => `(max by (host) (timestamp(${metric})) > time() - ${FRESH})`;
+const cpuRatio = (counter: string, idleSel: string, allSel: string) =>
+  `(clamp(100 * (1 - sum by (${PER_HOST}) (rate(${counter}${idleSel}[5m])) / sum by (${PER_HOST}) (rate(${counter}${allSel}[5m]))), 0, 100)`
+  + ` and on (host) ${freshHosts(`${counter}${idleSel}`)})`;
+/** CPU used per server, % of all its cores */
+export function cpuPerHost(m: Matchers): string {
+  const linux = `clamp(max by (${PER_HOST}) (${recent(`observaone_cpu_utilization_ratio${sel(m.host)}`)}) * 100, 0, 100)`
+    + ` or ${cpuRatio('node_cpu_seconds_total', sel(`mode="idle", ${NOT_GO}${m.host}`), sel(`${NOT_GO}${m.host}`))}`;
+  const windows = cpuRatio('windows_cpu_time_total', sel(`mode="idle", core!=""${m.host}`), sel(`core!=""${m.host}`));
+  return either(m, linux, windows);
+}
+/** memory in use per server, % of physical memory */
+export function memPerHost(m: Matchers): string {
+  return either(m,
+    `100 * (1 - max by (${PER_HOST}) (${recent(`node_memory_MemAvailable_bytes${sel(m.host)}`)}) / max by (${PER_HOST}) (${recent(`node_memory_MemTotal_bytes${sel(m.host)}`)}))`,
+    `100 * (1 - max by (${PER_HOST}) (${recent(`windows_memory_available_bytes${sel(m.host)}`)}) / max by (${PER_HOST}) (${recent(`windows_memory_physical_total_bytes${sel(m.host)}`)}))`);
+}
+/** space used on the FULLEST filesystem / volume of each server, % */
+export function diskPerHost(m: Matchers): string {
+  return either(m,
+    `max by (${PER_HOST}) (100 - 100 * ${recent(`node_filesystem_avail_bytes${sel(`${LNX_FS}${m.host}`)}`)} / ${recent(`node_filesystem_size_bytes${sel(`${LNX_FS}${m.host}`)}`)})`,
+    `max by (${PER_HOST}) (100 - 100 * ${recent(`windows_logical_disk_free_bytes${sel(`${WIN_VOL}${m.host}`)}`)} / ${recent(`windows_logical_disk_size_bytes${sel(`${WIN_VOL}${m.host}`)}`)})`);
+}
+/** bytes received + sent per second per server, physical interfaces only */
+export function netPerHost(m: Matchers): string {
+  const dev = 'device!~"lo|veth.*|docker.*|br-.*"';
+  return either(m,
+    `(sum by (${PER_HOST}) (rate(node_network_receive_bytes_total${sel(`${dev}${m.host}`)}[5m]) + rate(node_network_transmit_bytes_total${sel(`${dev}${m.host}`)}[5m]))`
+    + ` and on (host) ${freshHosts(`node_network_receive_bytes_total${sel(`${dev}${m.host}`)}`)})`,
+    `(sum by (${PER_HOST}) (rate(windows_net_bytes_total${sel(m.host)}[5m]))`
+    + ` and on (host) ${freshHosts(`windows_net_bytes_total${sel(m.host)}`)})`);
+}
+/** process CPU as % of the whole server: cores used by the process / cores of the server x 100 */
+export const procCpuShare = (counter: string, name: string, s: string, idleSel: string, cpuCounter: string) =>
+  `100 * sum by (${name}, host) (rate(${counter}${s}[5m])) / on (host) group_left count by (host) (${cpuCounter}${idleSel})`;
+/** combine per-server values: one line per `by` */
+const perHost = (inner: string, by: string, fn: Combine) => `${fn} by (${by}) (${inner})`;
+
 export const METRICS: MetricDef[] = [
   {
     id: 'cpu', name: 'CPU usage', category: 'system', also: ['linux', 'windows'], unit: 'percent', by: 'host', byOptions: ['host', 'env', 'role'],
-    description: 'How busy the processors are, as a percentage of all cores.', normal: 'Under 70% most of the time. Sustained above 90% slows everything on the server.',
+    description: 'How busy the processors are, as a percentage of all cores (1 - idle time / total time).', normal: 'Under 70% most of the time. Sustained above 90% slows everything on the server.',
     warn: 80, crit: 90, keywords: ['cpu', 'processor', 'busy', 'utilization', 'utilisation', 'load'],
-    raw: ['node_cpu_seconds_total', 'windows_cpu_time_total'],
-    expr: (m, by, fn) => either(m,
-      `clamp(${fn} by (${by}) (100 - avg by (instance, ${by}) (rate(node_cpu_seconds_total{mode="idle"${m.host}}[5m])) * 100), 0, 100)`,
-      `clamp(${fn} by (${by}) (100 - avg by (instance, ${by}) (rate(windows_cpu_time_total{mode="idle"${m.host}}[5m])) * 100), 0, 100)`),
+    raw: ['observaone_cpu_utilization_ratio', 'node_cpu_seconds_total', 'windows_cpu_time_total'],
+    expr: (m, by, fn) => perHost(cpuPerHost(m), by, fn),
   },
   {
     id: 'memory', name: 'Memory usage', category: 'system', also: ['linux', 'windows'], unit: 'percent', by: 'host', byOptions: ['host', 'env', 'role'],
     description: 'Memory in use, as a percentage of the total.', normal: 'Up to 85% is usual for servers that cache files. Above 95% risks swapping or out-of-memory kills.',
     warn: 85, crit: 95, keywords: ['memory', 'ram', 'mem'],
     raw: ['node_memory_MemAvailable_bytes', 'windows_memory_available_bytes'],
-    expr: (m, by, fn) => either(m,
-      `${fn} by (${by}) (100 * (1 - node_memory_MemAvailable_bytes${sel(m.host)} / node_memory_MemTotal_bytes${sel(m.host)}))`,
-      `${fn} by (${by}) (100 * (1 - windows_memory_available_bytes${sel(m.host)} / windows_memory_physical_total_bytes${sel(m.host)}))`),
+    expr: (m, by, fn) => perHost(memPerHost(m), by, fn),
   },
   {
     id: 'disk', name: 'Disk usage', category: 'system', also: ['linux', 'windows'], unit: 'percent', by: 'host', byOptions: ['host', 'env'],
     description: 'Space used on the fullest disk or volume of each server.', normal: 'Below 80%. Above 90% needs action before it fills up.',
     warn: 80, crit: 90, keywords: ['disk', 'storage', 'space', 'volume', 'filesystem'],
     raw: ['node_filesystem_avail_bytes', 'windows_logical_disk_free_bytes'],
-    expr: (m, by, fn) => either(m,
-      `${fn} by (${by}) (100 - 100 * node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs|nsfs|fuse.*"${m.host}} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs|nsfs|fuse.*"${m.host}})`,
-      `${fn} by (${by}) (100 - 100 * windows_logical_disk_free_bytes{volume!~"HarddiskVolume.*"${m.host}} / windows_logical_disk_size_bytes{volume!~"HarddiskVolume.*"${m.host}})`),
+    expr: (m, by, fn) => perHost(diskPerHost(m), by, fn),
   },
   {
     id: 'network', name: 'Network traffic', category: 'network', also: ['system'], unit: 'Bps', by: 'host', byOptions: ['host', 'env'],
     description: 'Bytes received plus sent per second, all network cards.', normal: 'Depends on the server; watch for sudden jumps or drops to zero.',
     keywords: ['network', 'traffic', 'bandwidth', 'throughput', 'mbps', 'io'],
     raw: ['node_network_receive_bytes_total', 'windows_net_bytes_total'],
-    expr: (m, by, fn) => either(m,
-      `${fn} by (${by}) (sum by (instance, ${by}) (rate(node_network_receive_bytes_total{device!~"lo|veth.*|docker.*|br-.*"${m.host}}[5m]) + rate(node_network_transmit_bytes_total{device!~"lo|veth.*|docker.*|br-.*"${m.host}}[5m])))`,
-      `${fn} by (${by}) (sum by (instance, ${by}) (rate(windows_net_bytes_total${sel(m.host)}[5m])))`),
+    expr: (m, by, fn) => perHost(netPerHost(m), by, fn),
   },
   {
     id: 'net_errors', name: 'Network errors', category: 'network', unit: 'short', by: 'host', byOptions: ['host'],
@@ -123,12 +169,12 @@ export const METRICS: MetricDef[] = [
   },
   {
     id: 'processes_cpu', name: 'Top processes by CPU', category: 'system', also: ['linux', 'windows'], unit: 'percent', by: 'process', byOptions: ['process', 'host'],
-    description: 'CPU used by each process (needs the process collector).', normal: 'One process using most of the CPU for a long time is worth a look.',
+    description: 'CPU used by each process, as a share of the whole server like host CPU (100% = every core busy). Needs the process collector.', normal: 'One process using most of the CPU for a long time is worth a look.',
     keywords: ['process', 'processes', 'top processes', 'java', 'nginx'],
     raw: ['namedprocess_namegroup_cpu_seconds_total', 'windows_process_cpu_time_total'],
     expr: (m, by, fn) => either(m,
-      `${fn} by (${by === 'process' ? 'groupname' : by}) (rate(namedprocess_namegroup_cpu_seconds_total${sel(m.host)}[5m]) * 100)`,
-      `${fn} by (${by}) (rate(windows_process_cpu_time_total${sel(m.host)}[5m]) * 100)`),
+      `${fn} by (${by === 'process' ? 'groupname' : by}) (${procCpuShare('namedprocess_namegroup_cpu_seconds_total', 'groupname', sel(m.host), sel(`mode="idle"${m.host}`), 'node_cpu_seconds_total')})`,
+      `${fn} by (${by}) (${procCpuShare('windows_process_cpu_time_total', 'process', sel(m.host), sel(`mode="idle", core!=""${m.host}`), 'windows_cpu_time_total')})`),
   },
   {
     id: 'pod_cpu', name: 'Pod CPU', category: 'kubernetes', unit: 'short', by: 'namespace', byOptions: ['namespace', 'pod', 'node', 'cluster'],

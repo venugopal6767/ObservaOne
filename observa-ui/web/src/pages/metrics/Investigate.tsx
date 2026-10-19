@@ -4,16 +4,17 @@
 import { useMemo, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { Copy, Search } from 'lucide-react';
-import { api, type PromMatrix, type PromVector } from '@/lib/api';
+import { api, type PromMatrix } from '@/lib/api';
 import { buildQuery, metricById } from '@/lib/catalog';
 import { dateTimeZ, escapeLabel, fmt, timeHM } from '@/lib/format';
 import { color, toneClass } from '@/lib/theme';
 import { useApp } from '@/app/AppContext';
 import { useQuery } from '@tanstack/react-query';
-import { ErrorState, PageHead, Panel, Pill, StateView, Tabs, TableWrap, copyText } from '@/components/ui';
+import { ErrorState, PageHead, Panel, Pill, StateView, Tabs, copyText } from '@/components/ui';
 import { TimeChart, LegendRow } from '@/components/charts';
 import { QuickActions, RelatedAlerts, RelatedLogs, RelatedTraces, useRelated, type InvTab, type InvestigateCtx } from '@/components/Investigate';
 import { metricIcon } from './icons';
+import { ProcessTable, useProcesses } from '@/components/ProcessTable';
 
 const near = (vals: [number, string][], t: number) => {
   let best: [number, string] | undefined;
@@ -131,30 +132,12 @@ export default function InvestigatePage() {
 }
 
 function TopProcessesAt({ host, t }: { host: string; t: number }) {
-  const h = `host="${escapeLabel(host)}"`;
-  const q = useQuery({
-    queryKey: ['inv-procs', host, t],
-    queryFn: async () => {
-      const get = (query: string) => api<{ result: PromVector }>('/prom/query', { query: { query, time: t } }).then((r) => r.result).catch(() => [] as PromVector);
-      const [cpu, mem] = await Promise.all([
-        get(`topk(8, sum by (groupname) (rate(namedprocess_namegroup_cpu_seconds_total{${h}}[5m])) * 100) or topk(8, sum by (process) (rate(windows_process_cpu_time_total{${h}}[5m])) * 100)`),
-        get(`sum by (groupname) (namedprocess_namegroup_memory_bytes{memtype="resident", ${h}}) or sum by (process) (windows_process_working_set_private_bytes{${h}})`),
-      ]);
-      const name = (m: Record<string, string>) => m.groupname || m.process || '?';
-      const M = new Map(mem.map((x) => [name(x.metric), Number(x.value[1])]));
-      return cpu.map((x) => ({ name: name(x.metric), cpu: Number(x.value[1]), mem: M.get(name(x.metric)) })).sort((a, b) => b.cpu - a.cpu);
-    },
-  });
+  const q = useProcesses(host, false, 8, t);
+  const w = useProcesses(host, true, 8, t);
+  const win = !!w.data?.length && !q.data?.length;
   return (
     <Panel title="Top processes at this time" right={<Pill tone="muted">{timeHM(t * 1000)}</Pill>}>
-      {q.isPending ? <StateView kind="loading" skeleton="table" /> : !q.data?.length ? <StateView kind="empty" title="No process data" text="Needs process-exporter (Linux) or the process collector (Windows)." /> : (
-        <TableWrap label="Processes">
-          <table className="tbl compact">
-            <thead><tr><th>Process</th><th className="num">CPU</th><th className="num">Memory</th></tr></thead>
-            <tbody>{q.data.map((r) => <tr key={r.name}><td className="mono">{r.name}</td><td className={`num ${toneClass(r.cpu)}`}>{r.cpu.toFixed(1)}%</td><td className="num">{r.mem === undefined ? '-' : fmt(r.mem, 'bytes')}</td></tr>)}</tbody>
-          </table>
-        </TableWrap>
-      )}
+      <ProcessTable q={win ? w : q} win={win} emptyText="No process data at this time. It needs the processes collector (Linux) or the process collector of windows_exporter, running at that moment." />
     </Panel>
   );
 }

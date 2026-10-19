@@ -30,6 +30,7 @@ export function fmt(value: number | string | null | undefined, unit: Unit | stri
     case 's':
       if (v >= 86400) return `${Math.floor(v / 86400)}d ${Math.floor((v % 86400) / 3600)}h`;
       if (v >= 3600) return `${Math.floor(v / 3600)}h ${Math.floor((v % 3600) / 60)}m`;
+      if (v >= 60) return `${Math.floor(v / 60)}m ${Math.floor(v % 60)}s`; // 772.09s read as a raw number
       if (v >= 1) return `${v.toFixed(d ?? 2)}s`;
       return `${(v * 1000).toFixed(d ?? 1)}ms`;
     case 'ms': return v >= 1000 ? `${(v / 1000).toFixed(2)}s` : `${Math.round(v)}ms`;
