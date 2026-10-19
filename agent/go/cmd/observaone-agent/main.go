@@ -8,6 +8,8 @@
 //	observaone-agent config migrate [--config FILE]   turn an old agent.conf into agent.yaml
 //	observaone-agent reload         [--config FILE]   apply config changes without a restart (SIGHUP)
 //	observaone-agent diagnostics    [--config FILE]   print the diagnostics bundle (what "Request diagnostics" uploads)
+//	observaone-agent check-credential [--config FILE]  does the server still accept this host's credential? (exit 0 yes,
+//	                                                   3 refused: removed or the server's database was reset, 4 blocked, 1 cannot tell)
 //	observaone-agent verify-release --key PUB --sums SHA256SUMS --sig SHA256SUMS.sig   (used by the installer and updater)
 //	observaone-agent version
 package main
@@ -34,7 +36,7 @@ import (
 )
 
 // version is set at build time: -ldflags "-X main.version=1.1.0"
-var version = "1.3.0"
+var version = "1.3.1"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -65,6 +67,8 @@ func main() {
 		}
 	case "diagnostics":
 		err = diagnostics(*cfgPath, log)
+	case "check-credential":
+		os.Exit(checkCredential(*cfgPath))
 	case "verify-release":
 		if err = core.VerifyRelease(*relKey, *relSums, *relSig); err == nil {
 			fmt.Println("signature OK")
@@ -101,7 +105,43 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: observaone-agent run|enroll|status|check-config|config show|config migrate|reload|diagnostics|verify-release|version [--config FILE]")
+	fmt.Fprintln(os.Stderr, "usage: observaone-agent run|enroll|status|check-config|config show|config migrate|reload|diagnostics|check-credential|verify-release|version [--config FILE]")
+}
+
+func checkCredential(cfgPath string) int {
+	cfg, err := core.LoadConfig(cfgPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ERROR:", err)
+		return 1
+	}
+	id, cred, err := core.LoadIdentity(cfg.StateDir)
+	if err != nil || id == nil {
+		fmt.Println("not enrolled")
+		return 3
+	}
+	cl, err := core.NewClient(cfg, version)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ERROR:", err)
+		return 1
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	err = cl.PostJSON(ctx, core.AgentPath(id.AgentID, "heartbeat"), cred, map[string]any{"version": version}, nil)
+	var ae *core.APIError
+	switch {
+	case err == nil:
+		fmt.Printf("credential accepted (%s)\n", id.AgentID)
+		return 0
+	case errors.As(err, &ae) && ae.Status == 401:
+		fmt.Printf("credential refused: %s is not known to %s any more (removed on the Agents page, or the server's database was reset)\n", id.AgentID, cfg.Server)
+		return 3
+	case errors.As(err, &ae) && ae.Status == 403:
+		fmt.Printf("agent %s is blocked on the Agents page\n", id.AgentID)
+		return 4
+	default:
+		fmt.Printf("cannot tell: %v\n", err)
+		return 1
+	}
 }
 
 func diagnostics(cfgPath string, log *slog.Logger) error {

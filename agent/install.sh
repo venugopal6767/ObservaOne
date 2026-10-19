@@ -7,6 +7,7 @@
 #
 # Options:
 #   --server URL        ObservaOne address, https only                                     (required)
+#   --token TOKEN       enrollment token (one use, short-lived; the Agents page puts it in the command). Also: OBSERVAONE_TOKEN
 #   --token-file FILE   read the enrollment token from FILE instead of asking (automation); FILE is deleted after use
 #   --ca-sha256 HEX     trust the server's self-signed certificate with this SHA-256 fingerprint
 #   --ca-file FILE      trust this CA file (your company CA)
@@ -34,7 +35,7 @@
 # An old agent.conf (agent 1.1) is converted to agent.yaml once (the old file is kept as agent.conf.migrated).
 set -euo pipefail
 
-AGENT_VERSION="1.3.0"
+AGENT_VERSION="1.3.1"
 PREFIX=/opt/observaone-agent
 ETC=/etc/observaone-agent
 VAR=/var/lib/observaone-agent
@@ -42,7 +43,7 @@ SVC=observaone-agent
 SVC_USER=observaone-agent
 UNIT=/etc/systemd/system/observaone-agent.service
 
-SERVER="" TOKEN_FILE="" CA_SHA="" CA_FILE_IN="" HOST_NAME="" ENV_NAME="" ROLE="" FILES_DIR="" UNINSTALL=0 DOCKER=0
+SERVER="" TOKEN_FILE="" TOKEN_ARG="${OBSERVAONE_TOKEN:-}" CA_SHA="" CA_FILE_IN="" HOST_NAME="" ENV_NAME="" ROLE="" FILES_DIR="" UNINSTALL=0 DOCKER=0
 MODE="" PULL_PORT="" PULL_ADVERTISE="" DOCKER_METRICS=0 NGINX_URL=""
 JOLOKIA=() EXPORTERS=() NEW_RELKEY=0 DISK_BUFFER=0
 LABELS=() PULL_ALLOW=()
@@ -57,7 +58,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --server) SERVER="${2%/}"; shift 2 ;;
     --token-file) TOKEN_FILE="$2"; shift 2 ;;
-    --token) die "--token is not accepted (it would be stored in your shell history). Run without it and paste the token when asked, or use --token-file." ;;
+    --token) TOKEN_ARG="$2"; shift 2 ;;   # one-use, short-lived: worthless once this host enrolled (it stays in shell history)
     --ca-sha256) CA_SHA="$(echo "$2" | tr 'A-F' 'a-f' | tr -d ':')"; shift 2 ;;
     --ca-file) CA_FILE_IN="$2"; shift 2 ;;
     --host) HOST_NAME="$2"; shift 2 ;;
@@ -341,16 +342,30 @@ runuser -u "$SVC_USER" -- "$NEW" check-config --config "$CONF" || die "The confi
 
 # ---------------------------------------------------------------- enrollment (once; identity is kept on re-runs)
 if [ -s "$VAR/credential" ] && [ -s "$VAR/identity.json" ]; then
-  ok "Already enrolled ($(sed -n 's/.*"agentId": *"\([^"]*\)".*/\1/p' "$VAR/identity.json")): keeping this identity"
-else
+  OLDID="$(sed -n 's/.*"agentId": *"\([^"]*\)".*/\1/p' "$VAR/identity.json")"
+  # does the server still know this identity? (it is forgotten when the agent is removed on the Agents page
+  # or the server's database is reset; keeping it would only give "401 invalid_credential" forever)
+  CC_RC=0; CC_OUT="$(runuser -u "$SVC_USER" -- "$NEW" check-credential --config "$CONF" 2>&1)" || CC_RC=$?
+  case "$CC_RC" in
+    0) ok "Already enrolled ($OLDID): keeping this identity" ;;
+    3) warn "$CC_OUT"
+       warn "Enrolling again with a new token (the old identity is kept as $VAR/*.old)"
+       mv -f "$VAR/credential" "$VAR/credential.old"; mv -f "$VAR/identity.json" "$VAR/identity.json.old" ;;
+    4) die "$CC_OUT. Unblock it on the Agents page, then run the installer again." ;;
+    *) ok "Already enrolled ($OLDID): keeping this identity (could not check it with the server: ${CC_OUT:-no answer})" ;;
+  esac
+fi
+if [ ! -s "$VAR/credential" ] || [ ! -s "$VAR/identity.json" ]; then
   TF="$VAR/enroll-token"
   ( umask 077; : > "$TF" )
   chown "$SVC_USER":"$SVC_USER" "$TF"
-  if [ -n "$TOKEN_FILE" ]; then
+  if [ -n "$TOKEN_ARG" ]; then
+    printf '%s' "$TOKEN_ARG" > "$TF"
+  elif [ -n "$TOKEN_FILE" ]; then
     [ -s "$TOKEN_FILE" ] || die "--token-file $TOKEN_FILE is empty or missing"
     cat "$TOKEN_FILE" > "$TF"; rm -f "$TOKEN_FILE"
   else
-    [ -r /dev/tty ] || die "No terminal to ask for the token. Use --token-file FILE."
+    { : < /dev/tty; } 2>/dev/null || die "No terminal to ask for the token. Use --token-file FILE (a new token from Agents > Linux > Install)."
     printf 'Paste the enrollment token from the Agents page (input hidden): ' > /dev/tty
     IFS= read -rs TOKEN < /dev/tty; echo > /dev/tty
     printf '%s' "$TOKEN" > "$TF"; unset TOKEN
@@ -526,6 +541,12 @@ if [ "$OKHB" -eq 1 ]; then
 else
   warn "No heartbeat within 45 s. Last log lines:"
   journalctl -u observaone-agent -n 15 --no-pager 2>/dev/null || true
+  if grep -q 'invalid_credential\|credential is not valid' "$VAR/status.json" 2>/dev/null \
+     || journalctl -u observaone-agent -n 50 --no-pager 2>/dev/null | grep -q 'invalid_credential'; then
+    # not the new binary's fault: the server refused this identity. Rolling back would change nothing.
+    rm -f "$NEW.prev.failed" "$UNIT.prev"
+    die "The server refused this agent's credential (removed on the Agents page, or the server's database was reset). Re-enroll: sudo rm $VAR/credential $VAR/identity.json && sudo bash $0 --server $SERVER"
+  fi
   if [ -x "$NEW.prev" ]; then
     warn "Rolling back to the previous agent binary"
     mv -f "$NEW" "$NEW.prev.failed"; mv -f "$NEW.prev" "$NEW"

@@ -360,8 +360,8 @@ function commandFor(p: Platform, info: InstallInfo, w: Wiz): string {
   const pin = c.available && c.selfSigned;
   const curlGet = pin ? `curl -fsSLk --pinnedpubkey "${c.spkiPin}"` : 'curl -fsSL';
   if (p === 'linux') {
-    // no --token: the installer asks for it and hides what is typed (never in shell history or ps)
-    const opts = [`--server ${S}`];
+    // the token is one-use and short-lived, so it goes in the command: one copy-paste, nothing to type
+    const opts = [`--server ${S}`, `--token ${w.token || '<TOKEN>'}`];
     if (pin) opts.push(`--ca-sha256 ${c.sha256}`);
     if (w.env) opts.push(`--env ${shq(w.env)}`);
     if (w.role) opts.push(`--role ${shq(w.role)}`);
@@ -432,7 +432,7 @@ function InstallWizard({ p, info, latest, goTokens }: { p: Platform; info: Insta
   const pin = c.available && c.selfSigned;
   const cmd = commandFor(p, info, w);
   const hostPort = S.replace(/^https?:\/\//, '');
-  const tokenInCommand = p === 'docker' || p === 'kubernetes';
+  const tokenInCommand = p === 'docker' || p === 'kubernetes' || p === 'linux';
   const req: Record<Platform, string[]> = {
     linux: ['systemd; amd64 or arm64; about 15 MB of disk', 'root (sudo) to install; the agent itself runs as the unprivileged user observaone-agent',
       w.mode === 'pull' ? `outbound HTTPS (443) to ${hostPort} for heartbeats, and inbound TCP ${w.pullPort || '9110'} from the ObservaOne server for Prometheus scrapes`
@@ -442,7 +442,7 @@ function InstallWizard({ p, info, latest, goTokens }: { p: Platform; info: Insta
     kubernetes: ['kubectl with cluster-admin', `outbound HTTPS (443) from the nodes to ${hostPort}`, 'images from Docker Hub, quay.io and registry.k8s.io (or your mirror)'],
   };
   const where: Record<Platform, string> = {
-    linux: 'Run on the server (the first line downloads the installer, the second runs it and asks for the token):',
+    linux: 'Run on the server (the first line downloads the installer, the second installs and enrolls it):',
     windows: 'Paste into Windows PowerShell opened with "Run as administrator" (it asks for the token at the end):',
     docker: 'Run on the Docker host as root (or with sudo):', kubernetes: 'Run where kubectl points at the cluster:',
   };
@@ -475,7 +475,7 @@ function InstallWizard({ p, info, latest, goTokens }: { p: Platform; info: Insta
       <section className="panel">
         <div className="panel-head"><h3>2. Enrollment token</h3></div>
         <p className="muted" style={{ marginTop: 0 }}>
-          {p === 'linux' ? <>The installer asks for the token and hides what you type, so it never ends up in shell history or the process list. Each server swaps it for its own credential; revoking the token later only stops new enrollments. For automation use <code>--token-file FILE</code>.</>
+          {p === 'linux' ? <>Create a token and it goes into the command. A Linux token is for one server and expires, so it is worthless once used. Each server swaps it for its own credential; revoking the token later only stops new enrollments. Re-running the command on an enrolled server keeps its identity; if the server was removed here (or the database reset) it enrolls again.</>
             : p === 'windows' ? 'The installer asks for the token and hides what you type, so it stays out of PowerShell history. The previous-generation Windows agent keeps it on the server and sends it with every upload: revoking the token stops every agent that uses it.'
               : 'The previous-generation agent keeps the token on the server and sends it with every upload. Revoking the token stops every agent that uses it.'}
         </p>

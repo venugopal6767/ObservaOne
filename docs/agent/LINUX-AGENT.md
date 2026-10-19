@@ -7,6 +7,11 @@ on the monitored server.
 **Pull mode** (1.2, optional): Prometheus scrapes the agent instead, over mutual TLS with certificates that ObservaOne
 issues automatically. Heartbeats still go out over HTTPS. See [Pull mode](#13-pull-mode).
 
+**1.3.1**: the install command from the Agents page carries the one-use token (`--token`), so nothing is typed. The installer checks a kept identity with the server. When the server no longer knows the agent
+(removed on the Agents page, or its database was reset) it says so and enrolls again with a new token, instead of
+starting an agent that only gets `401 invalid_credential` and then rolling back a binary that was fine.
+`observaone-agent check-credential` does the same check by hand.
+
 **1.3** adds management from ObservaOne (Add Target wizard, settings per environment / target / agent, diagnostics,
 restart and upgrade with rollback), application collectors (top processes, Docker, Nginx, JVM, local exporters),
 credential rotation, signed releases, an optional disk buffer, tenants and site gateways: sections 14-19.

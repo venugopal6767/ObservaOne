@@ -26,7 +26,7 @@ import { effectiveFor, toAgentMap, deliverActions, recordResult, storeDiagnostic
 import { DEFAULT_TENANT } from '../tenancy.js';
 
 // the version this server publishes in agent/files (AGENT_LATEST_VERSION overrides it, e.g. for a lab or a pinned release)
-export const AGENT_LATEST = /^\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(process.env.AGENT_LATEST_VERSION || '') ? process.env.AGENT_LATEST_VERSION : '1.3.0';
+export const AGENT_LATEST = /^\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(process.env.AGENT_LATEST_VERSION || '') ? process.env.AGENT_LATEST_VERSION : '1.3.1';
 export const ENROLL_TOKEN_RE = /^oat_[0-9a-f]{8}_[A-Za-z0-9_-]{20,64}$/;
 export const CREDENTIAL_RE = /^oac_([0-9a-f]{20})_([A-Za-z0-9_-]{43})$/;
 const PLATFORMS = ['linux'];                     // enrollment is implemented for the Linux agent

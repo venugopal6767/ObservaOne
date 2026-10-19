@@ -41,7 +41,7 @@ function commands(c: Created, labels: string[], pullPort: string) {
   for (const l of labels) opts.push(`--label ${shq(l)}`);
   if (c.target.mode === 'pull') { opts.push('--mode pull'); if (pullPort) opts.push(`--pull-port ${shq(pullPort)}`); }
   const download = `${curlGet} ${S}/agent/install.sh -o observaone-install.sh`;
-  const interactive = [download, `sudo bash observaone-install.sh \\\n  ${opts.join(' \\\n  ')}`].join('\n');
+  const interactive = [download, `sudo bash observaone-install.sh \\\n  ${[...opts, `--token ${c.token}`].join(' \\\n  ')}`].join('\n');
   const automated = [
     '# the token goes in a root-only file; the installer deletes it after use',
     `install -m 0600 /dev/null /root/observaone.token && printf '%s' "$OBSERVAONE_TOKEN" > /root/observaone.token`,
@@ -140,11 +140,11 @@ export default function AddTarget() {
               <div style={{ display: 'flex', gap: 8, marginTop: 6, flexWrap: 'wrap' }}>
                 <code className="mono token-val">{shown ? created.token : '•'.repeat(24)}</code>
                 <button className="btn btn-sm" onClick={() => setShown((x) => !x)}>{shown ? 'Hide' : 'Show'}</button>
-                <button className="btn btn-sm" onClick={() => copyText(created.token, 'Token copied: paste it when the installer asks')}><Copy size={13} />Copy token</button>
+                <button className="btn btn-sm" onClick={() => copyText(created.token, 'Token copied')}><Copy size={13} />Copy token</button>
               </div>
             </div>
             <Tabs items={[['interactive', 'On the server'], ['automated', 'Ansible / cloud-init']]} active={how} onChange={setHow} label="How to install" />
-            <div className="muted" style={{ margin: '8px 0' }}>{how === 'interactive' ? 'Run these two lines on the server. The installer asks for the token and hides what you type.' : 'Put the token in OBSERVAONE_TOKEN from your secrets store (never in plain user-data), then run:'}</div>
+            <div className="muted" style={{ margin: '8px 0' }}>{how === 'interactive' ? 'Run these two lines on the server. The token is already in the command: it works once and expires.' : 'Put the token in OBSERVAONE_TOKEN from your secrets store (never in plain user-data), then run:'}</div>
             <div style={{ position: 'relative' }}>
               <pre className="code cmd" tabIndex={0} aria-label="Install command">{cmd[how]}</pre>
               <button className="btn btn-sm" style={{ position: 'absolute', top: 6, right: 6 }} onClick={() => copyText(cmd[how], 'Commands copied')}><Copy size={13} />Copy</button>
