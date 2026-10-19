@@ -153,7 +153,7 @@ export function createGateway(cfg) {
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', 'loopback, uniquelocal');
-  const raw = express.raw({ type: () => true, limit: '4mb' });
+  const raw = express.raw({ type: () => true, limit: '4mb', inflate: false }); // relayed as received (gzip stays gzip)
 
   app.get('/healthz', (req, res) => res.json({ ok: true, gateway: GATEWAY_VERSION, upstream: state.up ? 'up' : 'down', lastError: state.lastError || undefined, ...spoolStats(), pending: state.pending.size }));
 

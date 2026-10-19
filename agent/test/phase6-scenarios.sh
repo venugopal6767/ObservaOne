@@ -73,7 +73,7 @@ if [ -n "${OO_FILES:-}" ] && [ -s "$OO_FILES/SHA256SUMS.sig" ]; then
   openssl genpkey -algorithm ed25519 2>/dev/null | openssl pkey -pubout > "$OO_FILES/release.pub" 2>/dev/null
   OUT=$(bash "$(dirname "$0")/../install.sh" --server "$OO_URL" --files-dir "$OO_FILES" 2>&1 < /dev/null || true)
   cp /tmp/scn6.pub "$OO_FILES/release.pub"
-  check S04 "the installer refuses a release key that differs from the pinned one" bash -c "grep -q 'release signing key differs' <<<'$OUT'"
+  check S04 "the installer refuses a release key that differs from the pinned one" bash -c 'grep -q "release signing key differs" <<<"$1"' _ "$OUT"
 else res SKIP S02 "signature checks (set OO_FILES; the server must publish SHA256SUMS.sig)"; fi
 
 # ---------------- disk buffer ----------------

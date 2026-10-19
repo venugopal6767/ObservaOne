@@ -651,6 +651,10 @@ export function describeAgent(a, nowMs = Date.now()) {
 agentControlRouter.use(['/agent/v1', '/v1/agents'], (err, req, res, next) => {
   if (err.type === 'entity.too.large') return fail(res, 413, 'too_large', 'Request body too large.');
   if (err.type === 'entity.parse.failed') return fail(res, 400, 'bad_request', 'Body is not valid JSON.');
+  // a body that is not what its Content-Encoding says: the payload is broken, retrying will not help
+  if (err.type === 'encoding.unsupported' || /header check|unexpected end of file|invalid (stored block|distance|block type|code)/i.test(err.message)) {
+    return fail(res, 400, 'bad_encoding', 'The body could not be decompressed (Content-Encoding does not match the data).');
+  }
   console.error('[agent-control]', err.message);
   return fail(res, 503, 'unavailable', 'The server could not process the request. Try again later.');
 });
