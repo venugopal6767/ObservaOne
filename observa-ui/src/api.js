@@ -66,7 +66,7 @@ api.use('/traces', requireModule('traces'));
 api.use('/services', requireModule('services'));
 for (const p of ['/alerts', '/rules', '/silences', '/notifications']) api.use(p, requireModule('alerting'));
 api.use('/dashboards', requireModule('dashboards'));
-for (const p of ['/agents', '/agent-tokens']) api.use(p, requireModule('agents'));
+for (const p of ['/agents', '/agent-tokens', '/agent-config', '/targets']) api.use(p, requireModule('agents'));
 
 api.post('/logout', wrap(async (req, res) => {
   audit(req, 'logout');

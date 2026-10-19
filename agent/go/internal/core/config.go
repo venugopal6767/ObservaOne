@@ -72,6 +72,15 @@ type Config struct {
 	PullAllow     []*net.IPNet // only these source addresses may connect (empty = any; the client certificate is always required)
 
 	LegacyFiles []string // key = value files that were read (shown as a warning)
+
+	// Optional collectors (1.3). URLs and sockets are host-only settings: the server can switch a collector on or
+	// off (processes.top, docker.enabled, disable) but can never make the agent fetch an address of its choosing.
+	ProcessesTop  int               // top N process groups by CPU and by memory (0 = off)
+	DockerEnabled bool              // read containers through the Docker socket (agent user must be in group docker)
+	DockerSocket  string            // default /var/run/docker.sock
+	NginxURL      string            // stub_status URL, e.g. http://127.0.0.1/nginx_status (empty = off)
+	Jolokia       map[string]string // service name -> Jolokia URL (JVM metrics)
+	Exporters     map[string]string // name -> URL of a local Prometheus exporter to read and forward
 }
 
 var labelValRE = regexp.MustCompile(`^[A-Za-z0-9._-]{0,64}$`)
@@ -83,12 +92,14 @@ func Defaults() *Config {
 	return &Config{Labels: map[string]string{}, Disabled: map[string]bool{}, StateDir: "/var/lib/observaone-agent",
 		CollectInterval: 15 * time.Second, HeartbeatInterval: 30 * time.Second, BufferPayloads: 40, Version: 1,
 		ProcPath: "/proc", SysPath: "/sys", RootPath: "/", Sources: map[string]string{},
-		Mode: "push", PullListen: DefaultPullListen}
+		Mode: "push", PullListen: DefaultPullListen,
+		ProcessesTop: 10, DockerSocket: "/var/run/docker.sock", Jolokia: map[string]string{}, Exporters: map[string]string{}}
 }
 
 // RemoteKeys are the ONLY settings the ObservaOne server may change (from the UI). Everything that decides
 // where data goes or what is trusted (server, ca_file, state_dir, paths, listen) can only be set on the host.
-var RemoteKeys = map[string]bool{"collect_interval": true, "heartbeat_interval": true, "disable": true, "buffer_payloads": true, "env": true, "role": true}
+var RemoteKeys = map[string]bool{"collect_interval": true, "heartbeat_interval": true, "disable": true, "buffer_payloads": true, "env": true, "role": true,
+	"processes.top": true, "docker.enabled": true}
 
 // LoadConfig reads the main file and then every conf.d/*.yaml (and old *.conf) next to it, in name order
 // (later files win).
@@ -234,6 +245,20 @@ func (c *Config) set(k, v, src string) error {
 		}
 	case k == "mode":
 		c.Mode = v
+	case v == "" && (k == "processes" || k == "docker" || k == "nginx" || k == "jolokia" || k == "exporters"):
+		return nil // a section header with nothing under it
+	case k == "processes.top":
+		c.ProcessesTop, err = strconv.Atoi(v)
+	case k == "docker.enabled":
+		c.DockerEnabled, err = strconv.ParseBool(v)
+	case k == "docker.socket":
+		c.DockerSocket = v
+	case k == "nginx.status_url":
+		c.NginxURL = v
+	case strings.HasPrefix(k, "jolokia."):
+		c.Jolokia[strings.TrimPrefix(k, "jolokia.")] = v
+	case strings.HasPrefix(k, "exporters."):
+		c.Exporters[strings.TrimPrefix(k, "exporters.")] = v
 	case k == "pull" && v == "":
 		return nil // "pull:" with nothing under it
 	case k == "pull.listen":
@@ -295,6 +320,8 @@ func (c *Config) Effective() [][3]string {
 		{"sys_path", c.SysPath, src("sys_path")}, {"root_path", c.RootPath, src("root_path")},
 		{"mode", c.Mode, src("mode")}, {"pull.listen", c.PullListen, src("pull.listen")},
 		{"pull.advertise", c.PullAdvertise, src("pull.advertise")}, {"pull.allow", c.pullAllowString(), src("pull.allow")},
+		{"processes.top", strconv.Itoa(c.ProcessesTop), src("processes.top")}, {"docker.enabled", strconv.FormatBool(c.DockerEnabled), src("docker.enabled")},
+		{"docker.socket", c.DockerSocket, src("docker.socket")}, {"nginx.status_url", c.NginxURL, src("nginx.status_url")},
 	}
 	lk := make([]string, 0, len(c.Labels))
 	for k := range c.Labels {
@@ -304,7 +331,41 @@ func (c *Config) Effective() [][3]string {
 	for _, k := range lk {
 		out = append(out, [3]string{"label." + k, c.Labels[k], src("label." + k)})
 	}
+	for _, sec := range []struct {
+		name string
+		m    map[string]string
+	}{{"jolokia", c.Jolokia}, {"exporters", c.Exporters}} {
+		ks := make([]string, 0, len(sec.m))
+		for k := range sec.m {
+			ks = append(ks, k)
+		}
+		sort.Strings(ks)
+		for _, k := range ks {
+			out = append(out, [3]string{sec.name + "." + k, redactURL(sec.m[k]), src(sec.name + "." + k)})
+		}
+	}
 	return out
+}
+
+// redactURL hides a password in user:pass@ URLs when settings are shown or put in a diagnostics bundle.
+func redactURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.User == nil {
+		return raw
+	}
+	if _, has := u.User.Password(); has {
+		u.User = url.UserPassword(u.User.Username(), "xxxxx")
+	}
+	return u.String()
+}
+
+// checkLocalURL: an http(s) URL for a collector to read. Set only in host files.
+func checkLocalURL(what, raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("%s: %q is not an http:// or https:// URL", what, raw)
+	}
+	return nil
 }
 
 // HostLocked reports which remote-changeable settings the host files pin (the UI shows them as "set on host").
@@ -371,6 +432,33 @@ func (c *Config) Validate() error {
 		}
 		if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
 			return fmt.Errorf("listen must be a loopback address (e.g. 127.0.0.1:9109); host metrics are not exposed to the network (use mode: pull for Prometheus scrapes)")
+		}
+	}
+	if c.ProcessesTop < 0 || c.ProcessesTop > 50 {
+		return fmt.Errorf("processes.top must be 0..50 (0 = off)")
+	}
+	if c.NginxURL != "" {
+		if err := checkLocalURL("nginx.status_url", c.NginxURL); err != nil {
+			return err
+		}
+	}
+	if !strings.HasPrefix(c.DockerSocket, "/") {
+		return fmt.Errorf("docker.socket must be an absolute path (got %q)", c.DockerSocket)
+	}
+	for _, sec := range []struct {
+		name string
+		m    map[string]string
+	}{{"jolokia", c.Jolokia}, {"exporters", c.Exporters}} {
+		if len(sec.m) > 10 {
+			return fmt.Errorf("at most 10 %s entries", sec.name)
+		}
+		for k, v := range sec.m {
+			if !labelKeyRE.MatchString(k) {
+				return fmt.Errorf("%s.%s: names are lower case a-z 0-9 _", sec.name, k)
+			}
+			if err := checkLocalURL(sec.name+"."+k, v); err != nil {
+				return err
+			}
 		}
 	}
 	switch c.Mode {

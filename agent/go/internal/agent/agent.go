@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -56,6 +57,14 @@ type Agent struct {
 	hbInterval  time.Duration
 	serverState string
 	pullSt      *pullState
+
+	LogRing  *core.LogRing // recent log lines for diagnostics bundles (optional)
+	started  time.Time
+	done     map[int64]bool // actions already carried out (persisted)
+	restart  chan struct{}
+	applied  int64  // server settings version in effect
+	cfgErr   string // why the server's latest settings were refused
+	rejected int64  // version refused (not retried until a newer one arrives)
 }
 
 // Load reads config, server settings saved from the last heartbeat, and the identity.
@@ -83,10 +92,15 @@ func (a *Agent) Load() error {
 	defer a.mu.Unlock()
 	a.cfg, a.client, a.id, a.cred, a.remote = cfg, cl, id, cred, remote
 	a.hbInterval = cfg.HeartbeatInterval
+	a.applied, _ = strconv.ParseInt(remote["_version"], 10, 64)
+	if a.restart == nil {
+		a.restart = make(chan struct{}, 1)
+		a.started = time.Now()
+	}
 	if a.env == nil {
 		a.env = &collector.Env{Rates: core.NewRates(), Version: a.Version}
 	}
-	a.env.Proc, a.env.Sys, a.env.Root = cfg.ProcPath, cfg.SysPath, cfg.RootPath
+	a.env.Proc, a.env.Sys, a.env.Root, a.env.Cfg = cfg.ProcPath, cfg.SysPath, cfg.RootPath, cfg
 	if a.states == nil {
 		a.states = map[string]collector.State{}
 	}
@@ -118,7 +132,8 @@ func (a *Agent) Reload() {
 	a.mu.Lock()
 	a.cfg, a.client, a.remote = cfg, cl, remote
 	a.hbInterval = cfg.HeartbeatInterval
-	a.env.Proc, a.env.Sys, a.env.Root = cfg.ProcPath, cfg.SysPath, cfg.RootPath
+	a.applied, _ = strconv.ParseInt(remote["_version"], 10, 64)
+	a.env.Proc, a.env.Sys, a.env.Root, a.env.Cfg = cfg.ProcPath, cfg.SysPath, cfg.RootPath, cfg
 	a.mu.Unlock()
 	a.Log.Info("configuration reloaded", "collect_interval", cfg.CollectInterval.String(), "heartbeat_interval", cfg.HeartbeatInterval.String())
 }
@@ -140,11 +155,18 @@ func (a *Agent) setErr(s string) {
 
 // Run blocks until ctx is cancelled. reload receives SIGHUP.
 func (a *Agent) Run(ctx context.Context, reload <-chan struct{}) error {
+	ctx, cancel := context.WithCancel(ctx) // cancelled on SIGTERM or when a restart is requested
+	defer cancel()
 	a.Log.Info("agent starting", "version", a.Version, "agent_id", a.id.AgentID, "host", a.id.Host, "server", a.cfg.Server, "mode", a.cfg.Mode)
 	for _, f := range a.cfg.LegacyFiles {
 		a.Log.Warn("old key = value configuration file; convert it with 'observaone-agent config migrate' (support ends in the next release)", "file", f)
 	}
 	push := a.cfg.Mode == "push"
+	if d := a.loadDone(); d != nil {
+		a.mu.Lock()
+		a.done = d
+		a.mu.Unlock()
+	}
 	var wg sync.WaitGroup
 	wg.Add(3)
 	go func() { defer wg.Done(); a.collectLoop(ctx) }()
@@ -161,10 +183,14 @@ func (a *Agent) Run(ctx context.Context, reload <-chan struct{}) error {
 	if l := a.cfg.Listen; l != "" {
 		srv = a.localServer(l)
 	}
+	restartRequested := false
 	for {
 		select {
 		case <-reload:
 			a.Reload()
+		case <-a.restart:
+			restartRequested = true
+			cancel()
 		case <-ctx.Done():
 			a.Log.Info("stopping: sending what is buffered (max 5 s)")
 			fctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -176,6 +202,9 @@ func (a *Agent) Run(ctx context.Context, reload <-chan struct{}) error {
 			wg.Wait()
 			a.writeStatus()
 			a.Log.Info("agent stopped")
+			if restartRequested {
+				return ErrRestartRequested
+			}
 			return nil
 		}
 	}
@@ -209,6 +238,10 @@ func (a *Agent) collectOnce() {
 		b := core.NewBatch()
 		t := time.Now()
 		err := safeCollect(c, a.env, b)
+		if errors.Is(err, collector.ErrNotConfigured) {
+			states[c.Name()] = collector.State{Status: "disabled"}
+			continue
+		}
 		st := collector.Classify(err)
 		st.Duration = time.Since(t)
 		states[c.Name()] = st
@@ -348,6 +381,20 @@ type hbAnswer struct {
 	HeartbeatSeconds int               `json:"heartbeatSeconds"`
 	LatestVersion    string            `json:"latestVersion"`
 	Config           map[string]string `json:"config"`
+	ConfigVersion    int64             `json:"configVersion"` // 0 = the server has no settings layer (older server)
+	Actions          []Action          `json:"actions"`
+}
+
+func (a *Agent) appliedVersion() int64 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.applied
+}
+
+func (a *Agent) configErr() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.cfgErr
 }
 
 func (a *Agent) heartbeatLoop(ctx context.Context) {
@@ -376,6 +423,8 @@ func (a *Agent) heartbeatOnce(ctx context.Context, bo *core.Backoff) time.Durati
 		"lastError":         a.lastErr,
 		"hostLocked":        a.cfg.HostLocked(),
 		"mode":              a.cfg.Mode,
+		"configVersion":     a.applied,
+		"configError":       a.cfgErr,
 	}
 	pullMode := a.cfg.Mode == "pull"
 	if !a.lastPushOK.IsZero() {
@@ -422,17 +471,47 @@ func (a *Agent) heartbeatOnce(ctx context.Context, bo *core.Backoff) time.Durati
 	}
 	interval = a.hbInterval
 	a.mu.Unlock()
-	if ans.Config != nil && !sameMap(ans.Config, a.remoteCopy()) {
-		if err := saveRemote(a.ConfigPath, ans.Config); err != nil {
-			a.Log.Error("cannot save settings from the server", "error", err.Error())
-		} else {
-			a.Log.Info("new settings from the server, reloading")
-			a.Reload()
-		}
-	}
+	a.applyServerSettings(ans)
+	a.handleActions(ctx, ans.Actions)
+	a.checkUpgradeResult(ctx)
 	a.writeStatus()
 	// ±10% jitter so a fleet restarted together does not heartbeat in lockstep
 	return interval + time.Duration((time.Now().UnixNano()%21-10)*int64(interval)/100)
+}
+
+// applyServerSettings: a newer settings version from the server is checked against the host files, saved
+// (so it survives restarts) and applied with a reload. A version the host refuses is reported, not retried.
+func (a *Agent) applyServerSettings(ans hbAnswer) {
+	if ans.Config == nil {
+		return
+	}
+	a.mu.Lock()
+	applied, rejected := a.applied, a.rejected
+	a.mu.Unlock()
+	m := map[string]string{}
+	for k, v := range ans.Config {
+		m[k] = v
+	}
+	if ans.ConfigVersion > 0 {
+		if ans.ConfigVersion <= applied || ans.ConfigVersion == rejected {
+			return
+		}
+		m["_version"] = strconv.FormatInt(ans.ConfigVersion, 10)
+	} else if sameMap(m, a.remoteCopy()) {
+		return
+	}
+	if err := saveRemote(a.ConfigPath, m); err != nil {
+		a.Log.Error("settings from the server refused", "version", ans.ConfigVersion, "error", err.Error())
+		a.mu.Lock()
+		a.rejected, a.cfgErr = ans.ConfigVersion, err.Error()
+		a.mu.Unlock()
+		return
+	}
+	a.Log.Info("new settings from the server, reloading", "version", ans.ConfigVersion)
+	a.Reload()
+	a.mu.Lock()
+	a.cfgErr = ""
+	a.mu.Unlock()
 }
 
 func (a *Agent) remoteCopy() map[string]string {
@@ -498,6 +577,9 @@ func remotePath(cfgPath string) string {
 	}
 	return filepath.Join(dir, "server-settings.json")
 }
+
+// LoadRemote returns the settings last received from the server (what "config show" must include).
+func LoadRemote(cfgPath string) map[string]string { return loadRemote(cfgPath) }
 
 func loadRemote(cfgPath string) map[string]string {
 	b, err := os.ReadFile(remotePath(cfgPath))

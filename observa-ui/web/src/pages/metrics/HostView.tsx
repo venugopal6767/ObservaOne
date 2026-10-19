@@ -1,7 +1,7 @@
 // One server end to end: status, KPIs, CPU (with yesterday and a threshold) / memory / disk / network /
 // processes / services / alerts, its logs and traces, and "create alert" for any of its metrics.
 // Linux (node_exporter) and Windows (windows_exporter).
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { Bell, FileText, Waypoints, Terminal, Monitor } from 'lucide-react';
 import { color } from '@/lib/theme';
@@ -10,7 +10,7 @@ import { buildQuery, type Filters } from '@/lib/catalog';
 import { ago, dateTime, escapeLabel, fmt, legendName, timeHM } from '@/lib/format';
 import { palette, toneClass } from '@/lib/theme';
 import { useApp, usePlainQuery, useRangeQuery } from '@/app/AppContext';
-import { ErrorState, HealthPill, PageHead, Panel, Pill, Select, StateView, Tabs, TableWrap, Time, useDialogs } from '@/components/ui';
+import { ErrorState, HealthPill, PageHead, Panel, Pill, Select, StateView, Tabs, TableWrap, Time, useDialogs, type Tone } from '@/components/ui';
 import { Sparkline, TimeChart, LegendRow } from '@/components/charts';
 import { AlertWizard } from '@/components/AlertWizard';
 
@@ -56,6 +56,7 @@ export default function HostView() {
           {canOpen('/traces') && <button className="btn" onClick={() => navigate(`/traces?q=${encodeURIComponent(`host.name=${host}`)}`)}><Waypoints size={14} />View traces</button>}
           {canOpen('/alerting') && <button className="btn btn-primary" onClick={() => alert('cpu')}><Bell size={14} />Create alert</button>}
         </>} />
+      <HealthStrip host={host} scrape={t} />
       <div className="toolbar"><Tabs items={tabs} active={tab} onChange={setTab} label="Host sections" /></div>
 
       {tab === 'overview' && <HostOverview f={f} h={h} win={win} onAlert={alert} />}
@@ -270,5 +271,44 @@ function HostAlerts({ host, onCreate }: { host: string; onCreate: () => void }) 
         </TableWrap>
       )}
     </Panel>
+  );
+}
+
+// ------------------------------------------------------------ health strip: every signal in one row, and one
+// diagnosis line when they disagree ("agent offline, server reachable: agent problem")
+interface StripAgent {
+  id: string; host: string; status: string; version: string; outdated: boolean; lastData: string | null; lastHeartbeat: string | null; enrolled: boolean; mode: string | null;
+  diagnosis: { code: string; severity: 'ok' | 'info' | 'warning' | 'critical'; title: string; detail: string; evidence: { signal: string; value: string; ok: boolean | null }[] } | null;
+}
+function HealthStrip({ host, scrape }: { host: string; scrape?: Target }) {
+  const { canOpen } = useApp();
+  const agents = usePlainQuery(['agents'], () => api<{ agents: StripAgent[]; latest: string }>('/agents'), { enabled: canOpen('/agents') });
+  const a = agents.data?.agents.find((x) => x.host.toLowerCase() === host.toLowerCase() && x.enrolled);
+  if (!a && !scrape) return null;
+  const ev = (sig: string) => a?.diagnosis?.evidence.find((e) => e.signal === sig);
+  const ping = ev('ping');
+  const data = ev('metric uploads') || ev('Prometheus scrape');
+  const sevTone: Record<string, Tone> = { ok: 'green', info: 'blue', warning: 'orange', critical: 'red' };
+  const statusTone: Record<string, Tone> = { online: 'green', attention: 'orange', not_reporting: 'orange', offline: 'red', pending: 'muted', blocked: 'muted' };
+  const statusLabel: Record<string, string> = { online: 'Online', attention: 'Needs attention', not_reporting: 'Not reporting', offline: 'Offline', pending: 'Waiting', blocked: 'Blocked' };
+  const last = a?.lastData || a?.lastHeartbeat || scrape?.lastScrape || null;
+  const cells: [string, ReactNode][] = a ? [
+    ['Overall', a.diagnosis ? <Pill tone={sevTone[a.diagnosis.severity]}>{a.diagnosis.title}</Pill> : <Pill tone={statusTone[a.status] || 'muted'}>{statusLabel[a.status] || a.status}</Pill>],
+    ['Agent', <Pill tone={statusTone[a.status] || 'muted'}>{statusLabel[a.status] || a.status}</Pill>],
+    ['Metrics', data ? <span className={data.ok ? 'c-green' : data.ok === false ? 'c-red' : 'dim'}>{data.ok ? 'Receiving' : data.value}</span> : <span className="dim">-</span>],
+    ['Reachability', ping ? <span className={ping.ok ? 'c-green' : 'c-red'}>{ping.ok ? 'Ping OK' : 'No ping answer'}</span> : <span className="dim">not probed</span>],
+    ['Last metric', last ? <Time ms={Date.parse(last)} text={ago(last)} /> : <span className="dim">never</span>],
+    ['Agent version', <span>{a.version || '-'} {a.outdated ? <Pill tone="orange">update: {agents.data?.latest}</Pill> : <span className="dim">(latest)</span>}</span>],
+  ] : [
+    ['Overall', <HealthPill health={scrape!.health} detail={scrape!.lastError || undefined} />],
+    ['Collected by', <span>Prometheus scrape</span>],
+    ['Last metric', last ? <Time ms={Date.parse(last)} text={ago(last)} /> : <span className="dim">never</span>],
+  ];
+  const disagree = a?.diagnosis && a.diagnosis.severity !== 'ok' && a.diagnosis.code !== 'rebooted';
+  return (
+    <section className="health-strip" aria-label="Health">
+      <div className="hs-cells">{cells.map(([k, v]) => <div key={k} className="hs-cell"><div className="dim">{k}</div><div>{v}</div></div>)}</div>
+      {disagree && <div className={`hs-diag ${a!.diagnosis!.severity}`}>{a!.diagnosis!.detail}{canOpen('/agents') && <> <Link to="/agents?tab=linux">Agents page →</Link></>}</div>}
+    </section>
   );
 }

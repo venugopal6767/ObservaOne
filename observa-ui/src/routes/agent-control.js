@@ -22,8 +22,10 @@ import { counterDelta, agentStatus, agentProblems, compareVersions } from '../he
 import { ds } from '../datasources.js';
 import { parseExposition, writeToPrometheus } from '../promwrite.js';
 import { parseCertRequest, issueAgentCert } from '../agentpki.js';
+import { effectiveFor, toAgentMap, deliverActions, recordResult, storeDiagnostics, scrubBundle } from '../agentmgmt.js';
 
-export const AGENT_LATEST = '1.2.0';
+// the version this server publishes in agent/files (AGENT_LATEST_VERSION overrides it, e.g. for a lab or a pinned release)
+export const AGENT_LATEST = /^\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(process.env.AGENT_LATEST_VERSION || '') ? process.env.AGENT_LATEST_VERSION : '1.3.0';
 export const ENROLL_TOKEN_RE = /^oat_[0-9a-f]{8}_[A-Za-z0-9_-]{20,64}$/;
 export const CREDENTIAL_RE = /^oac_([0-9a-f]{20})_([A-Za-z0-9_-]{43})$/;
 const PLATFORMS = ['linux'];                     // enrollment is implemented for the Linux agent
@@ -151,6 +153,8 @@ function parseHeartbeat(b) {
       droppedPayloads: n(b.droppedPayloads),
       lastUploadAgoSeconds: n(b.lastUploadAgoSeconds, 1e9),
       collectors, collectorErrors, hostLocked, mode, addresses, pull,
+      configVersion: n(b.configVersion, 9e15),
+      configError: text(b.configError, 300),
       lastError: text(b.lastError, 300),
       kernel: text(b.kernel, 100),
     },
@@ -240,6 +244,14 @@ const enrollHandler = wrap(async (req, res) => {
         return { deny: 'agent_online', status: 409, msg: `An agent for ${reuse.host} on this machine is online right now. Uninstall it there, or remove it on the Agents page, before enrolling again.` };
       }
     }
+    // a token made by the Add Target wizard binds the agent to its target; the target's env / role / labels fill in
+    // whatever the installer did not set
+    const target = t.target_id ? (await c.query('SELECT * FROM targets WHERE id = $1', [t.target_id])).rows[0] : null;
+    if (target) {
+      v.env = v.env || target.env;
+      v.role = v.role || target.role;
+      v.labels = { ...(target.labels || {}), ...v.labels };
+    }
     const idHex = crypto.randomBytes(10).toString('hex');
     const id = reuse ? reuse.id : `agt_${idHex}`;
     const credential = `oac_${id.slice(4)}_${credentialSecret}`;
@@ -248,9 +260,9 @@ const enrollHandler = wrap(async (req, res) => {
     if (reuse) {
       await c.query(`UPDATE agents SET credential_hash = $2, os = $3, arch = $4, version = $5, env = $6, role = $7, labels = $8,
                        kernel = $9, ip = $10, token_id = $11, enrolled_at = now(), last_heartbeat = NULL, blocked = FALSE, diag = '{}',
-                       mode = $12, pull = '{}'
+                       mode = $12, pull = '{}', target_id = COALESCE($13, target_id)
                      WHERE id = $1`,
-      [id, sha256(credential), v.os, v.arch, v.version, v.env, v.role, JSON.stringify(v.labels), v.kernel, ip, t.id, v.mode]);
+      [id, sha256(credential), v.os, v.arch, v.version, v.env, v.role, JSON.stringify(v.labels), v.kernel, ip, t.id, v.mode, target?.id || null]);
       host = reuse.host;
     } else {
       // Another machine already uses this host name: never overwrite it, give this one a distinct name.
@@ -259,9 +271,9 @@ const enrollHandler = wrap(async (req, res) => {
         await c.query('SAVEPOINT ins');
         try {
           await c.query(`INSERT INTO agents (id, host, platform, os, arch, version, env, role, labels, kernel, ip, token_id,
-                                             credential_hash, machine_hash, mode, enrolled_at, first_seen, last_seen)
-                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15, now(), now(), now())`,
-          [id, name, v.platform, v.os, v.arch, v.version, v.env, v.role, JSON.stringify(v.labels), v.kernel, ip, t.id, sha256(credential), v.machine, v.mode]);
+                                             credential_hash, machine_hash, mode, target_id, enrolled_at, first_seen, last_seen)
+                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16, now(), now(), now())`,
+          [id, name, v.platform, v.os, v.arch, v.version, v.env, v.role, JSON.stringify(v.labels), v.kernel, ip, t.id, sha256(credential), v.machine, v.mode, target?.id || null]);
           await c.query('RELEASE SAVEPOINT ins');
           host = name;
           break;
@@ -334,7 +346,8 @@ const heartbeatHandler = wrap(async (req, res) => {
   if (now - prevWrite >= 5_000) { // at most one write per agent every 5 s: a burst cannot overload the database
     lastWrite.set(agent.id, now);
     if (lastWrite.size > 50_000) lastWrite.clear();
-    const prev = (await one('SELECT diag FROM agents WHERE id = $1', [agent.id]))?.diag || {};
+    const prevRow = await one('SELECT diag, ip, last_heartbeat FROM agents WHERE id = $1', [agent.id]);
+    const prev = prevRow?.diag || {};
     const failures = counterDelta(Number(prev.uploadFailedTotal), v.uploadFailedTotal ?? NaN);
     const diag = {
       collectors: v.collectors,
@@ -354,17 +367,29 @@ const heartbeatHandler = wrap(async (req, res) => {
     await q(`UPDATE agents SET last_heartbeat = GREATEST(COALESCE(last_heartbeat, now()), now()), heartbeats = heartbeats + 1,
                version = COALESCE($2, version), boot_time = CASE WHEN $3::float8 IS NULL THEN boot_time ELSE to_timestamp($3::float8) END,
                kernel = CASE WHEN $4 = '' THEN kernel ELSE $4 END, diag = $5, ip = $6,
-               mode = $7, pull = $8, addresses = $9
-             WHERE id = $1`, [agent.id, v.version, v.bootTime, v.kernel, JSON.stringify(diag), ip, v.mode, JSON.stringify(v.pull || {}), JSON.stringify(v.addresses)]);
+               mode = $7, pull = $8, addresses = $9,
+               config_applied = COALESCE($10, config_applied), config_error = $11
+             WHERE id = $1`, [agent.id, v.version, v.bootTime, v.kernel, JSON.stringify(diag), ip, v.mode, JSON.stringify(v.pull || {}), JSON.stringify(v.addresses),
+      v.configVersion, v.configError || '']);
+    // address changes are kept as history (search, joining old data)
+    if (prevRow && prevRow.ip && prevRow.ip !== ip) {
+      await q(`INSERT INTO agent_aliases (agent_id, kind, value, seen_from) VALUES ($1, 'ip', $2, $3)`, [agent.id, prevRow.ip, prevRow.last_heartbeat]);
+    }
     if (prev.collectors === undefined) audit(req, 'agent.first_heartbeat', { username: 'agent', id: agent.id, host: agent.host });
   }
   const row = await one('SELECT * FROM agents WHERE id = $1', [agent.id]);
-  res.json({
+  const eff = await effectiveFor(row);
+  // agent 1.1/1.2 understand only "config" (and ignore the rest); 1.3 also applies configVersion and actions
+  const answer = {
     agentId: agent.id,
     status: describeAgent(row, now).status,
     heartbeatSeconds: config.agent.heartbeatSeconds,
     latestVersion: AGENT_LATEST,
-  });
+    config: toAgentMap(eff.settings),
+    configVersion: eff.version,
+  };
+  if (compareVersions(v.version || row.version || '0.0.0', '1.3.0') >= 0) answer.actions = await deliverActions(agent.id);
+  res.json(answer);
 });
 agentControlRouter.post('/v1/agents/:id/heartbeat', heartbeatHandler);
 agentControlRouter.post('/agent/v1/heartbeat', heartbeatHandler); // agent 1.1
@@ -387,7 +412,32 @@ agentControlRouter.post('/v1/agents/:id/pull-certificate', wrap(async (req, res)
 agentControlRouter.get('/v1/agents/:id/config', wrap(async (req, res) => {
   const agent = await authAgent(req, res, 'config');
   if (!agent) return;
-  res.json({ agentId: agent.id, heartbeatSeconds: config.agent.heartbeatSeconds, latestVersion: AGENT_LATEST, config: {} });
+  const eff = await effectiveFor(await one('SELECT * FROM agents WHERE id = $1', [agent.id]));
+  res.json({ agentId: agent.id, heartbeatSeconds: config.agent.heartbeatSeconds, latestVersion: AGENT_LATEST, config: toAgentMap(eff.settings), configVersion: eff.version });
+}));
+
+// Result of an action the Agents page requested (diagnostics failure, restart, upgrade outcome).
+agentControlRouter.post('/v1/agents/:id/actions/:actionId/result', json8k, wrap(async (req, res) => {
+  const agent = await authAgent(req, res, 'action');
+  if (!agent) return;
+  const r = await recordResult(agent.id, Number(req.params.actionId) || 0, req.body || {});
+  if (!r) return fail(res, 404, 'not_found', 'No open action with that id for this agent.');
+  audit(req, `agent.action.${r.state}`, { username: 'agent', id: agent.id, host: agent.host, action: r.action, actionId: r.id, message: r.result?.message });
+  res.json({ ok: true });
+}));
+
+// Diagnostics bundle (<= 1 MB). Stored as data, secrets scrubbed on the way in; shown and downloaded on the Agents page.
+agentControlRouter.post('/v1/agents/:id/diagnostics', express.json({ limit: '1mb', type: () => true }), wrap(async (req, res) => {
+  const agent = await authAgent(req, res, 'diagnostics');
+  if (!agent) return;
+  if (rateLimited(`diag:${agent.id}`, 10, 3_600_000)) { res.set('Retry-After', '600'); return fail(res, 429, 'rate_limited', 'Too many diagnostics uploads (10 per hour).'); }
+  const b = req.body;
+  if (!b || typeof b !== 'object' || !b.bundle || typeof b.bundle !== 'object' || Array.isArray(b.bundle)) return fail(res, 400, 'bad_request', 'Body must be { actionId, bundle: {...} }.');
+  const bundle = scrubBundle(b.bundle);
+  const size = Buffer.byteLength(JSON.stringify(bundle));
+  const r = await storeDiagnostics(agent.id, Number(b.actionId) || null, bundle, size);
+  audit(req, 'agent.diagnostics', { username: 'agent', id: agent.id, host: agent.host, diagnosticsId: r.id, size });
+  res.status(201).json({ ok: true, id: r.id });
 }));
 
 // ---------------- metrics intake ----------------

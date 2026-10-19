@@ -19,6 +19,10 @@
 #   --pull-port N       pull mode: port to listen on (default 9110)
 #   --pull-advertise A  pull mode: address Prometheus should use (NAT / several interfaces), e.g. 10.0.0.5
 #   --pull-allow CIDR   pull mode: only these source addresses may connect, may be repeated
+#   --docker-metrics    also read Docker containers (adds the agent user to the docker group: root-equivalent)
+#   --nginx-status URL  read Nginx stub_status, e.g. http://127.0.0.1/nginx_status
+#   --jolokia NAME=URL  read a JVM through Jolokia (NAME becomes service_name), may be repeated
+#   --exporter NAME=URL read a local Prometheus exporter and forward it, may be repeated
 #   --files-dir DIR     take the agent binary from this folder (no download)
 #   --docker            Docker host: uses the previous-generation installer (install-legacy.sh)
 #   --uninstall         stop and remove the agent (only its own files, user and service)
@@ -28,7 +32,7 @@
 # An old agent.conf (agent 1.1) is converted to agent.yaml once (the old file is kept as agent.conf.migrated).
 set -euo pipefail
 
-AGENT_VERSION="1.2.0"
+AGENT_VERSION="1.3.0"
 PREFIX=/opt/observaone-agent
 ETC=/etc/observaone-agent
 VAR=/var/lib/observaone-agent
@@ -37,7 +41,8 @@ SVC_USER=observaone-agent
 UNIT=/etc/systemd/system/observaone-agent.service
 
 SERVER="" TOKEN_FILE="" CA_SHA="" CA_FILE_IN="" HOST_NAME="" ENV_NAME="" ROLE="" FILES_DIR="" UNINSTALL=0 DOCKER=0
-MODE="" PULL_PORT="" PULL_ADVERTISE=""
+MODE="" PULL_PORT="" PULL_ADVERTISE="" DOCKER_METRICS=0 NGINX_URL=""
+JOLOKIA=() EXPORTERS=()
 LABELS=() PULL_ALLOW=()
 ORIG_ARGS=("$@")
 
@@ -61,10 +66,14 @@ while [ $# -gt 0 ]; do
     --pull-port) PULL_PORT="$2"; shift 2 ;;
     --pull-advertise) PULL_ADVERTISE="$2"; shift 2 ;;
     --pull-allow) PULL_ALLOW+=("$2"); shift 2 ;;
+    --docker-metrics) DOCKER_METRICS=1; shift ;;
+    --nginx-status) NGINX_URL="$2"; shift 2 ;;
+    --jolokia) JOLOKIA+=("$2"); shift 2 ;;
+    --exporter) EXPORTERS+=("$2"); shift 2 ;;
     --files-dir) FILES_DIR="$2"; shift 2 ;;
     --docker) DOCKER=1; shift ;;
     --uninstall) UNINSTALL=1; shift ;;
-    -h|--help) sed -n '2,29p' "$0" 2>/dev/null || true; exit 0 ;;
+    -h|--help) sed -n '2,33p' "$0" 2>/dev/null || true; exit 0 ;;
     *) die "Unknown option: $1 (see --help)" ;;
   esac
 done
@@ -75,8 +84,8 @@ done
 if [ "$UNINSTALL" -eq 1 ]; then
   say "Removing ObservaOne Agent"
   if command -v systemctl >/dev/null 2>&1; then
-    systemctl disable --now observaone-agent.service observaone-node-exporter.service 2>/dev/null || true
-    rm -f "$UNIT" /etc/systemd/system/observaone-node-exporter.service
+    systemctl disable --now observaone-agent.service observaone-agent-updater.path observaone-node-exporter.service 2>/dev/null || true
+    rm -f "$UNIT" /etc/systemd/system/observaone-node-exporter.service /etc/systemd/system/observaone-agent-updater.path /etc/systemd/system/observaone-agent-updater.service
     systemctl daemon-reload 2>/dev/null || true
   fi
   if [ -f "$PREFIX/docker-compose.yml" ] && command -v docker >/dev/null 2>&1; then (cd "$PREFIX" && docker compose down) || true; fi
@@ -116,6 +125,9 @@ case "$MODE" in ""|push|pull) ;; *) die "--mode must be push or pull" ;; esac
 [ -z "$PULL_PORT" ] || { [[ "$PULL_PORT" =~ ^[0-9]{4,5}$ ]] && [ "$PULL_PORT" -ge 1024 ] && [ "$PULL_PORT" -le 65535 ]; } || die "--pull-port must be 1024..65535 (the agent does not run as root)"
 [ -z "$PULL_ADVERTISE" ] || [[ "$PULL_ADVERTISE" =~ ^[A-Za-z0-9.:_\[\]-]{1,255}$ ]] || die "--pull-advertise: a host name or IP, optionally :port"
 for a in "${PULL_ALLOW[@]}"; do [[ "$a" =~ ^[0-9A-Fa-f.:]+(/[0-9]{1,3})?$ ]] || die "--pull-allow $a: an IP address or CIDR"; done
+URL_RE='^https?://[A-Za-z0-9._~:@%/?&=+-]{1,400}$'
+[ -z "$NGINX_URL" ] || [[ "$NGINX_URL" =~ $URL_RE ]] || die "--nginx-status: an http:// or https:// URL"
+for j in "${JOLOKIA[@]}" "${EXPORTERS[@]}"; do [[ "${j%%=*}" =~ ^[a-z][a-z0-9_]{0,30}$ ]] && [[ "${j#*=}" =~ $URL_RE ]] || die "$j: use name=URL (name lower case a-z 0-9 _; URL http:// or https://)"; done
 
 TMP_BASE="${OBSERVA_TMPDIR:-/var/tmp}"; [ -d "$TMP_BASE" ] || TMP_BASE=/tmp
 FREE_MB="$(df -Pm "$TMP_BASE" | awk 'NR==2 {print $4}')"; [ "${FREE_MB:-0}" -ge 50 ] || die "Only ${FREE_MB} MB free in $TMP_BASE; 50 MB needed."
@@ -253,6 +265,25 @@ if [ "$NEW_CONF" -eq 0 ] && { [ ${#LABELS[@]} -gt 0 ] || [ -n "$PULL_PORT$PULL_A
   } > "$OPT"
   chown root:"$SVC_USER" "$OPT"; chmod 0640 "$OPT"
 fi
+# application collectors from the command line go to their own file (re-running with none keeps the file)
+if [ "$DOCKER_METRICS" -eq 1 ] || [ -n "$NGINX_URL" ] || [ ${#JOLOKIA[@]} -gt 0 ] || [ ${#EXPORTERS[@]} -gt 0 ]; then
+  COL="$ETC/conf.d/60-collectors.yaml"
+  {
+    echo "# Written by the installer from its command-line options (last run: $(date -u +%Y-%m-%dT%H:%MZ))."
+    if [ "$DOCKER_METRICS" -eq 1 ]; then printf 'docker:\n  enabled: true\n'; fi
+    if [ -n "$NGINX_URL" ]; then printf 'nginx:\n  status_url: "%s"\n' "$NGINX_URL"; fi
+    if [ ${#JOLOKIA[@]} -gt 0 ]; then echo "jolokia:"; for j in "${JOLOKIA[@]}"; do printf '  %s: "%s"\n' "${j%%=*}" "${j#*=}"; done; fi
+    if [ ${#EXPORTERS[@]} -gt 0 ]; then echo "exporters:"; for j in "${EXPORTERS[@]}"; do printf '  %s: "%s"\n' "${j%%=*}" "${j#*=}"; done; fi
+  } > "$COL"
+  chown root:"$SVC_USER" "$COL"; chmod 0640 "$COL"   # may hold a Jolokia password: not world-readable
+fi
+if [ "$DOCKER_METRICS" -eq 1 ]; then
+  if getent group docker >/dev/null; then
+    usermod -aG docker "$SVC_USER" && warn "The agent user is now in the docker group. That is root-equivalent on this host; the agent only sends GET requests to the Docker API."
+  else
+    warn "--docker-metrics: no docker group on this host (is Docker installed?). Container metrics stay off."
+  fi
+fi
 if [ -n "$CA_FILE" ] && [ "$CA_FILE" != "$ETC/ca.crt" ]; then install -m 0644 "$CA_FILE" "$ETC/ca.crt"; fi
 [ -s "$ETC/ca.crt" ] && ysetkey ca_file "$ETC/ca.crt"
 chown root:"$SVC_USER" "$CONF"; chmod 0640 "$CONF"
@@ -334,8 +365,92 @@ CPUQuota=25%
 WantedBy=multi-user.target
 EOF
 
+# ---------------------------------------------------------------- updater (upgrades requested on the Agents page)
+# The agent never replaces its own binary and never runs as root. When an admin clicks Upgrade, the agent writes
+# upgrade-request.json in its state folder; this root-owned path unit notices it and runs the updater, which
+# downloads the binary from the SAME server with the SAME trust settings, verifies it, swaps it (keeping .prev),
+# restarts the agent and rolls back if no heartbeat arrives in 60 s. It reads only the action id from the request:
+# the version installed is whatever this server publishes, never something the request names.
+UPD="$PREFIX/bin/observaone-agent-updater"
+cat > "$UPD.new" <<'UPDATER'
+#!/usr/bin/env bash
+# observaone-agent-updater: run by systemd (root) when the agent asks for an upgrade (Agents page -> Upgrade).
+set -uo pipefail
+PREFIX=${OBSERVA_PREFIX:-/opt/observaone-agent} VAR=${OBSERVA_VAR:-/var/lib/observaone-agent} ETC=${OBSERVA_ETC:-/etc/observaone-agent} SVC_USER=observaone-agent
+AGENT="$PREFIX/bin/observaone-agent"
+REQ="$VAR/upgrade-request.json" RES="$VAR/upgrade-result.json"
+[ -f "$REQ" ] || exit 0
+WORK="$(mktemp -p "$VAR" upgrade.XXXXXX)"; mv -f "$REQ" "$WORK"
+ACTION="$(head -c 4096 "$WORK" | sed -n 's/.*"actionId": *\([0-9]\{1,18\}\).*/\1/p' | head -1)"; rm -f "$WORK"
+[ -n "$ACTION" ] || exit 0
+OLDV="$("$AGENT" version 2>/dev/null | awk '{print $2}')"
+result() { # result OK(true|false) MESSAGE VERSION
+  local tmp msg; tmp="$(mktemp -p "$VAR" result.XXXXXX)"; msg="$(printf '%s' "$2" | tr -d '"\\\r\n' | cut -c1-300)"
+  printf '{"actionId":%s,"ok":%s,"message":"%s","version":"%s","finishedAt":"%s"}\n' "$ACTION" "$1" "$msg" "$3" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$tmp"
+  chown "$SVC_USER:$SVC_USER" "$tmp"; chmod 0640 "$tmp"; mv -f "$tmp" "$RES"
+  logger -t observaone-agent-updater "$msg" 2>/dev/null || true
+  rm -rf "${TMPD:-/nonexistent}"
+  exit 0
+}
+cfg() { "$AGENT" config show 2>/dev/null | awk -v k="$1" '$1==k {print $2}'; }
+SERVER="$(cfg server)"; CA="$(cfg ca_file)"; [ "$CA" = "(empty)" ] && CA=""
+[ -n "$SERVER" ] || result false "cannot read the server address from the configuration" "$OLDV"
+case "$(uname -m)" in x86_64|amd64) ARCH=amd64 ;; aarch64|arm64) ARCH=arm64 ;; *) result false "unsupported CPU $(uname -m)" "$OLDV" ;; esac
+BIN="observaone-agent-linux-$ARCH"
+CURL=(curl -fsS --connect-timeout 15 --max-time 300); [ -n "$CA" ] && CURL+=(--cacert "$CA")
+TMPD="$(mktemp -d /var/tmp/observaone-upgrade.XXXXXX)"; chmod 0755 "$TMPD"   # check-config runs as the agent user
+"${CURL[@]}" -o "$TMPD/SHA256SUMS" "$SERVER/agent/files/SHA256SUMS" || result false "cannot download SHA256SUMS from $SERVER" "$OLDV"
+"${CURL[@]}" -o "$TMPD/$BIN" "$SERVER/agent/files/$BIN" || result false "cannot download $BIN from $SERVER" "$OLDV"
+# SIGNATURE-CHECK
+WANT="$(awk -v f="$BIN" '$2==f || $2=="*"f {print $1}' "$TMPD/SHA256SUMS")"; GOT="$(sha256sum "$TMPD/$BIN" | cut -d' ' -f1)"
+[ -n "$WANT" ] && [ "$WANT" = "$GOT" ] || result false "checksum mismatch for $BIN; nothing changed" "$OLDV"
+chmod 0755 "$TMPD/$BIN"
+NEWV="$("$TMPD/$BIN" version 2>/dev/null | awk '{print $2}')"
+[ -n "$NEWV" ] || result false "the downloaded agent does not run on this machine; nothing changed" "$OLDV"
+[ "$NEWV" = "$OLDV" ] && result true "already at $OLDV (the server publishes this version)" "$OLDV"
+runuser -u "$SVC_USER" -- "$TMPD/$BIN" check-config >/dev/null 2>&1 || result false "$NEWV refuses the current configuration; nothing changed" "$OLDV"
+cp -p "$AGENT" "$AGENT.prev"
+install -m 0755 "$TMPD/$BIN" "$AGENT.new" && mv -f "$AGENT.new" "$AGENT"
+echo "$NEWV" > "$PREFIX/VERSION"
+START="$(date -u +%s)"
+systemctl restart observaone-agent.service
+for _ in $(seq 1 60); do
+  HB="$(sed -n 's/.*"lastHeartbeatOk": *"\([^"]*\)".*/\1/p' "$VAR/status.json" 2>/dev/null)"
+  V="$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$VAR/status.json" 2>/dev/null | head -1)"
+  if [ "$V" = "$NEWV" ] && [ -n "$HB" ] && [ "$(date -d "$HB" +%s 2>/dev/null || echo 0)" -ge "$START" ]; then
+    result true "upgraded $OLDV -> $NEWV" "$NEWV"
+  fi
+  sleep 1
+done
+mv -f "$AGENT" "$AGENT.failed"; mv -f "$AGENT.prev" "$AGENT"; echo "$OLDV" > "$PREFIX/VERSION"
+systemctl restart observaone-agent.service
+result false "$NEWV sent no heartbeat within 60 s: rolled back to $OLDV (the new binary is kept as $AGENT.failed)" "$OLDV"
+UPDATER
+chmod 0755 "$UPD.new"; mv -f "$UPD.new" "$UPD"
+cat > /etc/systemd/system/observaone-agent-updater.service <<EOF
+[Unit]
+Description=ObservaOne Agent updater (upgrades requested on the Agents page)
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=$UPD
+TimeoutStartSec=600
+EOF
+cat > /etc/systemd/system/observaone-agent-updater.path <<EOF
+[Unit]
+Description=Watch for upgrade requests from the ObservaOne Agent
+
+[Path]
+PathExists=$VAR/upgrade-request.json
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
 systemctl daemon-reload
 systemctl enable observaone-agent.service >/dev/null 2>&1
+systemctl enable --now observaone-agent-updater.path >/dev/null 2>&1 || warn "Could not enable the updater: upgrades from the Agents page will not work on this host (re-running this installer still does)."
 STARTED_AT="$(date -u +%s)"
 systemctl restart observaone-agent.service
 

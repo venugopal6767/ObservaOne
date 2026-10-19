@@ -14,6 +14,7 @@ import { toneClass } from '@/lib/theme';
 import { useApp, usePlainQuery } from '@/app/AppContext';
 import { ErrorState, Field, InfoBox, Modal, PageHead, Pill, Select, StateBanner, StateView, TableFoot, TableWrap, Tabs, Time, copyText, toast, useDialogs, usePager, type Tone } from '@/components/ui';
 import { StatCard } from '@/components/StatCard';
+import { AgentManagePanel, FleetSettings } from '@/components/AgentManage';
 
 type Platform = 'linux' | 'windows' | 'docker' | 'kubernetes';
 type Status = 'online' | 'attention' | 'not_reporting' | 'offline' | 'pending' | 'blocked';
@@ -59,7 +60,7 @@ const DISTROS: Record<string, [string, string]> = {
   amazon: ['Amazon Linux 2 / 2023', 'sudo yum install -y curl'],
   suse: ['SUSE / openSUSE', 'sudo zypper install -y curl'],
 };
-type TabKey = 'overview' | Platform | 'tokens';
+type TabKey = 'overview' | Platform | 'settings' | 'tokens';
 type StatusFilter = 'all' | Status;
 
 const counts = (list: Agent[]) => ({
@@ -84,7 +85,7 @@ export default function Agents() {
     const t = params.get('tab');
     if (t === 'install') return (params.get('platform') as Platform) || 'linux';
     if (t === 'fleet') return 'overview';
-    if (t && (t === 'tokens' || t in PLATFORMS)) return t as TabKey;
+    if (t && (t === 'tokens' || t === 'settings' || t in PLATFORMS)) return t as TabKey;
     return 'overview';
   })();
   const view = params.get('view') === 'install' || params.get('tab') === 'install' ? 'install' : 'agents';
@@ -96,16 +97,17 @@ export default function Agents() {
   const info = useQuery({ queryKey: ['agents-install-info'], queryFn: () => api<InstallInfo>('/agents/install-info'), staleTime: 300_000 });
   const d = q.data;
   const head = <PageHead title="Agents" sub="One ObservaOne Agent per server sends its metrics to this platform"
-    actions={canManage ? <button className="btn btn-primary" onClick={() => go(tab in PLATFORMS ? tab : 'linux', 'install')}><Plus size={15} />Install agent</button> : undefined} />;
+    actions={canManage ? <><Link className="btn" to="/infrastructure/add"><Plus size={15} />Add target</Link><button className="btn btn-primary" onClick={() => go(tab in PLATFORMS ? tab : 'linux', 'install')}><Plus size={15} />Install agent</button></> : undefined} />;
 
   const tabs: [TabKey, string][] = [['overview', `All platforms${d ? ` (${d.agents.length})` : ''}`], ...PLATFORM_KEYS.map((p) => [p, `${PLATFORMS[p].label}${d ? ` (${d.agents.filter((a) => a.platform === p).length})` : ''}`] as [TabKey, string])];
-  if (canManage) tabs.push(['tokens', 'Enrollment tokens']);
+  if (canManage) tabs.push(['settings', 'Settings'], ['tokens', 'Enrollment tokens']);
 
   return (
     <>
       {head}
       <div className="toolbar"><Tabs items={tabs} active={tab} onChange={(k) => go(k)} label="Agent platforms" /></div>
       {tab === 'tokens' ? (canManage ? <Tokens /> : null)
+        : tab === 'settings' ? <FleetSettings canManage={canManage} />
         : q.isPending ? <TableWrap label="Agents"><StateView kind="loading" skeleton="table" /></TableWrap>
           : q.isError ? <TableWrap label="Agents"><ErrorState error={q.error} what="Agents" /></TableWrap>
             : tab === 'overview' ? <Overview data={d!} canManage={canManage} go={go} />
@@ -340,6 +342,7 @@ function AgentDetail({ id, host, canManage, onClose }: { id: string; host: strin
               </table>
             </section>
           )}
+          {d.enrolled && <AgentManagePanel id={d.id} host={d.host} canManage={canManage} />}
           {canOpen('/metrics') && <p style={{ marginTop: 12 }}><Link to={`/metrics/host/${encodeURIComponent(d.host)}`} onClick={onClose}>Open the host view for {d.host} →</Link></p>}
         </>
       )}
@@ -367,6 +370,10 @@ function commandFor(p: Platform, info: InstallInfo, w: Wiz): string {
       if (w.pullAdvertise.trim()) opts.push(`--pull-advertise ${shq(w.pullAdvertise.trim())}`);
       for (const a of w.pullAllow.split(',').map((x) => x.trim()).filter(Boolean)) opts.push(`--pull-allow ${shq(a)}`);
     }
+    if (w.dockerMetrics) opts.push('--docker-metrics');
+    if (w.nginx.trim()) opts.push(`--nginx-status ${shq(w.nginx.trim())}`);
+    for (const j of w.jolokia.split(',').map((x) => x.trim()).filter(Boolean)) opts.push(`--jolokia ${shq(j)}`);
+    for (const j of w.exporters.split(',').map((x) => x.trim()).filter(Boolean)) opts.push(`--exporter ${shq(j)}`);
     return [`${curlGet} ${S}/agent/install.sh -o observaone-install.sh`, `sudo bash observaone-install.sh \\\n  ${opts.join(' \\\n  ')}`].join('\n');
   }
   const t = w.token || '<TOKEN>';
@@ -413,11 +420,11 @@ function commandFor(p: Platform, info: InstallInfo, w: Wiz): string {
   return lines.join('\n');
 }
 
-interface Wiz { distro: string; env: string; role: string; labels: string; logs: string; cluster: string; token: string; securityLog: boolean; mode: 'push' | 'pull'; pullPort: string; pullAdvertise: string; pullAllow: string }
+interface Wiz { distro: string; env: string; role: string; labels: string; logs: string; cluster: string; token: string; securityLog: boolean; mode: 'push' | 'pull'; pullPort: string; pullAdvertise: string; pullAllow: string; dockerMetrics: boolean; nginx: string; jolokia: string; exporters: string }
 function InstallWizard({ p, info, latest, goTokens }: { p: Platform; info: InstallInfo; latest: string; goTokens: () => void }) {
   const { open } = useDialogs();
-  const [w, setW] = useState<Wiz>({ distro: 'debian', env: '', role: '', labels: '', logs: '', cluster: '', token: '', securityLog: false, mode: 'push', pullPort: '', pullAdvertise: '', pullAllow: '' });
-  const set = (k: keyof Wiz) => (e: React.ChangeEvent<HTMLInputElement>) => setW({ ...w, [k]: k === 'securityLog' ? e.target.checked : e.target.value });
+  const [w, setW] = useState<Wiz>({ distro: 'debian', env: '', role: '', labels: '', logs: '', cluster: '', token: '', securityLog: false, mode: 'push', pullPort: '', pullAdvertise: '', pullAllow: '', dockerMetrics: false, nginx: '', jolokia: '', exporters: '' });
+  const set = (k: keyof Wiz) => (e: React.ChangeEvent<HTMLInputElement>) => setW({ ...w, [k]: k === 'securityLog' || k === 'dockerMetrics' ? e.target.checked : e.target.value });
   const S = info.server;
   const c = info.cert || { available: false };
   const pin = c.available && c.selfSigned;
@@ -494,6 +501,21 @@ function InstallWizard({ p, info, latest, goTokens }: { p: Platform; info: Insta
           {(p === 'windows' || p === 'docker') && <Field label="Extra log files (optional)"><input className="input" placeholder={p === 'windows' ? 'C:\\inetpub\\logs\\LogFiles\\*\\*.log' : '/var/log/nginx/*.log'} value={w.logs} onChange={set('logs')} /></Field>}
         </div>
         {p === 'windows' && <label className="check-row"><input type="checkbox" checked={w.securityLog} onChange={set('securityLog')} /><span>Also send the Security event log (large)</span></label>}
+        {p === 'linux' && (
+          <details className="app-collectors">
+            <summary>Applications on this server (optional): Docker, Nginx, JVM, local exporters</summary>
+            <div className="grid cols-2" style={{ marginTop: 10 }}>
+              <Field label="Nginx stub_status URL" hint="stub_status must be on, e.g. location /nginx_status { stub_status; allow 127.0.0.1; deny all; }"><input className="input" placeholder="http://127.0.0.1/nginx_status" value={w.nginx} onChange={set('nginx')} /></Field>
+              <Field label="JVMs through Jolokia" hint="name=URL, comma separated; the name becomes service_name."><input className="input" placeholder="payments=http://127.0.0.1:8778/jolokia" value={w.jolokia} onChange={set('jolokia')} /></Field>
+              <Field label="Local exporters to forward" hint="name=URL, comma separated; samples get exporter=name."><input className="input" placeholder="postgres=http://127.0.0.1:9187/metrics" value={w.exporters} onChange={set('exporters')} /></Field>
+              <div>
+                <label className="check-row"><input type="checkbox" checked={w.dockerMetrics} onChange={set('dockerMetrics')} /><span>Docker containers (CPU, memory, state)</span></label>
+                {w.dockerMetrics && <div className="c-orange" style={{ fontSize: 12 }}>Adds the agent user to the docker group, which is root-equivalent on the host. The agent only reads (GET) from the Docker API.</div>}
+              </div>
+            </div>
+            <div className="dim" style={{ fontSize: 12 }}>Top processes are on by default (10 by CPU and 10 by memory); change it under Agents → Settings or per agent.</div>
+          </details>
+        )}
       </section>
       <section className="panel">
         <div className="panel-head"><h3>4. Run</h3><button className="btn btn-sm right" onClick={() => copyText(cmd, 'Command copied')}><Copy size={13} />Copy</button></div>

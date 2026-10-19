@@ -28,7 +28,8 @@ type Client struct {
 	version string
 }
 
-func NewClient(cfg *Config, version string) (*Client, error) {
+// TLSConfig: verification always on; with ca_file, ONLY that CA is trusted (self-signed servers are pinned).
+func TLSConfig(cfg *Config) (*tls.Config, error) {
 	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
 	if cfg.CAFile != "" {
 		pem, err := os.ReadFile(cfg.CAFile)
@@ -39,7 +40,15 @@ func NewClient(cfg *Config, version string) (*Client, error) {
 		if !pool.AppendCertsFromPEM(pem) {
 			return nil, fmt.Errorf("ca_file %s holds no PEM certificate", cfg.CAFile)
 		}
-		tlsCfg.RootCAs = pool // only this CA: a self-signed server certificate is pinned this way
+		tlsCfg.RootCAs = pool
+	}
+	return tlsCfg, nil
+}
+
+func NewClient(cfg *Config, version string) (*Client, error) {
+	tlsCfg, err := TLSConfig(cfg)
+	if err != nil {
+		return nil, err
 	}
 	tr := &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,

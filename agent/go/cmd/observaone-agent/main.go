@@ -7,15 +7,18 @@
 //	observaone-agent config show    [--config FILE]   settings in effect and where each one comes from
 //	observaone-agent config migrate [--config FILE]   turn an old agent.conf into agent.yaml
 //	observaone-agent reload         [--config FILE]   apply config changes without a restart (SIGHUP)
+//	observaone-agent diagnostics    [--config FILE]   print the diagnostics bundle (what "Request diagnostics" uploads)
 //	observaone-agent version
 package main
 
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -30,7 +33,7 @@ import (
 )
 
 // version is set at build time: -ldflags "-X main.version=1.1.0"
-var version = "1.2.0"
+var version = "1.3.0"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -46,12 +49,18 @@ func main() {
 	tokenFile := fs.String("token-file", "", "enroll: read the enrollment token from this file (deleted after a successful enrollment)")
 	force := fs.Bool("force", false, "enroll: enroll again even if this agent already has an identity")
 	_ = fs.Parse(args)
-	log := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	ring := core.NewLogRing(300)
+	log := slog.New(slog.NewJSONHandler(io.MultiWriter(os.Stderr, ring), &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	var err error
 	switch cmd {
 	case "run":
-		err = run(*cfgPath, log)
+		err = run(*cfgPath, log, ring)
+		if errors.Is(err, agent.ErrRestartRequested) {
+			os.Exit(agent.RestartExitCode) // systemd (Restart=on-failure) starts the agent again
+		}
+	case "diagnostics":
+		err = diagnostics(*cfgPath, log)
 	case "enroll":
 		err = enroll(*cfgPath, *tokenFile, *force, log)
 	case "status":
@@ -84,11 +93,23 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: observaone-agent run|enroll|status|check-config|config show|config migrate|reload|version [--config FILE]")
+	fmt.Fprintln(os.Stderr, "usage: observaone-agent run|enroll|status|check-config|config show|config migrate|reload|diagnostics|version [--config FILE]")
 }
 
-func run(cfgPath string, log *slog.Logger) error {
+func diagnostics(cfgPath string, log *slog.Logger) error {
 	a := &agent.Agent{Version: version, ConfigPath: cfgPath, Collectors: linux.All(), Log: log}
+	if err := a.Load(); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	b, _ := json.MarshalIndent(a.Diagnostics(ctx), "", "  ")
+	fmt.Println(string(b))
+	return nil
+}
+
+func run(cfgPath string, log *slog.Logger, ring *core.LogRing) error {
+	a := &agent.Agent{Version: version, ConfigPath: cfgPath, Collectors: linux.All(), Log: log, LogRing: ring}
 	if err := a.Load(); err != nil {
 		return err
 	}
@@ -195,7 +216,7 @@ func status(cfgPath string) error {
 }
 
 func showConfig(cfgPath string) error {
-	cfg, err := core.LoadConfig(cfgPath)
+	cfg, err := core.LoadConfigWithRemote(cfgPath, agent.LoadRemote(cfgPath)) // what the running agent uses
 	if err != nil {
 		return err
 	}

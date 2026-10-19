@@ -187,4 +187,70 @@ export const EXTRA_MIGRATIONS = [
       CREATE INDEX IF NOT EXISTS agent_nonces_seen_idx ON agent_nonces (seen_at);
     `,
   },
+  {
+    id: 8,
+    name: 'agents: targets, layered settings, actions, diagnostics bundles, past names',
+    sql: `
+      CREATE SEQUENCE IF NOT EXISTS agent_config_seq;
+      CREATE TABLE IF NOT EXISTS targets (
+        id          TEXT PRIMARY KEY,                       -- tgt_...
+        kind        TEXT NOT NULL DEFAULT 'linux',
+        name        TEXT NOT NULL,
+        env         TEXT NOT NULL DEFAULT '',
+        role        TEXT NOT NULL DEFAULT '',
+        labels      JSONB NOT NULL DEFAULT '{}'::jsonb,
+        mode        TEXT NOT NULL DEFAULT 'push',
+        token_id    BIGINT REFERENCES agent_tokens(id) ON DELETE SET NULL,
+        created_by  TEXT NOT NULL DEFAULT '',
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      ALTER TABLE agent_tokens ADD COLUMN IF NOT EXISTS target_id TEXT;
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS target_id TEXT;
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS config_applied BIGINT NOT NULL DEFAULT 0;   -- settings version the agent confirmed
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS config_error TEXT NOT NULL DEFAULT '';       -- why the agent refused the latest one
+      CREATE INDEX IF NOT EXISTS agents_target_idx ON agents (target_id);
+      -- settings layers: env -> target -> agent (later wins; host files on the agent win over all of them)
+      CREATE TABLE IF NOT EXISTS agent_configuration (
+        scope       TEXT NOT NULL,                          -- env | target | agent
+        scope_id    TEXT NOT NULL,
+        settings    JSONB NOT NULL DEFAULT '{}'::jsonb,
+        version     BIGINT NOT NULL,
+        updated_by  TEXT NOT NULL DEFAULT '',
+        updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (scope, scope_id)
+      );
+      -- fixed action list (never a command string)
+      CREATE TABLE IF NOT EXISTS agent_actions (
+        id            BIGSERIAL PRIMARY KEY,
+        agent_id      TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+        action        TEXT NOT NULL CHECK (action IN ('diagnostics', 'restart', 'upgrade')),
+        args          JSONB NOT NULL DEFAULT '{}'::jsonb,
+        state         TEXT NOT NULL DEFAULT 'pending',      -- pending | sent | done | failed | expired
+        requested_by  TEXT NOT NULL DEFAULT '',
+        requested_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+        sent_at       TIMESTAMPTZ,
+        done_at       TIMESTAMPTZ,
+        result        JSONB
+      );
+      CREATE INDEX IF NOT EXISTS agent_actions_agent_idx ON agent_actions (agent_id, state);
+      CREATE TABLE IF NOT EXISTS agent_diagnostics (
+        id          BIGSERIAL PRIMARY KEY,
+        agent_id    TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+        action_id   BIGINT,
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+        size        INT NOT NULL DEFAULT 0,
+        bundle      JSONB NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS agent_diagnostics_agent_idx ON agent_diagnostics (agent_id, created_at DESC);
+      -- old names and addresses (search, history)
+      CREATE TABLE IF NOT EXISTS agent_aliases (
+        agent_id    TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+        kind        TEXT NOT NULL,                          -- host | ip
+        value       TEXT NOT NULL,
+        seen_from   TIMESTAMPTZ,
+        seen_to     TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS agent_aliases_agent_idx ON agent_aliases (agent_id);
+    `,
+  },
 ];

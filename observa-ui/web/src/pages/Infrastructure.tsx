@@ -2,7 +2,7 @@
 // table or a host map coloured by CPU, memory or free disk. Problems sort first.
 import { useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { LayoutDashboard } from 'lucide-react';
+import { LayoutDashboard, Plus } from 'lucide-react';
 import { api, type PromVector } from '@/lib/api';
 import { fmt, ago } from '@/lib/format';
 import { thresholdColor, readableOn, toneClass } from '@/lib/theme';
@@ -21,7 +21,7 @@ interface Target {
 type Metric = 'cpu' | 'mem' | 'disk';
 
 export default function Infrastructure() {
-  const { canOpen, setDsChip } = useApp();
+  const { can, canOpen, setDsChip } = useApp();
   const navigate = useNavigate();
   const [view, setView] = useState<'table' | 'map'>('table');
   const [metric, setMetric] = useState<Metric>('cpu');
@@ -43,7 +43,8 @@ export default function Infrastructure() {
   const envs = useMemo(() => [...new Set((q.data?.targets || []).map((t) => t.env).filter(Boolean))].sort(), [q.data]);
   const pager = usePager(servers, 50, env);
 
-  const head = <PageHead title="Infrastructure" sub="Every server: scraped by Prometheus or sending through the ObservaOne Agent" />;
+  const head = <PageHead title="Infrastructure" sub="Every server: scraped by Prometheus or sending through the ObservaOne Agent"
+    actions={can('integrations.manage') && canOpen('/agents') ? <Link className="btn btn-primary" to="/infrastructure/add"><Plus size={15} />Add target</Link> : undefined} />;
   if (q.isPending) return <>{head}<TableWrap label="Hosts"><StateView kind="loading" skeleton="table" /></TableWrap></>;
   if (q.isError) return <>{head}<TableWrap label="Hosts"><ErrorState error={q.error} what="Infrastructure" /></TableWrap></>;
   const { C, M, D, failed } = q.data;

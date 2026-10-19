@@ -19,6 +19,7 @@ import (
 func All() []collector.Collector {
 	return []collector.Collector{
 		&CPU{}, &Memory{}, &Load{}, &Uptime{}, &Filesystem{}, &Disk{}, &Network{}, &System{}, &Self{},
+		&Processes{}, Docker{}, Nginx{}, JVM{}, Exporters{},
 	}
 }
 

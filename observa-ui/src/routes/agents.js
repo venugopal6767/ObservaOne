@@ -106,7 +106,7 @@ export async function verifyAgent(req, res) {
 }
 
 // ---------------- helpers ----------------
-function certInfo() {
+export function certInfo() {
   try {
     const pem = fs.readFileSync(config.agent.serverCertFile);
     const x = new crypto.X509Certificate(pem);
@@ -126,7 +126,7 @@ function certInfo() {
 }
 
 // The HTTPS address agents use. PUBLIC_URL when it is https, otherwise the address the browser used (through Nginx).
-function serverUrl(req) {
+export function serverUrl(req) {
   if (/^https:\/\//.test(config.publicUrl)) return config.publicUrl.replace(/:443$/, '');
   const proto = req.get('x-forwarded-proto') || req.protocol;
   const host = req.get('x-forwarded-host') || req.get('host');
@@ -244,6 +244,7 @@ agentsRouter.patch('/agents/:id', requirePerm('integrations.manage'), wrap(async
   if (cur.host === host) return res.json({ ok: true, host });
   try {
     await q('UPDATE agents SET host = $2 WHERE id = $1', [req.params.id, host]);
+    await q(`INSERT INTO agent_aliases (agent_id, kind, value) VALUES ($1, 'host', $2)`, [req.params.id, cur.host]);
   } catch (e) {
     if (e.code === '23505') throw httpError(409, `Another agent is already called ${host}.`);
     throw e;

@@ -20,6 +20,7 @@ type Env struct {
 	Now             time.Time
 	Rates           *core.Rates
 	Version         string
+	Cfg             *core.Config // settings in effect (optional collectors read theirs from here)
 
 	mu    sync.Mutex
 	notes []string
@@ -41,6 +42,10 @@ func (e *Env) TakeNotes() []string {
 	e.notes = nil
 	return n
 }
+
+// ErrNotConfigured: an optional collector with nothing to read (no URL set, Docker not enabled). Shown as
+// "disabled", never as an error.
+var ErrNotConfigured = errors.New("not configured")
 
 // Collector reads one area (cpu, memory, ...) and adds samples to the batch.
 // Returning an error means NOTHING from this collector is trusted for this round: its samples are
