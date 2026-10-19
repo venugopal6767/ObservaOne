@@ -25,7 +25,7 @@ groups:
   - name: windows
     rules:
       - alert: WindowsHighCPU
-        expr: 100 * (1 - sum by (instance, host, env, role) (rate(windows_cpu_time_total{mode="idle",core!=""}[5m])) / sum by (instance, host, env, role) (rate(windows_cpu_time_total{core!=""}[5m]))) > 90  # idle / total: right from the 2nd sample (ObservaOne CPU definition)
+        expr: 100 * (1 - sum by (instance, host, env, role, tenant) (rate(windows_cpu_time_total{mode="idle",core!=""}[5m])) / sum by (instance, host, env, role, tenant) (rate(windows_cpu_time_total{core!=""}[5m]))) > 90  # idle / total: right from the 2nd sample (ObservaOne CPU definition)
         for: 10m
         labels:
           severity: warning
@@ -72,7 +72,7 @@ groups:
   - name: linux
     rules:
       - alert: LinuxHighCPU
-        expr: 100 * (1 - sum by (instance, host, env, role) (rate(node_cpu_seconds_total{mode="idle"}[5m])) / sum by (instance, host, env, role) (rate(node_cpu_seconds_total[5m]))) > 90  # idle / total: right from the 2nd sample (ObservaOne CPU definition)
+        expr: 100 * (1 - sum by (instance, host, env, role, tenant) (rate(node_cpu_seconds_total{mode="idle"}[5m])) / sum by (instance, host, env, role, tenant) (rate(node_cpu_seconds_total[5m]))) > 90  # idle / total: right from the 2nd sample (ObservaOne CPU definition)
         for: 10m
         labels:
           severity: warning

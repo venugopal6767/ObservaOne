@@ -21,7 +21,8 @@ import { cpuByHost, memByHost, diskFreeByHost, SERVERS_UP } from './queries.js';
 import { classifyService, summarizeServices, agentHostHealth } from './health.js';
 import { MODULES, enabledModules, moduleSettings, setEnabledModules, requireModule } from './modules.js';
 import { describeAgent } from './routes/agent-control.js';
-import { currentTenant } from './tenancy.js';
+import { currentTenant, isScoped, scopePromQL } from './tenancy.js';
+import { buildExpr } from './routes/alerting.js';
 
 export const api = express.Router();
 api.use(express.json({ limit: '200kb' }));
@@ -456,8 +457,13 @@ api.get('/traces/:id', wrap(async (req, res) => {
 }));
 
 // ---------------- Alerts ----------------
+// A tenant user sees only alerts on its own series (tenant label set by the server) and its own silences.
+const mineAlert = (a) => !isScoped() || a.labels?.tenant === currentTenant();
+const mineSilence = (s) => !isScoped() || (s.matchers || []).some((m) => m.name === 'tenant' && m.value === currentTenant() && m.isEqual !== false && !m.isRegex);
+
 api.get('/alerts', wrap(async (req, res) => {
-  const [alerts, silences] = await Promise.all([am('/api/v2/alerts'), am('/api/v2/silences')]);
+  const [allAlerts, allSilences] = await Promise.all([am('/api/v2/alerts'), am('/api/v2/silences')]);
+  const alerts = allAlerts.filter(mineAlert), silences = allSilences.filter(mineSilence);
   res.json({
     alerts: alerts.map((a) => ({
       fingerprint: a.fingerprint, name: a.labels.alertname, severity: a.labels.severity || 'none',
@@ -472,7 +478,7 @@ api.get('/alerts', wrap(async (req, res) => {
 }));
 
 api.get('/alerts/count', wrap(async (req, res) => {
-  const a = await am('/api/v2/alerts?active=true&silenced=false&inhibited=false');
+  const a = (await am('/api/v2/alerts?active=true&silenced=false&inhibited=false')).filter(mineAlert);
   res.json({ active: a.length, critical: a.filter((x) => x.labels.severity === 'critical').length, warning: a.filter((x) => x.labels.severity === 'warning').length });
 }));
 
@@ -482,12 +488,14 @@ api.get('/rules', wrap(async (req, res) => {
   const rules = [];
   for (const g of d.groups) {
     for (const r of g.rules) {
+      // a tenant sees the platform's rules (they run on its servers too) and its own, never another tenant's
+      if (isScoped() && r.labels?.tenant && r.labels.tenant !== currentTenant()) continue;
       rules.push({
         group: g.name, name: r.name, query: r.query, duration: r.duration, state: r.state,
         severity: r.labels?.severity || 'none', summary: r.annotations?.summary || '',
         firing: (r.alerts || []).filter((a) => a.state === 'firing').length,
         lastEvaluation: r.lastEvaluation, health: r.health, lastError: r.lastError,
-        custom: g.name === 'ui-rules' && custom.has(r.name),
+        custom: g.name === 'ui-rules' && custom.has(r.name), labels: r.labels || {}, runbook: r.annotations?.runbook_url || '',
       });
     }
   }
@@ -499,7 +507,10 @@ api.post('/silences', requirePerm('alerts.silence'), wrap(async (req, res) => {
   if (!Array.isArray(matchers) || !matchers.length) throw httpError(400, 'matchers required');
   const h = Math.min(168, Math.max(0.25, Number(hours) || 2));
   const body = {
-    matchers: matchers.map((m) => ({ name: String(m.name), value: String(m.value), isRegex: false, isEqual: true })),
+    matchers: [
+      ...matchers.filter((m) => !(isScoped() && m.name === 'tenant')).map((m) => ({ name: String(m.name), value: String(m.value), isRegex: false, isEqual: true })),
+      ...(isScoped() ? [{ name: 'tenant', value: currentTenant(), isRegex: false, isEqual: true }] : []),
+    ],
     startsAt: new Date().toISOString(),
     endsAt: new Date(Date.now() + h * 3600_000).toISOString(),
     createdBy: req.user.username,
@@ -513,6 +524,10 @@ api.post('/silences', requirePerm('alerts.silence'), wrap(async (req, res) => {
 api.delete('/silences/:id', requirePerm('alerts.silence'), wrap(async (req, res) => {
   const id = String(req.params.id);
   if (!/^[0-9a-f-]{36}$/.test(id)) throw httpError(400, 'bad id');
+  if (isScoped()) {
+    const s = await am(`/api/v2/silence/${id}`).catch(() => null);
+    if (!s || !mineSilence(s)) throw httpError(404, 'Silence not found.');
+  }
   await am(`/api/v2/silence/${id}`, { method: 'DELETE' });
   audit(req, 'silence.expire', { id });
   res.json({ ok: true });
@@ -558,17 +573,34 @@ async function writeUiRulesAndReload(rules) {
 
 api.post('/rules', requirePerm('alerts.rules'), wrap(async (req, res) => {
   if (!config.rulesFile) throw httpError(400, 'Rule editing is off (UI_RULES_FILE not set).');
-  const { name, expr, forMinutes = 5, severity = 'warning', summary = '', description = '' } = req.body || {};
+  const { name, forMinutes = 5, severity = 'warning', summary = '', description = '', runbookUrl = '' } = req.body || {};
+  let expr = buildExpr(req.body || {}); // { expr } or { query, op, threshold }
   if (!/^[A-Za-z][A-Za-z0-9_]{2,63}$/.test(name || '')) throw httpError(400, 'Name: 3-64 letters, numbers or _ , starting with a letter (e.g. HighCpuAppServers).');
   if (!['critical', 'warning', 'info'].includes(severity)) throw httpError(400, 'Severity must be critical, warning or info.');
   if (!expr || String(expr).length > 2000) throw httpError(400, 'Query is required.');
   await prom('/api/v1/query', { query: expr }).catch((e) => { throw httpError(400, `Query error: ${e.message}`); });
+  // labels used for routing (Alertmanager routes on team / env / service / severity) and display
+  const labels = { severity, created_by: req.user.username };
+  const extra = req.body?.labels && typeof req.body.labels === 'object' && !Array.isArray(req.body.labels) ? req.body.labels : {};
+  for (const [k, v] of Object.entries({ ...extra, ...(req.body?.team ? { team: req.body.team } : {}) })) {
+    if (!/^[a-z][a-z0-9_]{0,30}$/.test(k) || ['severity', 'created_by', 'tenant', 'alertname', '__name__'].includes(k)) throw httpError(400, `Label "${k}": lower-case a-z 0-9 _, not a reserved name.`);
+    if (!/^[A-Za-z0-9._ -]{1,64}$/.test(String(v))) throw httpError(400, `Label ${k}: letters, digits, space . _ - (max 64).`);
+    labels[k] = String(v);
+  }
+  if (Object.keys(labels).length > 12) throw httpError(400, 'At most 10 labels.');
+  if (runbookUrl && !/^https?:\/\/\S{3,500}$/.test(String(runbookUrl))) throw httpError(400, 'Runbook: an http(s) link.');
+  // A tenant's rule only ever sees the tenant's series (Prometheus evaluates it without ObservaOne in between),
+  // and its alerts carry the tenant label, so only that tenant sees them.
+  if (isScoped()) {
+    try { expr = scopePromQL(expr, currentTenant()); } catch (e) { throw httpError(400, `This query cannot be used for your organisation: ${e.message}`); }
+    labels.tenant = currentTenant();
+  }
   const rules = readUiRules();
   if (rules.some((r) => r.alert === name)) throw httpError(409, 'A rule with this name already exists.');
   rules.push({
     alert: name, expr: String(expr), for: `${Math.max(0, Math.min(1440, Number(forMinutes) || 0))}m`,
-    labels: { severity, created_by: req.user.username },
-    annotations: { summary: String(summary).slice(0, 300) || name, description: String(description).slice(0, 1000) },
+    labels,
+    annotations: { summary: String(summary).slice(0, 300) || name, description: String(description).slice(0, 1000), ...(runbookUrl ? { runbook_url: String(runbookUrl) } : {}) },
   });
   await writeUiRulesAndReload(rules);
   audit(req, 'rule.create', { name, expr, severity });
@@ -578,7 +610,8 @@ api.post('/rules', requirePerm('alerts.rules'), wrap(async (req, res) => {
 api.delete('/rules/:name', requirePerm('alerts.rules'), wrap(async (req, res) => {
   if (!config.rulesFile) throw httpError(400, 'Rule editing is off.');
   const rules = readUiRules();
-  const left = rules.filter((r) => r.alert !== req.params.name);
+  const mine = (r) => !isScoped() || r.labels?.tenant === currentTenant(); // another tenant's rule: not found
+  const left = rules.filter((r) => !(r.alert === req.params.name && mine(r)));
   if (left.length === rules.length) throw httpError(404, 'Only rules created in this UI can be deleted here.');
   await writeUiRulesAndReload(left);
   audit(req, 'rule.delete', { name: req.params.name });

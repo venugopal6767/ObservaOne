@@ -11,29 +11,54 @@ global:
   # smtp_auth_password: "CHANGE-ME"
   # smtp_require_tls: true
 
+# Routing: the first matching route wins. Alerts carry severity, env, role and (when set on the rule in ObservaOne)
+# team and service labels; route on any of them. Example: prod critical alerts page someone, uat goes to email only.
 route:
   receiver: platform-team
-  group_by: ["alertname", "host"]
+  # One notification per rule, severity and environment: 100 servers with high CPU = 1 notification listing them
+  # (it was ["alertname", "host"]: one notification per server).
+  group_by: ["alertname", "severity", "env"]
   group_wait: 30s        # wait to batch alerts that start together
   group_interval: 5m
   repeat_interval: 4h    # re-send if still firing
   routes:
+    # a rule created in ObservaOne with team "infra" / "ops" goes to that team
+    - matchers: ['team="infra"']
+      receiver: infra-team
+    - matchers: ['team="ops"']
+      receiver: ops-team
+    - matchers: ['severity="critical"', 'env="prod"']
+      receiver: platform-team
+      repeat_interval: 1h
     - matchers: ['severity="critical"']
       receiver: platform-team
       repeat_interval: 1h
 
+# Channels: email_configs, webhook_configs (Teams via a workflow / connector URL, any HTTP endpoint), slack_configs,
+# pagerduty_configs, opsgenie_configs, msteamsv2_configs ... (https://prometheus.io/docs/alerting/latest/configuration/)
 receivers:
   - name: platform-team
     # email_configs:
     #   - to: "platform-team@example.local"
     #     send_resolved: true
+    # msteamsv2_configs:
+    #   - webhook_url: "https://<your Teams workflow URL>"
+    #     send_resolved: true
+  - name: infra-team
+    # email_configs:
+    #   - to: "infra-team@example.local"
+  - name: ops-team
+    # webhook_configs:
+    #   - url: "https://ops-tool.example.local/hooks/alerts"
 
-# If a server is down, don't also send its CPU/disk warnings
+# If a server is down or its agent silent, don't also send its CPU/disk/memory warnings.
+# Matched on "host": servers sending through the ObservaOne Agent have no per-server "instance" label
+# (it was "instance": the rule never matched them).
 inhibit_rules:
-  - source_matchers: ['alertname="ServerDown"']
-    target_matchers: ['severity="warning"']
-    equal: ["instance"]
-  # Disk "critical" hides the "low" warning for the same disk
-  - source_matchers: ['severity="critical"']
-    target_matchers: ['severity="warning"']
-    equal: ["instance", "volume", "mountpoint"]
+  - source_matchers: ['alertname=~"ServerDown|AgentNotReporting"']
+    target_matchers: ['severity=~"warning|info"']
+    equal: ["host"]
+  # Disk "critical" hides the "low" warning and the "will fill" forecast for the same disk
+  - source_matchers: ['severity="critical"', 'alertname=~".*Disk.*"']
+    target_matchers: ['severity="warning"', 'alertname=~".*Disk.*"']
+    equal: ["host", "volume", "mountpoint"]

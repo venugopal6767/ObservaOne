@@ -7,7 +7,7 @@ groups:
     rules:
       - alert: AgentNotReporting
         expr: |
-          max by (host, job) (max_over_time(up{agent="observaone", job=~"linux|windows"}[24h]))
+          max by (host, job, env, tenant) (max_over_time(up{agent="observaone", job=~"linux|windows"}[24h]))
           unless on (host, job)
           max by (host, job) (max_over_time(up{agent="observaone", job=~"linux|windows"}[3m]))
         for: 2m

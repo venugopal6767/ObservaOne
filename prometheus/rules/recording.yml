@@ -1,0 +1,65 @@
+# Recording rules: ONE definition per server metric, shared by alert rules and ObservaOne screens
+# (the same rules as observa-ui/src/queries.js and web/src/lib/catalog.ts; see docs/metrics/METRICS.md).
+#   - CPU = 1 - idle / total (the ObservaOne Go agent's own value when present)
+#   - pushed series need a sample from the last 120 s (a stopped agent has no value, never its last one)
+#   - labels kept: host, env, role, tenant (alerts route on env/role, tenants only see their own)
+# After editing: docker compose restart prometheus
+
+groups:
+  - name: observaone-recording
+    interval: 30s
+    rules:
+      - record: observaone:host_cpu_usage:percent
+        expr: |
+          clamp(max by (host, env, role, tenant) (last_over_time(observaone_cpu_utilization_ratio[120s])) * 100, 0, 100)
+          or (
+            clamp(100 * (1 - sum by (host, env, role, tenant) (rate(node_cpu_seconds_total{mode="idle", agent_id=""}[5m]))
+                         / sum by (host, env, role, tenant) (rate(node_cpu_seconds_total{agent_id=""}[5m]))), 0, 100)
+            and on (host) (max by (host) (timestamp(node_cpu_seconds_total{mode="idle", agent_id=""})) > time() - 120)
+          )
+          or (
+            clamp(100 * (1 - sum by (host, env, role, tenant) (rate(windows_cpu_time_total{mode="idle", core!=""}[5m]))
+                         / sum by (host, env, role, tenant) (rate(windows_cpu_time_total{core!=""}[5m]))), 0, 100)
+            and on (host) (max by (host) (timestamp(windows_cpu_time_total{mode="idle", core!=""})) > time() - 120)
+          )
+
+      - record: observaone:host_memory_usage:percent
+        expr: |
+          100 * (1 - max by (host, env, role, tenant) (last_over_time(node_memory_MemAvailable_bytes[120s]))
+                   / max by (host, env, role, tenant) (last_over_time(node_memory_MemTotal_bytes[120s])))
+          or
+          100 * (1 - max by (host, env, role, tenant) (last_over_time(windows_memory_available_bytes[120s]))
+                   / max by (host, env, role, tenant) (last_over_time(windows_memory_physical_total_bytes[120s])))
+
+      # fullest filesystem / volume of each server
+      - record: observaone:host_disk_usage:percent
+        expr: |
+          max by (host, env, role, tenant) (100 - 100 * last_over_time(node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs|nsfs|fuse.*"}[120s])
+                                                     / last_over_time(node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs|nsfs|fuse.*"}[120s]))
+          or
+          max by (host, env, role, tenant) (100 - 100 * last_over_time(windows_logical_disk_free_bytes{volume!~"HarddiskVolume.*"}[120s])
+                                                     / last_over_time(windows_logical_disk_size_bytes{volume!~"HarddiskVolume.*"}[120s]))
+
+  - name: observaone-predictive
+    rules:
+      # Warns hours before a threshold would: free space trend over 6 h says the disk is full within 24 h
+      # (only disks already below 30% free, so a filling-then-cleaning log disk does not wake anyone).
+      - alert: HostDiskWillFillIn24h
+        expr: |
+          (
+            predict_linear(node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs|nsfs|fuse.*"}[6h], 24 * 3600) < 0
+            and 100 * node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs|nsfs|fuse.*"}
+                    / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs|nsfs|fuse.*"} < 30
+          )
+          or
+          (
+            predict_linear(windows_logical_disk_free_bytes{volume!~"HarddiskVolume.*"}[6h], 24 * 3600) < 0
+            and 100 * windows_logical_disk_free_bytes{volume!~"HarddiskVolume.*"} / windows_logical_disk_size_bytes{volume!~"HarddiskVolume.*"} < 30
+          )
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Disk {{ $labels.mountpoint }}{{ $labels.volume }} on {{ $labels.host }} will be full within 24 hours"
+          description: "At the rate of the last 6 hours this disk runs out of space within a day. Clean up or extend it before the 'disk space low' alerts fire."
+          runbook_url: "https://github.com/venugopal6767/ObservaOne/blob/react/docs/alerting/ALERTING.md#disk-will-fill"

@@ -43,7 +43,7 @@ export function useProcesses(host: string, win: boolean, n: number, time?: numbe
   return useQuery({ queryKey: ['procs', host, win, n, time ?? 'now'], queryFn: () => loadProcesses(host, win, n, time), refetchInterval: time ? false : 30_000 });
 }
 
-export function ProcessTable({ q, win, emptyText }: { q: ReturnType<typeof useProcesses>; win: boolean; emptyText?: string }) {
+export function ProcessTable({ q, win, emptyText, compact }: { q: ReturnType<typeof useProcesses>; win: boolean; emptyText?: string; compact?: boolean }) {
   if (q.isPending) return <StateView kind="loading" skeleton="table" />;
   if (q.isError) return <ErrorState error={q.error} what="Processes" />;
   if (!q.data.length) {
@@ -55,15 +55,15 @@ export function ProcessTable({ q, win, emptyText }: { q: ReturnType<typeof usePr
       <table className="tbl compact">
         <thead><tr>
           <th>Process</th>
-          <th className="num" title="Share of the whole server, like host CPU: 100% = every core busy">CPU (% of server)</th>
-          <th className="num" title="CPU cores used: 1.0 = one core fully busy">Cores</th>
+          <th className="num" title="Share of the whole server, like host CPU: 100% = every core busy">{compact ? 'CPU' : 'CPU (% of server)'}</th>
+          {!compact && <th className="num" title="CPU cores used: 1.0 = one core fully busy">Cores</th>}
           <th className="num">Memory</th>
         </tr></thead>
         <tbody>{q.data.map((r) => (
           <tr key={r.name}>
             <td className="mono">{r.name}</td>
             <td className={`num ${r.share === null ? '' : toneClass(r.share)}`}>{r.share === null ? '-' : `${r.share.toFixed(1)}%`}</td>
-            <td className="num">{r.cores.toFixed(2)}</td>
+            {!compact && <td className="num">{r.cores.toFixed(2)}</td>}
             <td className="num">{r.mem === undefined ? '-' : fmt(r.mem, 'bytes')}</td>
           </tr>
         ))}</tbody>

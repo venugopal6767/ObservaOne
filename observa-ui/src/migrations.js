@@ -319,4 +319,35 @@ export const EXTRA_MIGRATIONS = [
       CREATE INDEX IF NOT EXISTS dashboards_tenant_idx ON dashboards (tenant_id);
     `,
   },
+  {
+    id: 12,
+    name: 'alert history: one row per alert episode (pending -> firing -> resolved)',
+    sql: `
+      -- written by the alert state tracker (alerting.js) from Prometheus' rule evaluation; Prometheus and
+      -- Alertmanager stay the alerting engine, this is ObservaOne's record of what happened and when
+      CREATE TABLE IF NOT EXISTS alert_episodes (
+        id           BIGSERIAL PRIMARY KEY,
+        alert_key    TEXT NOT NULL,                  -- stable id of the alert: rule + its labels
+        alertname    TEXT NOT NULL,
+        severity     TEXT NOT NULL DEFAULT 'none',
+        host         TEXT NOT NULL DEFAULT '',
+        tenant_id    TEXT NOT NULL DEFAULT 't_default',
+        labels       JSONB NOT NULL DEFAULT '{}'::jsonb,
+        annotations  JSONB NOT NULL DEFAULT '{}'::jsonb,
+        state        TEXT NOT NULL,                  -- pending | firing | resolved
+        value        DOUBLE PRECISION,               -- last value of the rule's expression
+        peak         DOUBLE PRECISION,               -- highest value while active
+        active_at    TIMESTAMPTZ NOT NULL,           -- condition became true (start of "pending")
+        fired_at     TIMESTAMPTZ,                    -- became "firing" (after the rule's "for")
+        resolved_at  TIMESTAMPTZ,                    -- condition false again (NULL while active)
+        last_seen    TIMESTAMPTZ NOT NULL DEFAULT now(),
+        rule_expr    TEXT NOT NULL DEFAULT '',
+        rule_for     INT NOT NULL DEFAULT 0          -- seconds
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS alert_episodes_open_idx ON alert_episodes (alert_key) WHERE resolved_at IS NULL;
+      CREATE INDEX IF NOT EXISTS alert_episodes_resolved_idx ON alert_episodes (resolved_at DESC);
+      CREATE INDEX IF NOT EXISTS alert_episodes_key_idx ON alert_episodes (alert_key, active_at DESC);
+      CREATE INDEX IF NOT EXISTS alert_episodes_tenant_idx ON alert_episodes (tenant_id, resolved_at DESC);
+    `,
+  },
 ];
