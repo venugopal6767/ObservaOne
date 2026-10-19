@@ -9,6 +9,7 @@ import { Link, useSearchParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Plus, Copy, Trash2, ShieldCheck, Terminal, Monitor, Container, Boxes, Server, AlertTriangle, KeyRound, Pencil, Check, X as XIcon, Minus } from 'lucide-react';
 import { api } from '@/lib/api';
+import { parseLabels } from '@/lib/labels';
 import { fmt, ago, dateTime } from '@/lib/format';
 import { toneClass } from '@/lib/theme';
 import { useApp, usePlainQuery } from '@/app/AppContext';
@@ -366,7 +367,7 @@ function commandFor(p: Platform, info: InstallInfo, w: Wiz): string {
     if (pin) opts.push(`--ca-sha256 ${c.sha256}`);
     if (w.env) opts.push(`--env ${shq(w.env)}`);
     if (w.role) opts.push(`--role ${shq(w.role)}`);
-    for (const l of w.labels.split(',').map((x) => x.trim()).filter(Boolean)) opts.push(`--label ${shq(l)}`);
+    for (const l of parseLabels(w.labels).labels) opts.push(`--label ${shq(l)}`); // invalid ones are shown under the field, never put in the command
     if (w.mode === 'pull') {
       opts.push('--mode pull');
       if (w.pullPort.trim()) opts.push(`--pull-port ${shq(w.pullPort.trim())}`);
@@ -434,6 +435,7 @@ function InstallWizard({ p, info, latest, goTokens }: { p: Platform; info: Insta
   const cmd = commandFor(p, info, w);
   const hostPort = S.replace(/^https?:\/\//, '');
   const tokenInCommand = p === 'docker' || p === 'kubernetes' || p === 'linux';
+  const labelErrors = p === 'linux' ? parseLabels(w.labels).errors : [];
   const req: Record<Platform, string[]> = {
     linux: ['systemd; amd64 or arm64; about 15 MB of disk', 'root (sudo) to install; the agent itself runs as the unprivileged user observaone-agent',
       w.mode === 'pull' ? `outbound HTTPS (443) to ${hostPort} for heartbeats, and inbound TCP ${w.pullPort || '9110'} from the ObservaOne server for Prometheus scrapes`
@@ -491,7 +493,8 @@ function InstallWizard({ p, info, latest, goTokens }: { p: Platform; info: Insta
         <div className="grid cols-2">
           <Field label="Environment (optional)"><input className="input" placeholder="prod, uat, dev" value={w.env} onChange={set('env')} /></Field>
           {p !== 'kubernetes' && <Field label="Role (optional)"><input className="input" placeholder={p === 'windows' ? 'sql, iis, app' : 'web, database, app'} value={w.role} onChange={set('role')} /></Field>}
-          {p === 'linux' && <Field label="Labels (optional)" hint="key=value, comma separated; lower-case keys. Up to 10."><input className="input" placeholder="team=payments, tier=1" value={w.labels} onChange={set('labels')} /></Field>}
+          {p === 'linux' && <Field label="Labels (optional)" hint="key=value, comma separated; lower-case keys. Up to 10."><input className="input" placeholder="team=payments, tier=1" value={w.labels} onChange={set('labels')} aria-invalid={labelErrors.length > 0} />
+            {labelErrors.map((e) => <div key={e} className="c-red" style={{ fontSize: 12, marginTop: 4 }}>{e}</div>)}</Field>}
           {p === 'linux' && <Field label="How metrics travel" hint={w.mode === 'push' ? 'The agent sends metrics out over HTTPS. Works through NAT and firewalls; nothing listens on the server.' : "ObservaOne's Prometheus scrapes the agent over mutual TLS. Needs an inbound port on the server."}>
             <Select className="select" label="Transport" value={w.mode} onChange={(v) => setW({ ...w, mode: v as Wiz['mode'] })} options={[['push', 'Push (recommended)'], ['pull', 'Pull (Prometheus scrapes the agent)']]} />
           </Field>}
@@ -524,6 +527,7 @@ function InstallWizard({ p, info, latest, goTokens }: { p: Platform; info: Insta
         <div className="panel-head"><h3>4. Run</h3><button className="btn btn-sm right" onClick={() => copyText(cmd, 'Command copied')}><Copy size={13} />Copy</button></div>
         <div className="muted" style={{ marginBottom: 8 }}>{where[p]}</div>
         <pre className="code cmd" tabIndex={0} aria-label="Install command">{cmd}</pre>
+        {labelErrors.length > 0 && <div className="c-red" style={{ marginTop: 8, fontSize: 12.5 }}>Fix the labels in step 3: the command leaves out the ones that are not valid.</div>}
         {tokenInCommand && !w.token && <div className="c-orange" style={{ marginTop: 8, fontSize: 12.5 }}>Create a token in step 2: the command still shows &lt;TOKEN&gt;.</div>}
         <ul className="agent-notes">{after[p].map((n, i) => <li key={i}>{n}</li>)}</ul>
         <div className="dim" style={{ fontSize: 12 }}>

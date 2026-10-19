@@ -6,6 +6,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { Check, Copy, Loader2, Server, Monitor, Boxes, Cloud, Router as RouterIcon, ShieldCheck, Circle } from 'lucide-react';
 import { api } from '@/lib/api';
+import { parseLabels } from '@/lib/labels';
 import { useApp } from '@/app/AppContext';
 import { Field, InfoBox, PageHead, Pill, Select, Tabs, copyText, toast } from '@/components/ui';
 
@@ -61,7 +62,8 @@ export default function AddTarget() {
   const [busy, setBusy] = useState(false);
   const [how, setHow] = useState<'interactive' | 'automated'>('interactive');
   const [shown, setShown] = useState(false);
-  const labels = form.labels.split(',').map((x) => x.trim()).filter(Boolean);
+  const parsed = parseLabels(form.labels);
+  const labels = parsed.labels;
 
   const progress = useQuery({
     queryKey: ['target-progress', created?.target.id], enabled: !!created && step >= 3,
@@ -75,8 +77,7 @@ export default function AddTarget() {
   }
 
   const create = async () => {
-    const lab: Record<string, string> = {};
-    for (const l of labels) { const [k, ...v] = l.split('='); lab[k.trim()] = v.join('=').trim(); }
+    const lab = parsed.map;
     setBusy(true);
     try {
       const r = await api<Created>('/targets', { method: 'POST', body: { kind, name: form.name.trim(), env: form.env.trim(), role: form.role.trim(), labels: lab, mode: form.mode, validHours: Number(form.hours), maxUses: Number(form.uses) } });
@@ -116,7 +117,8 @@ export default function AddTarget() {
             <Field label="Name" hint="How you call it; the agent reports the host's own name too."><input className="input" placeholder="payments-db-01" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>
             <Field label="Environment"><input className="input" placeholder="prod, uat, dev" value={form.env} onChange={(e) => setForm({ ...form, env: e.target.value })} /></Field>
             <Field label="Role"><input className="input" placeholder="web, database, app" value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })} /></Field>
-            <Field label="Labels" hint="key=value, comma separated; lower-case keys; up to 10."><input className="input" placeholder="team=payments, tier=1" value={form.labels} onChange={(e) => setForm({ ...form, labels: e.target.value })} /></Field>
+            <Field label="Labels" hint="key=value, comma separated; lower-case keys; up to 10."><input className="input" placeholder="team=payments, tier=1" value={form.labels} onChange={(e) => setForm({ ...form, labels: e.target.value })} aria-invalid={parsed.errors.length > 0} />
+              {parsed.errors.map((e) => <div key={e} className="c-red" style={{ fontSize: 12, marginTop: 4 }}>{e}</div>)}</Field>
             <Field label="How metrics travel" hint={form.mode === 'push' ? `Firewall: outbound HTTPS 443 from the server to ${window.location.host} only. Works behind NAT.` : 'Firewall: outbound 443 for heartbeats, plus inbound TCP 9110 from the ObservaOne server for Prometheus (mutual TLS).'}>
               <Select className="select" label="Transport" value={form.mode} onChange={(v) => setForm({ ...form, mode: v as 'push' | 'pull' })} options={[['push', 'Push (recommended)'], ['pull', 'Pull (Prometheus scrapes the agent)']]} />
             </Field>
@@ -126,7 +128,7 @@ export default function AddTarget() {
           </div>
           <div className="toolbar" style={{ marginTop: 14 }}>
             <button className="btn" onClick={() => setStep(1)}>Back</button><div className="grow" />
-            <button className="btn btn-primary" disabled={busy || !form.name.trim()} onClick={create}>{busy ? 'Creating…' : 'Create target and token'}</button>
+            <button className="btn btn-primary" disabled={busy || !form.name.trim() || parsed.errors.length > 0} onClick={create}>{busy ? 'Creating…' : 'Create target and token'}</button>
           </div>
         </section>
       )}
