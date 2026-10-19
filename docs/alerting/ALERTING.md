@@ -152,6 +152,8 @@ alertmanager/alertmanager.yml (base: routes, group_by, inhibit_rules, hand-writt
 | `tests/notify.test.js` | generated Alertmanager config: channels in their team receiver, base routes / grouping / inhibition kept, new team route first, disabled and email-without-server left out; input checks, secrets encrypted and masked, edit keeps secrets | 5 / 5 |
 | `tests/notify-api.test.js` (needs `OBSERVA_TEST_WEBHOOK`) | channel for a new team: stored, Alertmanager runs its route, secrets never returned, test delivered; duplicate name refused; failing channel reports `HTTP 404`; tenant user: no channels, 403 on add / test / delete | 3 / 3 |
 | Lab, live (Alertmanager 0.28) | email server + email channel: Alertmanager emailed the firing alerts to the mail sink at once; `team=payments` alert posted to Alertmanager -> payments webhook; test with token -> `Authorization: Bearer …` received; disabled channel removed from the file; UI: Add and send test, new team appears in Create alert | pass |
+| Alertmanager 0.34.1 (the compose version), as user `nobody`, config folder group 65534 / file 640 like the `am-config` volume | `amtool check-config` on the generated file: SUCCESS; one alert per team -> Teams (adaptive card), Slack (`#ops-alerts`), webhook (`Bearer` token, `payments-team`), PagerDuty (trigger, routing key), email (subject `[FIRING:1] …`) all delivered, 0 errors; another user cannot read the file | pass |
+| Rollback | base file broken (route to an unknown receiver) -> Alertmanager refused it, the previous file was put back (same checksum), Alertmanager kept its routes, the tab showed "undefined receiver …"; fixed base -> applied | pass |
 | `tests/metrics-consistency.test.js` | ran with the rest (102 tests: 101 pass, 1 skip) | the process-share check failed once while the lab agent was cut off and catching up; passed on rerun, not reproduced: watch it |
 | Lab, live | metric form: CPU usage on prod-app-01 > 50% -> "1 would alert now (67.7%)", rule stored with the generated query + `unit=percent`, Pending within one evaluation; HighCPU created from the form → Pending → Firing → Resolved after the rule was removed (peak 68.9%, fired 2 m 34 s); grouping 10 servers → 1 notification; `team=infra` → infra-team | pass |
 
@@ -160,6 +162,7 @@ alertmanager/alertmanager.yml (base: routes, group_by, inhibit_rules, hand-writt
 * Acknowledge / owner / notes on alerts, MTTA and MTTR per team.
 * Threshold layers per environment / target / host (like agent settings).
 * Maintenance windows (scheduled silences) from the Agents page and host view.
-* Not tested here: the compose wiring on Docker (checked statically), real Teams / Slack / PagerDuty endpoints
-  (no internet in the lab: test them with *Send test*).
+* Not tested here: `docker compose up` itself (no Docker daemon in the lab: the volume, init and permissions were
+  reproduced by hand), real Teams / Slack / PagerDuty endpoints (no internet: Alertmanager's payloads were received
+  locally; check yours with *Send test*).
 * Receivers per tenant; SLO burn-rate alerts; dead-man's switch (Watchdog to an external check).
