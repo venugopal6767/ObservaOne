@@ -29,8 +29,11 @@ AID=$(sed -n 's/.*"agentId": *"\([^"]*\)".*/\1/p' /var/lib/observaone-agent/iden
 HOST=$(sed -n 's/.*"host": *"\([^"]*\)".*/\1/p' /var/lib/observaone-agent/identity.json)
 RUN=${RUN:-q$RANDOM}
 echo "installed agent: $AID ($HOST, $(observaone-agent version))"
+ONLY=${OO_ONLY:-}   # e.g. OO_ONLY=gateway runs one section (rotation, signatures, disk, tenants, gateway)
+want() { [ -z "$ONLY" ] || [[ ",$ONLY," == *",$1,"* ]]; }
 
 # ---------------- credential rotation ----------------
+if want rotation; then
 C0=$(cat /var/lib/observaone-agent/credential)
 api -X POST -o /dev/null "$OO_UI/api/agents/$AID/rotate-credential"
 waitfor 40 bash -c "[ \"\$(cat /var/lib/observaone-agent/credential)\" != '$C0' ]"
@@ -53,7 +56,10 @@ if [ -n "${OO_PSQL:-}" ]; then
   check R05 "a credential older than AGENT_CREDENTIAL_DAYS is rotated by itself" bash -c "[ \"\$(cat /var/lib/observaone-agent/credential)\" != '$C1' ]"
 else res SKIP R04 "overlap end and age-based rotation (set OO_PSQL)"; fi
 
+fi
+
 # ---------------- signed releases ----------------
+if want signatures; then
 check S01 "the installer pinned the release signing key (/etc/observaone-agent/release.pub)" test -s /etc/observaone-agent/release.pub
 if [ -n "${OO_FILES:-}" ] && [ -s "$OO_FILES/SHA256SUMS.sig" ]; then
   observaone-agent verify-release --key /etc/observaone-agent/release.pub --sums "$OO_FILES/SHA256SUMS" --sig "$OO_FILES/SHA256SUMS.sig" >/dev/null
@@ -76,7 +82,10 @@ if [ -n "${OO_FILES:-}" ] && [ -s "$OO_FILES/SHA256SUMS.sig" ]; then
   check S04 "the installer refuses a release key that differs from the pinned one" bash -c 'grep -q "release signing key differs" <<<"$1"' _ "$OUT"
 else res SKIP S02 "signature checks (set OO_FILES; the server must publish SHA256SUMS.sig)"; fi
 
+fi
+
 # ---------------- disk buffer ----------------
+if want disk; then
 if command -v iptables >/dev/null && [ -n "${OO_IPTABLES:-}" ]; then
   printf 'disk_buffer:\n  enabled: true\nbuffer_payloads: 2\ncollect_interval: 5s\n' > /etc/observaone-agent/conf.d/95-scn-disk.yaml; chmod 0644 /etc/observaone-agent/conf.d/95-scn-disk.yaml
   systemctl restart observaone-agent; sleep 15
@@ -95,7 +104,10 @@ if command -v iptables >/dev/null && [ -n "${OO_IPTABLES:-}" ]; then
   rm -f /etc/observaone-agent/conf.d/95-scn-disk.yaml; systemctl restart observaone-agent; sleep 10
 else res SKIP D01 "disk buffer outage (set OO_IPTABLES=1; needs iptables)"; fi
 
+fi
+
 # ---------------- tenants ----------------
+if want tenants; then
 TID=$(api -d "{\"name\":\"Scn Bank $RUN\"}" "$OO_UI/api/tenants" | jq -r .id)
 PW="Tenant#Pass-$RUN-12345"
 api -o /dev/null -d "{\"username\":\"tuser$RUN\",\"password\":\"$PW\",\"role\":\"admin\"}" "$OO_UI/api/users"
@@ -126,7 +138,10 @@ c=$(tapi -o /dev/null -w '%{http_code}' -X POST "$OO_UI/api/agents/$AID/block");
 check T07 "the tenant cannot act on another tenant's agent ($c) or see the tenant list ($c2)" bash -c "[ $c = 404 ] && [ $c2 = 404 ]"
 api -o /dev/null -X DELETE "$OO_UI/api/agents/$TA"
 
+fi
+
 # ---------------- site gateway ----------------
+if want gateway; then
 if [ -n "${OO_GATEWAY_URL:-}" ]; then
   GW=${OO_GATEWAY_URL%/}
   G=(curl -s --max-time 20)
@@ -138,6 +153,8 @@ if [ -n "${OO_GATEWAY_URL:-}" ]; then
   R=$(ghb)
   GID=$(api "$OO_UI/api/agents/$GA" | jq -r .agent.gatewayId)
   check G01 "enrollment and heartbeat through the gateway (link $H): the centre shows the agent via gateway $GID" bash -c "[[ '$GA' == agt_* ]] && [ '$(echo "$R" | jq -r .status)' != null ] && [[ '$GID' == gw_* ]]"
+  L=$(printf 'node_load1 0.55\n' | gzip | "${G[@]}" -w ' %{http_code}' -H "Authorization: Bearer $GC" -H 'Content-Encoding: gzip' -H 'Content-Type: text/plain' -H "X-Agent-Time: $(NOW)" --data-binary @- "$GW/api/v1/agents/$GA/metrics")
+  check G06 "a gzip upload is relayed live through the gateway ($(code "$L"): $(echo "${L% *}" | jq -c .))" bash -c "[ '$(code "$L")' = 200 ] && [ '$(echo "${L% *}" | jq -r .accepted)' -ge 1 ]"
   eval "${OO_GATEWAY_BLOCK:?set OO_GATEWAY_BLOCK to a command that cuts the gateway from the centre}"
   sleep 2
   R=$(ghb); TS=$(( $(date +%s) - 5 ))
@@ -156,6 +173,8 @@ if [ -n "${OO_GATEWAY_URL:-}" ]; then
   check G05 "the gateway reports its state to the centre (Agents > Gateways shows $GS)" bash -c "[[ '$GS' == *'\"online\":true'* ]] && [[ '$GS' == *'\"agents\":1'* ]]"
   api -o /dev/null -X DELETE "$OO_UI/api/agents/$GA"
 else res SKIP G01 "site gateway (set OO_GATEWAY_URL, OO_GATEWAY_BLOCK, OO_GATEWAY_UNBLOCK)"; fi
+
+fi
 
 echo "failures: $FAILS"
 exit $FAILS

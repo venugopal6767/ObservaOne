@@ -153,7 +153,13 @@ export function createGateway(cfg) {
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', 'loopback, uniquelocal');
-  const raw = express.raw({ type: () => true, limit: '4mb', inflate: false }); // relayed as received (gzip stays gzip)
+  // the body exactly as received (gzip stays gzip: the centre decompresses and checks it), at most 4 MB
+  const raw = (req, res, next) => {
+    const chunks = []; let size = 0; let done = false;
+    req.on('data', (c) => { size += c.length; if (size > 4 << 20) { if (!done) { done = true; res.status(413).json({ error: 'Request body too large.' }); } req.destroy(); } else chunks.push(c); });
+    req.on('end', () => { if (!done) { done = true; req.body = Buffer.concat(chunks); next(); } });
+    req.on('error', (e) => { if (!done) { done = true; next(e); } });
+  };
 
   app.get('/healthz', (req, res) => res.json({ ok: true, gateway: GATEWAY_VERSION, upstream: state.up ? 'up' : 'down', lastError: state.lastError || undefined, ...spoolStats(), pending: state.pending.size }));
 
