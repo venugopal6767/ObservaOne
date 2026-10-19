@@ -172,4 +172,19 @@ export const EXTRA_MIGRATIONS = [
       UPDATE agent_tokens SET revoked_at = now() WHERE revoked AND revoked_at IS NULL;   -- already revoked: count from now
     `,
   },
+  {
+    id: 7,
+    name: 'agents: pull mode, reported addresses, registration nonces',
+    sql: `
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT 'push';          -- push | pull
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS pull JSONB NOT NULL DEFAULT '{}'::jsonb;    -- port, ips, dns, cert, last scrape (from heartbeats)
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS addresses JSONB NOT NULL DEFAULT '[]'::jsonb; -- the host's own addresses (heartbeat)
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS pull_cert_at TIMESTAMPTZ;                   -- last pull certificate issued
+      CREATE TABLE IF NOT EXISTS agent_nonces (
+        nonce   TEXT PRIMARY KEY,
+        seen_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS agent_nonces_seen_idx ON agent_nonces (seen_at);
+    `,
+  },
 ];

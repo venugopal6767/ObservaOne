@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ObservaOne Agent installer for Linux servers (systemd), Go agent 1.1.
+# ObservaOne Agent installer for Linux servers (systemd), Go agent 1.2.
 #
 #   curl -fsSL https://SERVER/agent/install.sh -o observaone-install.sh
 #   sudo bash observaone-install.sh --server https://SERVER [--ca-sha256 HEX] [--env prod]
@@ -14,15 +14,21 @@
 #   --env NAME          environment label (prod / uat / dev)
 #   --role NAME         role label (web / database / app)
 #   --label KEY=VALUE   extra label, may be repeated (max 10)
+#   --mode push|pull    push (default): send metrics to ObservaOne (outbound 443 only)
+#                       pull: ObservaOne's Prometheus scrapes this server (inbound port, mutual TLS)
+#   --pull-port N       pull mode: port to listen on (default 9110)
+#   --pull-advertise A  pull mode: address Prometheus should use (NAT / several interfaces), e.g. 10.0.0.5
+#   --pull-allow CIDR   pull mode: only these source addresses may connect, may be repeated
 #   --files-dir DIR     take the agent binary from this folder (no download)
 #   --docker            Docker host: uses the previous-generation installer (install-legacy.sh)
 #   --uninstall         stop and remove the agent (only its own files, user and service)
 #
 # Safe to run again: the agent keeps its identity, your edits in /etc/observaone-agent are kept,
 # and an upgrade that fails to start is rolled back to the previous binary automatically.
+# An old agent.conf (agent 1.1) is converted to agent.yaml once (the old file is kept as agent.conf.migrated).
 set -euo pipefail
 
-AGENT_VERSION="1.1.0"
+AGENT_VERSION="1.2.0"
 PREFIX=/opt/observaone-agent
 ETC=/etc/observaone-agent
 VAR=/var/lib/observaone-agent
@@ -31,7 +37,8 @@ SVC_USER=observaone-agent
 UNIT=/etc/systemd/system/observaone-agent.service
 
 SERVER="" TOKEN_FILE="" CA_SHA="" CA_FILE_IN="" HOST_NAME="" ENV_NAME="" ROLE="" FILES_DIR="" UNINSTALL=0 DOCKER=0
-LABELS=()
+MODE="" PULL_PORT="" PULL_ADVERTISE=""
+LABELS=() PULL_ALLOW=()
 ORIG_ARGS=("$@")
 
 say()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
@@ -50,10 +57,14 @@ while [ $# -gt 0 ]; do
     --env) ENV_NAME="$2"; shift 2 ;;
     --role) ROLE="$2"; shift 2 ;;
     --label) LABELS+=("$2"); shift 2 ;;
+    --mode) MODE="$2"; shift 2 ;;
+    --pull-port) PULL_PORT="$2"; shift 2 ;;
+    --pull-advertise) PULL_ADVERTISE="$2"; shift 2 ;;
+    --pull-allow) PULL_ALLOW+=("$2"); shift 2 ;;
     --files-dir) FILES_DIR="$2"; shift 2 ;;
     --docker) DOCKER=1; shift ;;
     --uninstall) UNINSTALL=1; shift ;;
-    -h|--help) sed -n '2,23p' "$0" 2>/dev/null || true; exit 0 ;;
+    -h|--help) sed -n '2,29p' "$0" 2>/dev/null || true; exit 0 ;;
     *) die "Unknown option: $1 (see --help)" ;;
   esac
 done
@@ -101,6 +112,10 @@ OS_NAME="$( . /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-Linux}" || ech
 [ -z "$HOST_NAME" ] || [[ "$HOST_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$ ]] || die "--host: letters, digits, . _ - (max 63)"
 [ ${#LABELS[@]} -le 10 ] || die "At most 10 --label options."
 for l in "${LABELS[@]}"; do [[ "$l" =~ ^[a-z][a-z0-9_]{0,30}=[A-Za-z0-9._-]{0,64}$ ]] || die "--label $l: use key=value, key in lower case (a-z 0-9 _), value letters/digits/. _ -"; done
+case "$MODE" in ""|push|pull) ;; *) die "--mode must be push or pull" ;; esac
+[ -z "$PULL_PORT" ] || { [[ "$PULL_PORT" =~ ^[0-9]{4,5}$ ]] && [ "$PULL_PORT" -ge 1024 ] && [ "$PULL_PORT" -le 65535 ]; } || die "--pull-port must be 1024..65535 (the agent does not run as root)"
+[ -z "$PULL_ADVERTISE" ] || [[ "$PULL_ADVERTISE" =~ ^[A-Za-z0-9.:_\[\]-]{1,255}$ ]] || die "--pull-advertise: a host name or IP, optionally :port"
+for a in "${PULL_ALLOW[@]}"; do [[ "$a" =~ ^[0-9A-Fa-f.:]+(/[0-9]{1,3})?$ ]] || die "--pull-allow $a: an IP address or CIDR"; done
 
 TMP_BASE="${OBSERVA_TMPDIR:-/var/tmp}"; [ -d "$TMP_BASE" ] || TMP_BASE=/tmp
 FREE_MB="$(df -Pm "$TMP_BASE" | awk 'NR==2 {print $4}')"; [ "${FREE_MB:-0}" -ge 50 ] || die "Only ${FREE_MB} MB free in $TMP_BASE; 50 MB needed."
@@ -150,56 +165,96 @@ id "$SVC_USER" >/dev/null 2>&1 || useradd --system --no-create-home --home-dir "
 install -d -m 0755 "$PREFIX" "$PREFIX/bin"
 install -d -m 0750 -o root -g "$SVC_USER" "$ETC" "$ETC/conf.d"
 install -d -m 0750 -o "$SVC_USER" -g "$SVC_USER" "$VAR"
+chown -R "$SVC_USER":"$SVC_USER" "$VAR"   # its own state only (a re-created user may have another uid)
 
 # ---------------------------------------------------------------- configuration (your edits are kept)
-CONF="$ETC/agent.conf"
-setkey() { # setkey KEY VALUE: replace the line if present, else append
-  local k="$1" v="$2"
-  if grep -qE "^[[:space:]]*${k//./\\.}[[:space:]]*=" "$CONF"; then
-    local tmp; tmp="$(mktemp -p "$ETC")"
-    awk -v k="$k" -v v="$v" 'BEGIN{done=0} { if (!done && $0 ~ "^[[:space:]]*"k"[[:space:]]*=") { print k" = "v; done=1 } else print }' "$CONF" > "$tmp"
-    cat "$tmp" > "$CONF"; rm -f "$tmp"
-  else
-    printf '%s = %s\n' "$k" "$v" >> "$CONF"
-  fi
+CONF="$ETC/agent.yaml"
+# agent 1.1 left agent.conf: convert it once with the NEW binary (same settings, old file kept as *.migrated)
+MIGRATED=0
+if [ -f "$ETC/agent.conf" ] && [ ! -f "$CONF" ]; then
+  say "Converting $ETC/agent.conf to agent.yaml"
+  MIGRATED=1
+  [ -f "$UNIT" ] && cp -p "$UNIT" "$UNIT.prev"   # the 1.1 unit (--config agent.conf), for a rollback
+  "$TMP/$BIN" config migrate --config "$ETC/agent.conf" || die "Could not convert $ETC/agent.conf (see above). Fix it, or move it away and run the installer again."
+fi
+ysetkey() { # ysetkey KEY VALUE: set a top-level "key: value" line in agent.yaml (replace or append)
+  local k="$1" v="$2" tmp
+  tmp="$(mktemp -p "$ETC")"
+  awk -v k="$k" -v v="$v" 'BEGIN{done=0} { if (!done && $0 ~ "^"k":") { print k": \""v"\""; done=1 } else print } END { if (!done) print k": \""v"\"" }' "$CONF" > "$tmp"
+  cat "$tmp" > "$CONF"; rm -f "$tmp"
 }
+NEW_CONF=0
 if [ ! -f "$CONF" ]; then
-  cat > "$CONF" <<EOF
+  NEW_CONF=1
+  {
+    cat <<EOF
 # ObservaOne Agent configuration. Edit freely; the installer keeps your changes.
-# More settings can go in $ETC/conf.d/*.conf (read in name order; later files win).
+# More settings can go in $ETC/conf.d/*.yaml (read in name order; later files win).
 # After a change:  sudo observaone-agent check-config && sudo systemctl reload observaone-agent
 # See every setting in effect and where it comes from:  sudo observaone-agent config show
-config_version = 1
+config_version: 2
 
-# Where the agent sends data. Must be https and reachable from THIS server (never localhost).
-server = $SERVER
+# Where the agent sends heartbeats (and metrics in push mode). https, reachable from THIS server.
+server: "$SERVER"
 
 # Labels on every metric of this host
-env =
-role =
-# label.team = payments
+env: ""
+role: ""
+labels:
+EOF
+    for l in "${LABELS[@]}"; do printf '  %s: "%s"\n' "${l%%=*}" "${l#*=}"; done
+    [ ${#LABELS[@]} -gt 0 ] || echo "  # team: payments"
+    cat <<EOF
+
+# push: the agent sends metrics to ObservaOne (only outbound HTTPS 443 is needed).
+# pull: ObservaOne's Prometheus scrapes this agent on pull.listen (inbound port; mutual TLS, certificates
+#       are issued by ObservaOne automatically). Changing mode needs a restart, not just a reload.
+mode: ${MODE:-push}
+pull:
+  listen: ":${PULL_PORT:-9110}"
+EOF
+    if [ -n "$PULL_ADVERTISE" ]; then printf '  advertise: "%s"\n' "$PULL_ADVERTISE"; else echo '  # advertise: "10.0.0.5"          # address Prometheus should use (NAT, several interfaces)'; fi
+    if [ ${#PULL_ALLOW[@]} -gt 0 ]; then printf '  allow: [%s]\n' "$(IFS=,; echo "${PULL_ALLOW[*]}" | sed 's/,/, /g')"; else echo '  # allow: [10.0.0.0/8]             # only these source addresses may connect'; fi
+    cat <<EOF
 
 # How often to collect (5s..5m) and to send a heartbeat (the server may suggest another value)
-collect_interval = 15s
-# heartbeat_interval = 30s
+collect_interval: 15s
+# heartbeat_interval: 30s
 
 # Turn collectors off: cpu, memory, load, uptime, filesystem, disk, network, system, agent
-# disable =
+# disable: [network]
 
 # Local diagnostics page, loopback only (curl http://127.0.0.1:9109/metrics). Empty = off.
-listen = 127.0.0.1:9109
+listen: "127.0.0.1:9109"
 
-# Collections kept while the server is unreachable (each ~15 s; 40 = 10 minutes)
-buffer_payloads = 40
+# Push mode: collections kept while the server is unreachable (each ~15 s; 40 = 10 minutes)
+buffer_payloads: 40
 EOF
+  } > "$CONF"
 fi
-setkey server "$SERVER"
-[ -n "$ENV_NAME" ] && setkey env "$ENV_NAME"
-[ -n "$ROLE" ] && setkey role "$ROLE"
-[ -n "$HOST_NAME" ] && setkey hostname "$HOST_NAME"
-for l in "${LABELS[@]}"; do setkey "label.${l%%=*}" "${l#*=}"; done
+ysetkey server "$SERVER"
+[ -n "$ENV_NAME" ] && ysetkey env "$ENV_NAME"
+[ -n "$ROLE" ] && ysetkey role "$ROLE"
+[ -n "$HOST_NAME" ] && ysetkey hostname "$HOST_NAME"
+[ -n "$MODE" ] && [ "$NEW_CONF" -eq 0 ] && ysetkey mode "$MODE"
+# re-run with labels / pull options on an existing agent.yaml: they go into their own file, so nested
+# sections you edited by hand are never rewritten (conf.d files are read after agent.yaml and win)
+if [ "$NEW_CONF" -eq 0 ] && { [ ${#LABELS[@]} -gt 0 ] || [ -n "$PULL_PORT$PULL_ADVERTISE" ] || [ ${#PULL_ALLOW[@]} -gt 0 ]; }; then
+  OPT="$ETC/conf.d/50-installer.yaml"
+  {
+    echo "# Written by the installer from its command-line options (last run: $(date -u +%Y-%m-%dT%H:%MZ))."
+    if [ ${#LABELS[@]} -gt 0 ]; then echo "labels:"; for l in "${LABELS[@]}"; do printf '  %s: "%s"\n' "${l%%=*}" "${l#*=}"; done; fi
+    if [ -n "$PULL_PORT$PULL_ADVERTISE" ] || [ ${#PULL_ALLOW[@]} -gt 0 ]; then
+      echo "pull:"
+      [ -n "$PULL_PORT" ] && printf '  listen: ":%s"\n' "$PULL_PORT"
+      [ -n "$PULL_ADVERTISE" ] && printf '  advertise: "%s"\n' "$PULL_ADVERTISE"
+      [ ${#PULL_ALLOW[@]} -gt 0 ] && printf '  allow: [%s]\n' "$(IFS=,; echo "${PULL_ALLOW[*]}" | sed 's/,/, /g')"
+    fi
+  } > "$OPT"
+  chown root:"$SVC_USER" "$OPT"; chmod 0640 "$OPT"
+fi
 if [ -n "$CA_FILE" ] && [ "$CA_FILE" != "$ETC/ca.crt" ]; then install -m 0644 "$CA_FILE" "$ETC/ca.crt"; fi
-[ -s "$ETC/ca.crt" ] && setkey ca_file "$ETC/ca.crt"
+[ -s "$ETC/ca.crt" ] && ysetkey ca_file "$ETC/ca.crt"
 chown root:"$SVC_USER" "$CONF"; chmod 0640 "$CONF"
 
 # ---------------------------------------------------------------- binary (keep the previous one for rollback)
@@ -281,23 +336,31 @@ EOF
 
 systemctl daemon-reload
 systemctl enable observaone-agent.service >/dev/null 2>&1
+STARTED_AT="$(date -u +%s)"
 systemctl restart observaone-agent.service
 
 # ---------------------------------------------------------------- wait for the first heartbeat; roll back a failed upgrade
 say "Waiting for the first heartbeat"
 OKHB=0
 for _ in $(seq 1 45); do
-  if [ -s "$VAR/status.json" ] && grep -q '"lastHeartbeatOk": "' "$VAR/status.json"; then OKHB=1; break; fi
+  # a heartbeat from THIS start (status.json survives restarts, so an old success must not count)
+  HB="$(sed -n 's/.*"lastHeartbeatOk": *"\([^"]*\)".*/\1/p' "$VAR/status.json" 2>/dev/null)"
+  if [ -n "$HB" ] && [ "$(date -d "$HB" +%s 2>/dev/null || echo 0)" -ge "$STARTED_AT" ]; then OKHB=1; break; fi
   sleep 1
 done
 if [ "$OKHB" -eq 1 ]; then
-  rm -f "$NEW.prev.failed"
+  rm -f "$NEW.prev.failed" "$UNIT.prev"
   ok "ObservaOne Agent is running and connected."
   "$NEW" status --config "$CONF" || true
   echo
   echo "  Status   : sudo observaone-agent status        |  systemctl status observaone-agent"
   echo "  Logs     : journalctl -u observaone-agent -f"
-  echo "  Config   : $CONF (+ $ETC/conf.d/*.conf), then: sudo systemctl reload observaone-agent"
+  echo "  Config   : $CONF (+ $ETC/conf.d/*.yaml), then: sudo systemctl reload observaone-agent"
+  if grep -q '^mode: *"\{0,1\}pull' "$CONF" "$ETC"/conf.d/*.yaml 2>/dev/null; then
+    echo "  Pull mode: open TCP ${PULL_PORT:-9110} from the ObservaOne server only, e.g."
+    echo "             sudo firewall-cmd --add-rich-rule='rule family=ipv4 source address=OBSERVAONE_IP port port=${PULL_PORT:-9110} protocol=tcp accept' --permanent"
+    echo "             sudo ufw allow from OBSERVAONE_IP to any port ${PULL_PORT:-9110} proto tcp"
+  fi
   echo "  Settings : sudo observaone-agent config show"
   echo "  Remove   : sudo bash $0 --uninstall"
 else
@@ -306,6 +369,12 @@ else
   if [ -x "$NEW.prev" ]; then
     warn "Rolling back to the previous agent binary"
     mv -f "$NEW" "$NEW.prev.failed"; mv -f "$NEW.prev" "$NEW"
+    if [ "$MIGRATED" -eq 1 ] && [ -f "$ETC/agent.conf.migrated" ]; then   # the 1.1 binary reads only agent.conf
+      mv -f "$ETC/agent.conf.migrated" "$ETC/agent.conf"
+      for f in "$ETC"/conf.d/*.conf.migrated; do [ -e "$f" ] && mv -f "$f" "${f%.migrated}"; done
+      mv -f "$CONF" "$CONF.failed"
+      [ -f "$UNIT.prev" ] && mv -f "$UNIT.prev" "$UNIT" && systemctl daemon-reload
+    fi
     systemctl restart observaone-agent.service || true
     die "Upgrade failed and was rolled back. The new binary is kept as $NEW.prev.failed for inspection."
   fi

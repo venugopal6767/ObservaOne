@@ -1,24 +1,29 @@
 // ObservaOne Agent control plane: enrollment and heartbeats. Called by agents, not by people.
 //
-//   POST /api/agent/v1/enroll      Authorization: Bearer oat_...   (enrollment token from the Agents page)
-//        -> 201 { agentId, host, credential, heartbeatSeconds, ... }   the credential is shown ONCE
-//   POST /api/agent/v1/heartbeat   Authorization: Bearer oac_...   (the agent's own credential)
-//        -> 200 { status, heartbeatSeconds, latestVersion }
+//   POST /api/v1/agents/register             Bearer oat_... (enrollment token)  -> 201 { agentId, host, credential, ... }
+//   POST /api/v1/agents/{id}/heartbeat       Bearer oac_... (the agent's own credential) -> { status, heartbeatSeconds, ... }
+//   POST /api/v1/agents/{id}/metrics         Bearer oac_...  Prometheus text (gzip), push mode
+//   POST /api/v1/agents/{id}/pull-certificate Bearer oac_... pull mode: certificate for the agent's own HTTPS endpoint
+//   GET  /api/v1/agents/{id}/config          Bearer oac_...  settings the server holds for this agent
+//
+// The agent 1.1 paths (/api/agent/v1/enroll | heartbeat | metrics) stay as aliases for one release.
 //
 // The server decides the agent's identity: the agent id comes from the credential, never from the body.
 // Metrics/logs/traces do NOT pass through here: they go to /ingest/agent/... (see verifyAgent in agents.js),
 // so a Prometheus outage never makes enrollment or heartbeats fail, and the other way round.
 import express from 'express';
 import crypto from 'node:crypto';
+import net from 'node:net';
 import { config } from '../config.js';
 import { q, one, tx } from '../db.js';
 import { audit, clientIp } from '../store.js';
 import { sha256, randomToken } from '../secrets.js';
-import { counterDelta, agentStatus, agentProblems } from '../health.js';
+import { counterDelta, agentStatus, agentProblems, compareVersions } from '../health.js';
 import { ds } from '../datasources.js';
 import { parseExposition, writeToPrometheus } from '../promwrite.js';
+import { parseCertRequest, issueAgentCert } from '../agentpki.js';
 
-export const AGENT_LATEST = '1.1.0';
+export const AGENT_LATEST = '1.2.0';
 export const ENROLL_TOKEN_RE = /^oat_[0-9a-f]{8}_[A-Za-z0-9_-]{20,64}$/;
 export const CREDENTIAL_RE = /^oac_([0-9a-f]{20})_([A-Za-z0-9_-]{43})$/;
 const PLATFORMS = ['linux'];                     // enrollment is implemented for the Linux agent
@@ -76,7 +81,23 @@ function parseEnroll(b) {
       labels[k] = v;
     }
   }
-  return { v: { hostname, platform, arch, version, env, role, machine, labels, os: text(b.os, 100), kernel: text(b.kernel, 100) } };
+  const mode = b.mode == null || b.mode === '' ? 'push' : b.mode;
+  if (!['push', 'pull'].includes(mode)) return { err: 'mode must be push or pull.' };
+  // replay protection (agent 1.2+): a one-time nonce and a timestamp within 5 minutes of the server's clock
+  const nonce = b.nonce == null ? null : str(b.nonce, /^[0-9a-f]{32,64}$/, 64);
+  if (b.nonce != null && !nonce) return { err: 'nonce must be 32-64 hex characters.' };
+  const timestamp = b.timestamp == null ? null : (Number.isFinite(b.timestamp) ? Number(b.timestamp) : NaN);
+  if (Number.isNaN(timestamp)) return { err: 'timestamp must be epoch milliseconds.' };
+  return { v: { hostname, platform, arch, version, env, role, machine, labels, mode, nonce, timestamp, os: text(b.os, 100), kernel: text(b.kernel, 100) } };
+}
+
+export const NONCE_WINDOW_MS = 5 * 60_000;
+// Agents from 1.2 must send a nonce; 1.1 agents (no nonce) are still accepted for one release.
+export function replayCheck(v, nowMs = Date.now()) {
+  const needs = compareVersions(v.version, '1.2.0') >= 0;
+  if (!v.nonce || v.timestamp == null) return needs ? 'This agent version must send a nonce and timestamp.' : null;
+  if (Math.abs(nowMs - v.timestamp) > NONCE_WINDOW_MS) return 'The registration timestamp is more than 5 minutes off the server clock (check NTP on this host).';
+  return null;
 }
 
 const COLLECTOR_STATES = ['ok', 'error', 'unavailable', 'disabled', 'running', 'stopped', 'failed', 'missing', 'unknown'];
@@ -101,6 +122,25 @@ function parseHeartbeat(b) {
     }
   }
   const hostLocked = Array.isArray(b.hostLocked) ? b.hostLocked.filter((x) => typeof x === 'string' && /^[a-z_.]{1,40}$/.test(x)).slice(0, 30) : [];
+  const mode = b.mode === 'pull' ? 'pull' : b.mode == null || b.mode === 'push' ? 'push' : null;
+  if (!mode) return { err: 'mode must be push or pull.' };
+  const ipList = (x, max) => (Array.isArray(x) ? x.filter((ip) => typeof ip === 'string' && net.isIP(ip)).slice(0, max) : []);
+  const addresses = ipList(b.addresses, 8);
+  let pull = null;
+  if (mode === 'pull' && b.pull && typeof b.pull === 'object' && !Array.isArray(b.pull)) {
+    const port = Number(b.pull.port);
+    pull = {
+      port: Number.isInteger(port) && port > 0 && port < 65536 ? port : null,
+      ips: ipList(b.pull.ips, 8),
+      dns: Array.isArray(b.pull.dns) ? b.pull.dns.filter((d) => typeof d === 'string' && /^[a-z0-9.-]{1,253}$/.test(d)).slice(0, 4) : [],
+      listening: b.pull.listening === true,
+      scrapes: n(b.pull.scrapes),
+      refused: n(b.pull.refused),
+      lastScrapeAgoSeconds: n(b.pull.lastScrapeAgoSeconds, 1e9),
+      certNotAfter: n(b.pull.certNotAfter, 4102444800),
+      error: text(b.pull.error, 300),
+    };
+  }
   return {
     v: {
       version,
@@ -110,7 +150,7 @@ function parseHeartbeat(b) {
       bufferedPayloads: n(b.bufferedPayloads, 1e6),
       droppedPayloads: n(b.droppedPayloads),
       lastUploadAgoSeconds: n(b.lastUploadAgoSeconds, 1e9),
-      collectors, collectorErrors, hostLocked,
+      collectors, collectorErrors, hostLocked, mode, addresses, pull,
       lastError: text(b.lastError, 300),
       kernel: text(b.kernel, 100),
     },
@@ -141,14 +181,19 @@ export async function agentForCredential(cred) {
 
 const bearer = (req) => (/^Bearer\s+(\S+)$/i.exec(req.get('authorization') || '') || [])[1] || '';
 
+// /api/v1/agents/{id}/...: the id in the path must be the credential's own agent (it is never trusted alone)
+function pathMismatch(req, agent) {
+  return req.params.id !== undefined && req.params.id !== agent.id;
+}
+
 // ---------------- router ----------------
 export const agentControlRouter = express.Router();
 // small bodies only (the main API allows 200 kB; nothing here needs more than a few hundred bytes)
 const json8k = express.json({ limit: '8kb', type: () => true });
-agentControlRouter.use('/agent/v1/enroll', json8k);
-agentControlRouter.use('/agent/v1/heartbeat', json8k);
+agentControlRouter.use(['/agent/v1/enroll', '/agent/v1/heartbeat', '/v1/agents/register'], json8k);
+agentControlRouter.use(/^\/v1\/agents\/agt_[0-9a-f]{20}\/(heartbeat|pull-certificate)$/, json8k);
 
-agentControlRouter.post('/agent/v1/enroll', wrap(async (req, res) => {
+const enrollHandler = wrap(async (req, res) => {
   const ip = clientIp(req);
   // Failed attempts are what an attacker produces: 10 per 10 min per address. Successful enrollments have a
   // much higher cap, so a whole fleet behind one NAT address can enroll at once.
@@ -167,9 +212,16 @@ agentControlRouter.post('/agent/v1/enroll', wrap(async (req, res) => {
   const p = parseEnroll(req.body);
   if (p.err) { failed(); return fail(res, 400, 'bad_request', p.err); }
   const v = p.v;
+  const replay = replayCheck(v);
+  if (replay) { failed(); audit(req, 'agent.enroll.denied', { username: 'agent', reason: 'replay_check', hostname: v.hostname }); return fail(res, 400, 'replay_check', replay); }
 
   const credentialSecret = randomToken(32); // 43 base64url characters
   const out = await tx(async (c) => {
+    if (v.nonce) {
+      // a nonce is accepted once; kept for twice the timestamp window, so a replay is always caught
+      const ins = await c.query('INSERT INTO agent_nonces (nonce) VALUES ($1) ON CONFLICT DO NOTHING RETURNING nonce', [v.nonce]);
+      if (!ins.rowCount) return { deny: 'replayed', status: 400, msg: 'This registration was already received (replayed request).' };
+    }
     // the token row is locked: concurrent enrollments with the same token are serialised (uses counted exactly)
     const t = (await c.query('SELECT * FROM agent_tokens WHERE token_hash = $1 FOR UPDATE', [sha256(token)])).rows[0];
     if (!t) return { deny: 'invalid_token', msg: 'Unknown enrollment token.' };
@@ -195,9 +247,10 @@ agentControlRouter.post('/agent/v1/enroll', wrap(async (req, res) => {
     let host = v.hostname;
     if (reuse) {
       await c.query(`UPDATE agents SET credential_hash = $2, os = $3, arch = $4, version = $5, env = $6, role = $7, labels = $8,
-                       kernel = $9, ip = $10, token_id = $11, enrolled_at = now(), last_heartbeat = NULL, blocked = FALSE, diag = '{}'
+                       kernel = $9, ip = $10, token_id = $11, enrolled_at = now(), last_heartbeat = NULL, blocked = FALSE, diag = '{}',
+                       mode = $12, pull = '{}'
                      WHERE id = $1`,
-      [id, sha256(credential), v.os, v.arch, v.version, v.env, v.role, JSON.stringify(v.labels), v.kernel, ip, t.id]);
+      [id, sha256(credential), v.os, v.arch, v.version, v.env, v.role, JSON.stringify(v.labels), v.kernel, ip, t.id, v.mode]);
       host = reuse.host;
     } else {
       // Another machine already uses this host name: never overwrite it, give this one a distinct name.
@@ -206,9 +259,9 @@ agentControlRouter.post('/agent/v1/enroll', wrap(async (req, res) => {
         await c.query('SAVEPOINT ins');
         try {
           await c.query(`INSERT INTO agents (id, host, platform, os, arch, version, env, role, labels, kernel, ip, token_id,
-                                             credential_hash, machine_hash, enrolled_at, first_seen, last_seen)
-                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14, now(), now(), now())`,
-          [id, name, v.platform, v.os, v.arch, v.version, v.env, v.role, JSON.stringify(v.labels), v.kernel, ip, t.id, sha256(credential), v.machine]);
+                                             credential_hash, machine_hash, mode, enrolled_at, first_seen, last_seen)
+                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15, now(), now(), now())`,
+          [id, name, v.platform, v.os, v.arch, v.version, v.env, v.role, JSON.stringify(v.labels), v.kernel, ip, t.id, sha256(credential), v.machine, v.mode]);
           await c.query('RELEASE SAVEPOINT ins');
           host = name;
           break;
@@ -241,20 +294,37 @@ agentControlRouter.post('/agent/v1/enroll', wrap(async (req, res) => {
     onlineSeconds: config.agent.onlineSeconds,
     latestVersion: AGENT_LATEST,
   });
-}));
+});
+agentControlRouter.post('/v1/agents/register', enrollHandler);
+agentControlRouter.post('/agent/v1/enroll', enrollHandler); // agent 1.1
 
-const lastWrite = new Map(); // agent id -> ms of the last heartbeat written (bursts are answered, not written)
+// Remove nonces older than twice the timestamp window (called every minute by the server)
+export async function purgeNonces() {
+  await q("DELETE FROM agent_nonces WHERE seen_at < now() - interval '10 minutes'");
+}
 
-agentControlRouter.post('/agent/v1/heartbeat', wrap(async (req, res) => {
+// Credential check shared by every per-agent call. Sends the error answer itself and returns null on failure.
+async function authAgent(req, res, failKey) {
   const ip = clientIp(req);
   const cred = bearer(req);
   const agent = cred ? await agentForCredential(cred) : null;
   if (!agent) {
-    if (rateLimited(`hbfail:${ip}`, 30, 60_000)) { res.set('Retry-After', '60'); return fail(res, 429, 'rate_limited', 'Too many failed heartbeats from this address.'); }
-    if (!rateLimited(`hbfail-audit:${ip}`, 1, 300_000)) audit(req, 'agent.heartbeat.denied', { username: 'agent', reason: cred ? 'invalid_credential' : 'missing_credential' });
-    return fail(res, 401, 'invalid_credential', 'Agent credential missing or not valid. Re-enroll this agent.');
+    if (rateLimited(`${failKey}:${ip}`, 30, 60_000)) { res.set('Retry-After', '60'); fail(res, 429, 'rate_limited', 'Too many failed requests from this address.'); return null; }
+    if (!rateLimited(`${failKey}-audit:${ip}`, 1, 300_000)) audit(req, `agent.${failKey}.denied`, { username: 'agent', reason: cred ? 'invalid_credential' : 'missing_credential' });
+    fail(res, 401, 'invalid_credential', 'Agent credential missing or not valid. Re-enroll this agent.');
+    return null;
   }
-  if (agent.blocked) return fail(res, 403, 'blocked', 'This agent is blocked on the Agents page.');
+  if (pathMismatch(req, agent)) { fail(res, 403, 'agent_mismatch', 'The agent id in the path is not this credential\'s agent.'); return null; }
+  if (agent.blocked) { fail(res, 403, 'blocked', 'This agent is blocked on the Agents page.'); return null; }
+  return agent;
+}
+
+const lastWrite = new Map(); // agent id -> ms of the last heartbeat written (bursts are answered, not written)
+
+const heartbeatHandler = wrap(async (req, res) => {
+  const ip = clientIp(req);
+  const agent = await authAgent(req, res, 'heartbeat');
+  if (!agent) return;
   const p = parseHeartbeat(req.body);
   if (p.err) return fail(res, 400, 'bad_request', p.err);
   const v = p.v;
@@ -278,12 +348,14 @@ agentControlRouter.post('/agent/v1/heartbeat', wrap(async (req, res) => {
       lastError: v.lastError || '',
       uptimeSeconds: v.uptimeSeconds,
       agentIp: ip,
+      mode: v.mode,
     };
     // server time only, and never backwards (GREATEST) even if requests arrive out of order
     await q(`UPDATE agents SET last_heartbeat = GREATEST(COALESCE(last_heartbeat, now()), now()), heartbeats = heartbeats + 1,
                version = COALESCE($2, version), boot_time = CASE WHEN $3::float8 IS NULL THEN boot_time ELSE to_timestamp($3::float8) END,
-               kernel = CASE WHEN $4 = '' THEN kernel ELSE $4 END, diag = $5, ip = $6
-             WHERE id = $1`, [agent.id, v.version, v.bootTime, v.kernel, JSON.stringify(diag), ip]);
+               kernel = CASE WHEN $4 = '' THEN kernel ELSE $4 END, diag = $5, ip = $6,
+               mode = $7, pull = $8, addresses = $9
+             WHERE id = $1`, [agent.id, v.version, v.bootTime, v.kernel, JSON.stringify(diag), ip, v.mode, JSON.stringify(v.pull || {}), JSON.stringify(v.addresses)]);
     if (prev.collectors === undefined) audit(req, 'agent.first_heartbeat', { username: 'agent', id: agent.id, host: agent.host });
   }
   const row = await one('SELECT * FROM agents WHERE id = $1', [agent.id]);
@@ -293,6 +365,29 @@ agentControlRouter.post('/agent/v1/heartbeat', wrap(async (req, res) => {
     heartbeatSeconds: config.agent.heartbeatSeconds,
     latestVersion: AGENT_LATEST,
   });
+});
+agentControlRouter.post('/v1/agents/:id/heartbeat', heartbeatHandler);
+agentControlRouter.post('/agent/v1/heartbeat', heartbeatHandler); // agent 1.1
+
+// Pull mode: sign a certificate for the agent's HTTPS endpoint. The agent sends only its public key and the
+// addresses it listens on; the certificate's name is the agent id (from the credential, never from the body).
+agentControlRouter.post('/v1/agents/:id/pull-certificate', wrap(async (req, res) => {
+  const agent = await authAgent(req, res, 'pullcert');
+  if (!agent) return;
+  if (rateLimited(`pullcert:${agent.id}`, 10, 3_600_000)) { res.set('Retry-After', '600'); return fail(res, 429, 'rate_limited', 'Too many certificate requests for this agent (10 per hour).'); }
+  const p = parseCertRequest(req.body);
+  if (p.err) return fail(res, 400, 'bad_request', p.err);
+  const c = issueAgentCert(agent.id, p);
+  await q('UPDATE agents SET pull_cert_at = now() WHERE id = $1', [agent.id]);
+  audit(req, 'agent.pull_certificate', { username: 'agent', id: agent.id, host: agent.host, ips: p.ips, dns: p.dns, serial: c.serial, notAfter: c.notAfter });
+  res.set('Cache-Control', 'no-store');
+  res.json(c);
+}));
+
+agentControlRouter.get('/v1/agents/:id/config', wrap(async (req, res) => {
+  const agent = await authAgent(req, res, 'config');
+  if (!agent) return;
+  res.json({ agentId: agent.id, heartbeatSeconds: config.agent.heartbeatSeconds, latestVersion: AGENT_LATEST, config: {} });
 }));
 
 // ---------------- metrics intake ----------------
@@ -337,15 +432,9 @@ export function relabel(series, agentRow, { nowMs, skewMs = 0 }) {
   return { out, dropped };
 }
 
-agentControlRouter.post('/agent/v1/metrics', express.raw({ type: () => true, limit: '4mb', inflate: true }), wrap(async (req, res) => {
-  const ip = clientIp(req);
-  const cred = bearer(req);
-  const agent = cred ? await agentForCredential(cred) : null;
-  if (!agent) {
-    if (rateLimited(`mfail:${ip}`, 30, 60_000)) { res.set('Retry-After', '60'); return fail(res, 429, 'rate_limited', 'Too many failed uploads from this address.'); }
-    return fail(res, 401, 'invalid_credential', 'Agent credential missing or not valid.');
-  }
-  if (agent.blocked) return fail(res, 403, 'blocked', 'This agent is blocked on the Agents page.');
+const metricsHandler = wrap(async (req, res) => {
+  const agent = await authAgent(req, res, 'metrics');
+  if (!agent) return;
   if (rateLimited(`metrics:${agent.id}`, 120, 60_000)) { res.set('Retry-After', '30'); return fail(res, 429, 'rate_limited', 'Too many uploads; slow down.'); }
   const body = Buffer.isBuffer(req.body) ? req.body.toString('utf8') : '';
   if (!body) return fail(res, 400, 'bad_request', 'Empty body.');
@@ -383,7 +472,10 @@ agentControlRouter.post('/agent/v1/metrics', express.raw({ type: () => true, lim
     return res.json({ accepted: 0, dropped: out.length, reason: `Prometheus refused the samples: ${r.text.slice(0, 200)}` });
   }
   res.json({ accepted: out.length, dropped: dropped + parsed.errors.length, clockSkewMs: skewMs });
-}));
+});
+const rawMetrics = express.raw({ type: () => true, limit: '4mb', inflate: true });
+agentControlRouter.post('/v1/agents/:id/metrics', rawMetrics, metricsHandler);
+agentControlRouter.post('/agent/v1/metrics', rawMetrics, metricsHandler); // agent 1.1
 
 // Status + problems for one agents row (used by the API and the heartbeat answer)
 export function describeAgent(a, nowMs = Date.now()) {
@@ -403,7 +495,7 @@ export function describeAgent(a, nowMs = Date.now()) {
 
 // Errors from this router: short JSON, never a stack trace or a database message.
 // eslint-disable-next-line no-unused-vars
-agentControlRouter.use('/agent/v1', (err, req, res, next) => {
+agentControlRouter.use(['/agent/v1', '/v1/agents'], (err, req, res, next) => {
   if (err.type === 'entity.too.large') return fail(res, 413, 'too_large', 'Request body too large.');
   if (err.type === 'entity.parse.failed') return fail(res, 400, 'bad_request', 'Body is not valid JSON.');
   console.error('[agent-control]', err.message);

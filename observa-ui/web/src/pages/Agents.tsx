@@ -7,7 +7,7 @@
 import { useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Plus, Copy, Trash2, ShieldCheck, Terminal, Monitor, Container, Boxes, Server, AlertTriangle, KeyRound } from 'lucide-react';
+import { Plus, Copy, Trash2, ShieldCheck, Terminal, Monitor, Container, Boxes, Server, AlertTriangle, KeyRound, Pencil, Check, X as XIcon, Minus } from 'lucide-react';
 import { api } from '@/lib/api';
 import { fmt, ago, dateTime } from '@/lib/format';
 import { toneClass } from '@/lib/theme';
@@ -22,8 +22,14 @@ interface Agent {
   kernel: string; labels: Record<string, string>; token: string | null; enrolled: boolean; enrolledAt: string | null; lastHeartbeat: string | null;
   lastData: string | null; lastSeen: string | null; bootTime: string | null; status: Status; statusReason: string; problems: string[];
   outdated: boolean; cpu: number | null; mem: number | null; diskFree: number | null;
+  mode: 'push' | 'pull' | null; address: string | null; addresses: string[];
+  pull: { port: number | null; ips: string[]; dns: string[]; listening: boolean | null; scrapes: number | null; lastScrapeAgoSeconds: number | null; certNotAfter: string | null; refused: number | null; error: string } | null;
+  diagnosis: Diagnosis | null;
   diag?: { collectors: Record<string, string> | null; collectorErrors?: Record<string, string>; uploadFailures: number | null; lastError: string; uptimeSeconds: number | null };
 }
+type Severity = 'ok' | 'info' | 'warning' | 'critical';
+interface Diagnosis { code: string; severity: Severity; title: string; detail: string; evidence: { signal: string; value: string; ok: boolean | null }[] }
+const SEV_TONE: Record<Severity, Tone> = { ok: 'green', info: 'blue', warning: 'orange', critical: 'red' };
 interface AgentsData {
   agents: Agent[]; latest: string; latestPrevious: string;
   thresholds: { onlineSeconds: number; offlineSeconds: number; heartbeatSeconds: number };
@@ -193,7 +199,7 @@ function Fleet({ agents, data, canManage, showPlatform, platform, status, setSta
       action={canManage ? <button className="btn btn-primary" onClick={onInstall}>Install an agent</button> : undefined} /></TableWrap>;
   }
   const labelsOf = (a: Agent) => [a.env && `env=${a.env}`, a.role && `role=${a.role}`, ...Object.entries(a.labels || {}).map(([k, v]) => `${k}=${v}`)].filter(Boolean) as string[];
-  const showDetail = (a: Agent) => open((close) => <AgentDetail id={a.id} host={a.host} onClose={close} />);
+  const showDetail = (a: Agent) => open((close) => <AgentDetail id={a.id} host={a.host} canManage={canManage} onClose={close} />);
   return (
     <>
       <div className="toolbar" style={{ marginBottom: 12 }}>
@@ -212,9 +218,11 @@ function Fleet({ agents, data, canManage, showPlatform, platform, status, setSta
           <tbody>
             {pager.rows.length ? pager.rows.map((a) => (
               <tr key={a.id} className="clickable" tabIndex={0} onClick={(e) => { if (!(e.target as HTMLElement).closest('button, a')) showDetail(a); }} onKeyDown={(e) => { if (e.key === 'Enter') showDetail(a); }}>
-                <td><b style={{ fontWeight: 600 }}>{a.host}</b><div className="dim" style={{ fontSize: 11 }}>{[a.os, a.arch].filter(Boolean).join(' · ') || a.id}</div></td>
+                <td><b style={{ fontWeight: 600 }}>{a.host}</b>{a.mode === 'pull' && <span className="chip mode-chip" title="Prometheus scrapes this agent (pull mode)">pull</span>}<div className="dim" style={{ fontSize: 11 }}>{[a.os, a.arch].filter(Boolean).join(' · ') || a.id}</div></td>
                 {showPlatform && <td>{PLATFORMS[a.platform]?.label || a.platform}</td>}
-                <td><StatusPill a={a} />{a.problems?.length > 0 && a.status !== 'not_reporting' && a.status !== 'offline' && <div className="c-orange" style={{ fontSize: 11, marginTop: 3, maxWidth: 260 }}>{a.problems[0]}</div>}</td>
+                <td><StatusPill a={a} />{a.diagnosis && a.diagnosis.severity !== 'ok' && a.diagnosis.code !== 'rebooted'
+                  ? <div className={a.diagnosis.severity === 'critical' ? 'c-red' : a.diagnosis.severity === 'warning' ? 'c-orange' : 'dim'} style={{ fontSize: 11, marginTop: 3, maxWidth: 260 }} title={a.diagnosis.detail}>{a.diagnosis.title}</div>
+                  : a.problems?.length > 0 && a.status !== 'not_reporting' && a.status !== 'offline' && <div className="c-orange" style={{ fontSize: 11, marginTop: 3, maxWidth: 260 }}>{a.problems[0]}</div>}</td>
                 <td>{labelsOf(a).length ? <div className="label-chips">{labelsOf(a).slice(0, 4).map((l) => <span key={l} className="chip">{l}</span>)}</div> : <span className="dim">-</span>}</td>
                 <td>{a.version ? (a.outdated ? <Pill tone="orange" title={`Latest is ${a.platform === 'linux' ? data.latest : data.latestPrevious}. Run the installer again to update.`}>{a.version} ↑</Pill> : a.version) : '-'}</td>
                 <td className={`num ${toneClass(a.cpu)}`}>{fmt(a.cpu, 'percent')}</td>
@@ -242,7 +250,41 @@ function Fleet({ agents, data, canManage, showPlatform, platform, status, setSta
 }
 
 // ------------------------------------------------------------ agent detail
-function AgentDetail({ id, host, onClose }: { id: string; host: string; onClose: () => void }) {
+function DiagnosisPanel({ d }: { d: Diagnosis }) {
+  const icon = (ok: boolean | null) => (ok === true ? <Check size={13} /> : ok === false ? <XIcon size={13} /> : <Minus size={13} />);
+  return (
+    <section className={`panel diag diag-${d.severity}`} aria-label="Diagnosis">
+      <div className="diag-head"><Pill tone={SEV_TONE[d.severity]}>{d.title}</Pill></div>
+      <p className="diag-detail">{d.detail}</p>
+      <ul className="diag-evidence">
+        {d.evidence.map((e) => <li key={e.signal} className={e.ok === true ? 'ok' : e.ok === false ? 'bad' : 'unk'}>{icon(e.ok)}<span className="sig">{e.signal}</span><span className="val">{e.value}</span></li>)}
+      </ul>
+    </section>
+  );
+}
+
+function RenameAgent({ id, host }: { id: string; host: string }) {
+  const qc = useQueryClient();
+  const [edit, setEdit] = useState(false);
+  const [name, setName] = useState(host);
+  const save = async () => {
+    try {
+      await api(`/agents/${encodeURIComponent(id)}`, { method: 'PATCH', body: { host: name.trim() } });
+      toast(`Renamed to ${name.trim()}. New data uses the new name; older data keeps ${host}.`);
+      setEdit(false);
+      qc.invalidateQueries({ queryKey: ['agents'] }); qc.invalidateQueries({ queryKey: ['agent', id] });
+    } catch (e) { toast((e as Error).message, 'err'); }
+  };
+  if (!edit) return <button className="icon-btn" title="Rename this agent" aria-label="Rename" onClick={() => setEdit(true)}><Pencil size={13} /></button>;
+  return (
+    <span style={{ display: 'flex', flexWrap: 'wrap', gap: 6, width: '100%' }}>
+      <input className="input" style={{ flex: '1 1 140px', minWidth: 0, height: 28 }} aria-label="New name" value={name} autoFocus onChange={(e) => setName(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') save(); if (e.key === 'Escape') setEdit(false); }} />
+      <button className="btn btn-sm btn-primary" onClick={save}>Save</button><button className="btn btn-sm" onClick={() => setEdit(false)}>Cancel</button>
+    </span>
+  );
+}
+
+function AgentDetail({ id, host, canManage, onClose }: { id: string; host: string; canManage: boolean; onClose: () => void }) {
   const { canOpen } = useApp();
   const q = useQuery({ queryKey: ['agent', id], queryFn: () => api<{ agent: Agent }>(`/agents/${encodeURIComponent(id)}`) });
   const d = q.data?.agent;
@@ -256,13 +298,17 @@ function AgentDetail({ id, host, onClose }: { id: string; host: string; onClose:
       {q.isPending ? <StateView kind="loading" skeleton="cards" /> : q.isError ? <ErrorState error={q.error} what="Agent" /> : d && (
         <>
           <div className="detail-status"><StatusPill a={d} /><span className="muted">{d.statusReason || 'Everything is reporting normally.'}</span></div>
+          {d.diagnosis && <DiagnosisPanel d={d.diagnosis} />}
           {d.problems?.length > 0 && <ul className="problem-list">{d.problems.map((p) => <li key={p}><AlertTriangle size={14} />{p}</li>)}</ul>}
           <div className="grid cols-2">
             <section className="panel">
               <div className="panel-head"><h3>Identity</h3></div>
               <dl className="kv">
+                {row('Name', <span style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>{d.host}{canManage && d.enrolled && <RenameAgent id={d.id} host={d.host} />}</span>)}
                 {row('Agent ID', <code>{d.id}</code>)}{row('Platform', PLATFORMS[d.platform]?.label || d.platform)}{row('OS', d.os)}
                 {d.platform === 'linux' && row('Kernel', d.kernel)}{row('Architecture', d.arch)}{row('Version', d.version)}{row('Address', d.ip)}
+                {d.addresses?.length > 0 && row('Host addresses', d.addresses.join(', '))}
+                {d.enrolled && row('Transport', d.mode === 'pull' ? 'Pull: Prometheus scrapes the agent (mutual TLS)' : 'Push: the agent sends metrics over HTTPS')}
                 {row('Labels', [d.env && `env=${d.env}`, d.role && `role=${d.role}`, ...Object.entries(d.labels || {}).map(([k, v]) => `${k}=${v}`)].filter(Boolean).join(', '))}
                 {row('Enrolled', when(d.enrolledAt))}{row('Token', d.token)}{row('Credential', d.enrolled ? 'Own credential (enrolled)' : 'Shared token (previous agent)')}
               </dl>
@@ -275,6 +321,13 @@ function AgentDetail({ id, host, onClose }: { id: string; host: string; onClose:
                 {row('CPU', fmt(d.cpu, 'percent'))}{row('Memory', fmt(d.mem, 'percent'))}{row('Lowest disk free', fmt(d.diskFree, 'percent'))}
                 {d.enrolled && row('Upload failures', d.diag?.uploadFailures != null ? String(d.diag.uploadFailures) : null)}
                 {d.enrolled && row('Agent error', d.diag?.lastError || null)}
+                {d.mode === 'pull' && d.pull && <>
+                  {row('Scraped at', d.address)}
+                  {row('Pull endpoint', d.pull.listening === false ? <span className="c-red">not listening{d.pull.error ? `: ${d.pull.error}` : ''}</span> : d.pull.listening ? 'listening' : null)}
+                  {row('Last scrape', d.pull.lastScrapeAgoSeconds != null ? `${secs(d.pull.lastScrapeAgoSeconds)} ago (${d.pull.scrapes ?? 0} in total)` : 'never')}
+                  {Number(d.pull.refused) > 0 && row('Refused connections', `${d.pull.refused} (outside pull.allow)`)}
+                  {row('Certificate valid until', d.pull.certNotAfter ? dateTime(Date.parse(d.pull.certNotAfter)).slice(0, 10) : null)}
+                </>}
               </dl>
             </section>
           </div>
@@ -308,6 +361,12 @@ function commandFor(p: Platform, info: InstallInfo, w: Wiz): string {
     if (w.env) opts.push(`--env ${shq(w.env)}`);
     if (w.role) opts.push(`--role ${shq(w.role)}`);
     for (const l of w.labels.split(',').map((x) => x.trim()).filter(Boolean)) opts.push(`--label ${shq(l)}`);
+    if (w.mode === 'pull') {
+      opts.push('--mode pull');
+      if (w.pullPort.trim()) opts.push(`--pull-port ${shq(w.pullPort.trim())}`);
+      if (w.pullAdvertise.trim()) opts.push(`--pull-advertise ${shq(w.pullAdvertise.trim())}`);
+      for (const a of w.pullAllow.split(',').map((x) => x.trim()).filter(Boolean)) opts.push(`--pull-allow ${shq(a)}`);
+    }
     return [`${curlGet} ${S}/agent/install.sh -o observaone-install.sh`, `sudo bash observaone-install.sh \\\n  ${opts.join(' \\\n  ')}`].join('\n');
   }
   const t = w.token || '<TOKEN>';
@@ -354,10 +413,10 @@ function commandFor(p: Platform, info: InstallInfo, w: Wiz): string {
   return lines.join('\n');
 }
 
-interface Wiz { distro: string; env: string; role: string; labels: string; logs: string; cluster: string; token: string; securityLog: boolean }
+interface Wiz { distro: string; env: string; role: string; labels: string; logs: string; cluster: string; token: string; securityLog: boolean; mode: 'push' | 'pull'; pullPort: string; pullAdvertise: string; pullAllow: string }
 function InstallWizard({ p, info, latest, goTokens }: { p: Platform; info: InstallInfo; latest: string; goTokens: () => void }) {
   const { open } = useDialogs();
-  const [w, setW] = useState<Wiz>({ distro: 'debian', env: '', role: '', labels: '', logs: '', cluster: '', token: '', securityLog: false });
+  const [w, setW] = useState<Wiz>({ distro: 'debian', env: '', role: '', labels: '', logs: '', cluster: '', token: '', securityLog: false, mode: 'push', pullPort: '', pullAdvertise: '', pullAllow: '' });
   const set = (k: keyof Wiz) => (e: React.ChangeEvent<HTMLInputElement>) => setW({ ...w, [k]: k === 'securityLog' ? e.target.checked : e.target.value });
   const S = info.server;
   const c = info.cert || { available: false };
@@ -367,7 +426,8 @@ function InstallWizard({ p, info, latest, goTokens }: { p: Platform; info: Insta
   const tokenInCommand = p === 'docker' || p === 'kubernetes';
   const req: Record<Platform, string[]> = {
     linux: ['systemd; amd64 or arm64; about 15 MB of disk', 'root (sudo) to install; the agent itself runs as the unprivileged user observaone-agent',
-      `outbound HTTPS (443) from the server to ${hostPort}; no inbound port is opened`, 'curl and sha256sum (preinstalled on most distributions)'],
+      w.mode === 'pull' ? `outbound HTTPS (443) to ${hostPort} for heartbeats, and inbound TCP ${w.pullPort || '9110'} from the ObservaOne server for Prometheus scrapes`
+        : `outbound HTTPS (443) from the server to ${hostPort}; no inbound port is opened`, 'curl and sha256sum (preinstalled on most distributions)'],
     windows: ['Windows Server 2016 or newer, PowerShell 5.1+', 'an Administrator PowerShell', `outbound HTTPS (443) to ${hostPort}`],
     docker: ['Docker Engine with the compose plugin', 'root (sudo)', `outbound HTTPS (443) to ${hostPort}`, 'images from Docker Hub and ghcr.io (or your mirror)'],
     kubernetes: ['kubectl with cluster-admin', `outbound HTTPS (443) from the nodes to ${hostPort}`, 'images from Docker Hub, quay.io and registry.k8s.io (or your mirror)'],
@@ -379,7 +439,8 @@ function InstallWizard({ p, info, latest, goTokens }: { p: Platform; info: Insta
   };
   const after: Record<Platform, React.ReactNode[]> = {
     linux: [<>Check it: <code>sudo observaone-agent status</code></>, <>Logs: <code>journalctl -u observaone-agent -f</code></>,
-      <>Settings: <code>/etc/observaone-agent/agent.conf</code> and <code>conf.d/*.conf</code>, then <code>sudo systemctl reload observaone-agent</code></>,
+      <>Settings: <code>/etc/observaone-agent/agent.yaml</code> and <code>conf.d/*.yaml</code>, then <code>sudo systemctl reload observaone-agent</code></>,
+      ...(w.mode === 'pull' ? [<>Open the pull port to the ObservaOne server only, e.g. <code>sudo ufw allow from SERVER_IP to any port {w.pullPort || '9110'} proto tcp</code>. If Prometheus cannot reach it, the Agents page says so.</>] : []),
       'Upgrade: run the same two lines again (identity and your settings are kept; a failed upgrade rolls back).', <>Remove: <code>sudo bash observaone-install.sh --uninstall</code></>],
     windows: ['Remove: run the same command with -Uninstall.'],
     docker: ['Runs the agent, node-exporter and cAdvisor containers in /opt/observaone-agent.', 'Remove: run the same command with --uninstall.'],
@@ -421,6 +482,14 @@ function InstallWizard({ p, info, latest, goTokens }: { p: Platform; info: Insta
           <Field label="Environment (optional)"><input className="input" placeholder="prod, uat, dev" value={w.env} onChange={set('env')} /></Field>
           {p !== 'kubernetes' && <Field label="Role (optional)"><input className="input" placeholder={p === 'windows' ? 'sql, iis, app' : 'web, database, app'} value={w.role} onChange={set('role')} /></Field>}
           {p === 'linux' && <Field label="Labels (optional)" hint="key=value, comma separated; lower-case keys. Up to 10."><input className="input" placeholder="team=payments, tier=1" value={w.labels} onChange={set('labels')} /></Field>}
+          {p === 'linux' && <Field label="How metrics travel" hint={w.mode === 'push' ? 'The agent sends metrics out over HTTPS. Works through NAT and firewalls; nothing listens on the server.' : "ObservaOne's Prometheus scrapes the agent over mutual TLS. Needs an inbound port on the server."}>
+            <Select className="select" label="Transport" value={w.mode} onChange={(v) => setW({ ...w, mode: v as Wiz['mode'] })} options={[['push', 'Push (recommended)'], ['pull', 'Pull (Prometheus scrapes the agent)']]} />
+          </Field>}
+          {p === 'linux' && w.mode === 'pull' && <>
+            <Field label="Pull port (optional)" hint="Default 9110 (1024-65535)."><input className="input" placeholder="9110" value={w.pullPort} onChange={set('pullPort')} /></Field>
+            <Field label="Address to scrape (optional)" hint="Only when ObservaOne must use another address than the server's own (NAT, several networks)."><input className="input" placeholder="10.0.0.5" value={w.pullAdvertise} onChange={set('pullAdvertise')} /></Field>
+            <Field label="Allowed sources (optional)" hint="IPs or CIDRs, comma separated. A client certificate is always required as well."><input className="input" placeholder="10.0.0.0/8" value={w.pullAllow} onChange={set('pullAllow')} /></Field>
+          </>}
           {p === 'kubernetes' && <Field label="Cluster name" hint="Added to every metric as cluster=..."><input className="input" placeholder="prod-cluster" value={w.cluster} onChange={set('cluster')} /></Field>}
           {(p === 'windows' || p === 'docker') && <Field label="Extra log files (optional)"><input className="input" placeholder={p === 'windows' ? 'C:\\inetpub\\logs\\LogFiles\\*\\*.log' : '/var/log/nginx/*.log'} value={w.logs} onChange={set('logs')} /></Field>}
         </div>

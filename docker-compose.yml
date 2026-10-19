@@ -23,6 +23,19 @@ services:
       - ./nginx/certs:/certs
     restart: "no"
 
+  # Pull mode: creates the ObservaOne agent CA, the Prometheus client certificate and the discovery token once,
+  # before Prometheus starts (its observaone-agents job reads them). The observa service renews them later.
+  agent-pki-init:
+    build: ./observa-ui
+    image: observa-ui:2.0.0
+    command: ["pki-init"]
+    environment:
+      AGENT_PROMETHEUS_DIR: /etc/prometheus-agents
+    volumes:
+      - observa-data:/data
+      - agent-pull:/etc/prometheus-agents
+    restart: "no"
+
   auth-init:
     image: httpd:2.4-alpine
     entrypoint: ["/bin/sh", "/scripts/make-htpasswd.sh"]
@@ -124,6 +137,7 @@ services:
       AGENT_ENROLL_FAILURES: ${AGENT_ENROLL_FAILURES:-10}
       AGENT_ENROLL_RATE: ${AGENT_ENROLL_RATE:-300}
       AGENT_TOKEN_PURGE_MINUTES: ${AGENT_TOKEN_PURGE_MINUTES:-5}   # revoked/expired tokens deleted after this; 0 = keep
+      AGENT_PROMETHEUS_DIR: /etc/prometheus-agents                  # pull mode: CA + client cert + SD token for Prometheus
       DB_HOST: observa-db
       DB_NAME: observa
       DB_USER: observa
@@ -172,6 +186,7 @@ services:
       - ./observa-ui/config:/app/config:ro
       - ./nginx/certs/server.crt:/certs/server.crt:ro   # fingerprint for agent install commands
       - ui-rules:/etc/prometheus-ui
+      - agent-pull:/etc/prometheus-agents              # pull mode: files Prometheus needs to scrape agents
     depends_on:
       certs-init:
         condition: service_completed_successfully
@@ -248,10 +263,14 @@ services:
     volumes:
       - ./prometheus:/etc/prometheus:ro
       - ui-rules:/etc/prometheus-ui:ro
+      - agent-pull:/etc/prometheus-agents:ro   # agent CA, client certificate, SD token (written by observa)
       - prometheus-data:/prometheus
     extra_hosts:
       # lets the lab scrape windows_exporter on the Docker host itself
       - "host.docker.internal:host-gateway"
+    depends_on:
+      agent-pki-init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:9090/prometheus/-/healthy"]
       interval: 10s
@@ -305,6 +324,19 @@ services:
     depends_on:
       tempo-init:
         condition: service_completed_successfully
+    restart: unless-stopped
+    logging: *logging
+
+  # ---- Blackbox exporter: can ObservaOne reach each agent's host (ping) and pull port (TCP)? ----
+  # Feeds the "why" on the Agents page: host down vs agent stopped vs firewall. ICMP needs NET_RAW.
+  blackbox:
+    image: prom/blackbox-exporter:v0.27.0
+    command: ["--config.file=/etc/blackbox/blackbox.yml"]
+    volumes:
+      - ./blackbox/blackbox.yml:/etc/blackbox/blackbox.yml:ro
+    cap_drop: [ALL]
+    cap_add: [NET_RAW]
+    read_only: true
     restart: unless-stopped
     logging: *logging
 
@@ -424,6 +456,7 @@ volumes:
   observa-data:
   observa-db-data:
   ui-rules:
+  agent-pull:
   loki-data:
   tempo-data:
   agent-data:

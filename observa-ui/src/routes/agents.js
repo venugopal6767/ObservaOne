@@ -12,6 +12,8 @@ import { requirePerm, httpError } from '../auth.js';
 import { promInstant } from '../datasources.js';
 import { cpuByHost, memByHost, diskFreeByHost } from '../queries.js';
 import { CREDENTIAL_RE, AGENT_LATEST, agentForCredential, forgetAgentCredential, describeAgent } from './agent-control.js';
+import { agentAddress } from './agent-sd.js';
+import { fleetSignals, diagnosisFor } from '../agenthealth.js';
 
 export const AGENT_VERSIONS = {
   agent: AGENT_LATEST,
@@ -161,8 +163,21 @@ function toAgent(a, now, m) {
     outdated: !!a.version && compareVersions(a.version, a.platform === 'linux' ? AGENT_VERSIONS.agent : AGENT_VERSIONS.previous) < 0,
     cpu: get(m.cpu), mem: get(m.mem), diskFree: get(m.disk),
     sendFailures: get(m.fails), queue: get(m.queue),
+    mode: enrolled ? a.mode || 'push' : null,
+    pull: a.mode === 'pull' ? publicPull(a.pull) : null,
+    addresses: Array.isArray(a.addresses) ? a.addresses : [],
+    address: (() => { const x = agentAddress(a); return x ? (x.port ? `${x.host}:${x.port}` : x.host) : null; })(),
+    diagnosis: enrolled && m.signals ? diagnosisFor(a, d, m.signals, { nowMs: now, onlineSeconds: config.agent.onlineSeconds }) : null,
   };
 }
+
+const publicPull = (p = {}) => ({
+  port: p.port ?? null, ips: p.ips || [], dns: p.dns || [], listening: p.listening ?? null, scrapes: p.scrapes ?? null,
+  lastScrapeAgoSeconds: p.lastScrapeAgoSeconds ?? null, certNotAfter: p.certNotAfter ? new Date(p.certNotAfter * 1000).toISOString() : null,
+  refused: p.refused ?? null, error: p.error || '',
+});
+
+const safeSignals = () => fleetSignals().catch(() => ({ ping: new Map(), port: new Map(), scrape: new Map() }));
 
 const tokenRow = (t) => ({
   id: Number(t.id), name: t.name, prefix: t.prefix, env: t.env, createdBy: t.created_by, createdAt: t.created_at,
@@ -178,13 +193,14 @@ export const agentsRouter = express.Router();
 agentsRouter.get('/agents', requirePerm('view'), wrap(async (req, res) => {
   const { rows } = await q(`SELECT a.*, t.name AS token_name, EXTRACT(EPOCH FROM (now() - a.last_seen))::int AS age
                         FROM agents a LEFT JOIN agent_tokens t ON t.id = a.token_id ORDER BY a.host`);
-  const [cpu, mem, disk, fails, queue] = await Promise.all([
+  const [cpu, mem, disk, fails, queue, signals] = await Promise.all([
     safeByHost(cpuByHost()), safeByHost(memByHost()), safeByHost(diskFreeByHost()),
     safeByHost('sum by (host) (increase({__name__=~"otelcol_exporter_send_failed_(metric_points|log_records|spans)_total", agent="observaone"}[15m]))'),
     safeByHost('sum by (host) (otelcol_exporter_queue_size{agent="observaone"})'),
+    safeSignals(),
   ]);
   const now = Date.now();
-  const agents = rows.map((a) => toAgent(a, now, { cpu, mem, disk, fails, queue }));
+  const agents = rows.map((a) => toAgent(a, now, { cpu, mem, disk, fails, queue, signals }));
   const count = (st) => agents.filter((a) => a.status === st).length;
   res.json({
     agents,
@@ -211,8 +227,30 @@ agentsRouter.get('/agents/:id', requirePerm('view'), wrap(async (req, res, next)
   const a = await one(`SELECT a.*, t.name AS token_name FROM agents a LEFT JOIN agent_tokens t ON t.id = a.token_id WHERE a.id = $1`, [req.params.id]);
   if (!a) throw httpError(404, 'Agent not found.', { state: 'not_found' });
   // same values as the list: this host's CPU / memory / disk (missing or stale = null, shown as "-")
-  const [cpu, mem, disk] = await Promise.all([safeByHost(cpuByHost()), safeByHost(memByHost()), safeByHost(diskFreeByHost())]);
-  res.json({ agent: { ...toAgent(a, Date.now(), { cpu, mem, disk }), diag: publicDiag(a.diag) } });
+  const [cpu, mem, disk, signals] = await Promise.all([safeByHost(cpuByHost()), safeByHost(memByHost()), safeByHost(diskFreeByHost()), safeSignals()]);
+  res.json({ agent: { ...toAgent(a, Date.now(), { cpu, mem, disk, signals }), diag: publicDiag(a.diag) } });
+}));
+
+// Rename an enrolled agent. The new name is the "host" label from now on: pushed samples get it at once,
+// pull targets at the next service-discovery refresh. Old samples keep the old name (Prometheus data is
+// never rewritten).
+const HOST_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/;
+agentsRouter.patch('/agents/:id', requirePerm('integrations.manage'), wrap(async (req, res) => {
+  const host = String(req.body?.host || '').trim();
+  if (!HOST_NAME_RE.test(host)) throw httpError(400, 'Name: letters, digits, . _ - (max 63), starting with a letter or digit.');
+  const cur = await one('SELECT host, platform, credential_hash FROM agents WHERE id = $1', [req.params.id]);
+  if (!cur) throw httpError(404, 'Agent not found.');
+  if (!cur.credential_hash) throw httpError(409, 'Only enrolled agents can be renamed here (older agents send their name themselves).');
+  if (cur.host === host) return res.json({ ok: true, host });
+  try {
+    await q('UPDATE agents SET host = $2 WHERE id = $1', [req.params.id, host]);
+  } catch (e) {
+    if (e.code === '23505') throw httpError(409, `Another agent is already called ${host}.`);
+    throw e;
+  }
+  forgetAgentCredential(req.params.id);
+  audit(req, 'agent.renamed', { id: req.params.id, from: cur.host, to: host });
+  res.json({ ok: true, host });
 }));
 
 agentsRouter.get('/agents/install-info', requirePerm('view'), wrap(async (req, res) => {

@@ -67,8 +67,9 @@ export function agentProblems({ version, minVersion, diag = {}, nowMs, lastDataM
   for (const k of failing) out.push(`Collector ${k} is failing${errs[k] ? `: ${errs[k]}` : ''}.`);
   if (Number(diag.droppedPayloads) > 0 && Number(diag.bufferedPayloads) > 0) out.push(`Upload backlog: ${diag.bufferedPayloads} collections waiting, ${diag.droppedPayloads} dropped (buffer full).`);
   if (Number(diag.uploadFailures) > 0) out.push(`${diag.uploadFailures} uploads failed since the last heartbeat.`);
-  // heartbeat fine but no data arriving = the data path (Nginx/Prometheus/token) is broken, not the agent
-  if (lastHeartbeatMs && nowMs - lastHeartbeatMs <= onlineSeconds * 1000 && diag.collectors && (!lastDataMs || nowMs - lastDataMs > 3 * onlineSeconds * 1000)) {
+  // heartbeat fine but no data arriving = the data path (Nginx/Prometheus/token) is broken, not the agent.
+  // (pull mode: the agent uploads nothing; whether Prometheus scrapes it is judged by diagnoseAgent)
+  if (diag.mode !== 'pull' && lastHeartbeatMs &&nowMs - lastHeartbeatMs <= onlineSeconds * 1000 && diag.collectors && (!lastDataMs || nowMs - lastDataMs > 3 * onlineSeconds * 1000)) {
     out.push('Heartbeats arrive but no metrics have been received recently.');
   }
   if (diag.lastError) out.push(`Agent reports: ${diag.lastError}`);
@@ -103,4 +104,80 @@ export function agentHostHealth({ nowSec, lastSeenSec, upValue, onlineSeconds })
   const stale = !lastSeenSec || nowSec - lastSeenSec > onlineSeconds;
   if (stale) return { health: 'not_reporting', reason: 'The agent stopped sending data' };
   return upValue ? { health: 'up', reason: '' } : { health: 'down', reason: 'The agent cannot read the local exporter' };
+}
+
+// ---------------- diagnosis: WHY an agent looks the way it does ----------------
+// Combines what the agent says (heartbeat), what the data path shows (push uploads / Prometheus scrapes)
+// and what the server can see from outside (blackbox ping + TCP to the pull port). Each signal may be
+// missing (null = not measured); a conclusion is only drawn from signals that exist.
+//
+//   status          from agentStatus (online / attention / not_reporting / offline / pending / blocked)
+//   mode            push | pull
+//   dataFresh       push: an upload arrived recently (true/false)
+//   scrape          pull: { up: 1|0, lastError } from Prometheus (null = not discovered yet)
+//   ping, port      blackbox results: true / false / null (no probe)
+//   pull            what the agent reported about its endpoint { listening, error, lastScrapeAgoSeconds }
+//   uptimeSeconds   from the last heartbeat
+//   address         where the server looks for the host (for the messages)
+// -> { code, severity: ok|info|warning|critical, title, detail, evidence: [{ signal, value, ok }] }
+export function diagnoseAgent(x) {
+  const ev = [];
+  const sig = (signal, value, ok) => ev.push({ signal, value, ok });
+  const addr = x.address || 'the host';
+  const hbFresh = x.status === 'online' || x.status === 'attention';
+  sig('heartbeat', x.status === 'pending' ? 'none yet' : hbFresh ? 'arriving' : x.status === 'blocked' ? 'refused (blocked)' : 'missing', hbFresh);
+  if (x.ping != null) sig('ping', x.ping ? 'answers' : 'no answer', !!x.ping);
+  if (x.mode === 'pull') {
+    if (x.port != null) sig('pull port', x.port ? 'open' : 'closed / filtered', !!x.port);
+    if (x.scrape) sig('Prometheus scrape', x.scrape.up === 1 ? 'ok' : x.scrape.lastError || 'failing', x.scrape.up === 1);
+    else sig('Prometheus scrape', 'not discovered yet', null);
+  } else if (x.dataFresh != null) {
+    sig('metric uploads', x.dataFresh ? 'arriving' : 'missing', !!x.dataFresh);
+  }
+  const out = (code, severity, title, detail) => ({ code, severity, title, detail, evidence: ev });
+  const rebooted = x.uptimeSeconds != null && x.uptimeSeconds < 900;
+  const healthy = (what) => (rebooted
+    ? out('rebooted', 'info', 'Healthy, rebooted recently', `The host started ${Math.max(1, Math.round(x.uptimeSeconds / 60))} min ago.`)
+    : out('healthy', 'ok', 'Healthy', what));
+
+  if (x.status === 'blocked') return out('blocked', 'info', 'Blocked', 'An administrator blocked this agent: its uploads and heartbeats are refused.');
+  if (x.status === 'pending') {
+    if (x.ping === false) return out('pending_unreachable', 'warning', 'Enrolled, host not reachable', `No heartbeat yet and ${addr} does not answer ping. Check that the service started: systemctl status observaone-agent.`);
+    return out('pending', 'info', 'Waiting for the first heartbeat', 'Enrolled. The first heartbeat arrives within a minute of the service starting.');
+  }
+
+  if (hbFresh) {
+    if (x.mode === 'pull') {
+      const p = x.pull || {};
+      if (p.listening === false) return out('pull_not_listening', 'critical', 'Pull endpoint not running', p.error ? `The agent reports: ${p.error}` : 'The agent has not opened its pull port yet (it waits for its certificate).');
+      if (x.scrape && x.scrape.up === 1) return healthy('Heartbeats arrive and Prometheus scrapes the agent.');
+      if (!x.scrape) return out('pull_not_discovered', 'warning', 'Not scraped yet', 'Prometheus has not picked this agent up. Discovery refreshes every 30 s; if this stays, check the observaone-agents job in prometheus.yml.');
+      const err = String(x.scrape.lastError || '');
+      if (x.port === false || /connection refused|i\/o timeout|no route to host|context deadline exceeded|network is unreachable/i.test(err)) {
+        return out('pull_blocked', 'critical', 'Prometheus cannot reach the agent', `The agent is running (heartbeats arrive) but ${addr} cannot be reached from ObservaOne on its pull port: a firewall or security group blocks it, or the address is not routable (set pull.advertise).${err ? ` Prometheus: ${err}` : ''}`);
+      }
+      if (Number(p.refused) > 0 && /EOF|connection reset|broken pipe/i.test(err)) {
+        return out('pull_allow', 'critical', 'The agent refuses ObservaOne', `The agent closed ${p.refused} connections from addresses outside pull.allow in its configuration, so Prometheus cannot scrape it. Add ObservaOne's address to pull.allow (or remove the setting) and reload the agent.`);
+      }
+      if (/certificate|x509|tls|handshake/i.test(err)) {
+        return out('pull_tls', 'critical', 'Certificate problem on the pull endpoint', `Prometheus and the agent do not agree on the certificate: ${err}. The agent renews its certificate when its addresses change; restart it to force a renewal.`);
+      }
+      return out('pull_scrape_failed', 'critical', 'Scrape failing', err || 'Prometheus reports the target as down.');
+    }
+    if (x.dataFresh === false) return out('data_path', 'critical', 'Heartbeats arrive, metrics do not', "The agent is running but its uploads do not reach Prometheus: check the agent's last error, Nginx, and that Prometheus accepts remote write.");
+    if (x.status === 'attention') return out('agent_problem', 'warning', 'Running with a problem', 'The agent reports a problem (see the list).');
+    return healthy('Heartbeats and metrics arrive.');
+  }
+
+  // no heartbeat
+  if (x.mode === 'pull' && x.scrape && x.scrape.up === 1) {
+    return out('heartbeat_blocked', 'warning', 'Scraped, but no heartbeats', 'Prometheus still reads the agent, so the host and agent are up, but heartbeats do not reach ObservaOne: outbound HTTPS from the host is blocked or the server address changed.');
+  }
+  if (x.ping === true || x.port === true) {
+    return out('agent_stopped', 'critical', 'Host up, agent silent', `${addr} answers ${x.ping ? 'ping' : 'on the pull port'}, so the machine is running: the agent stopped or crashed, or outbound HTTPS (443) to ObservaOne is blocked. On the host: systemctl status observaone-agent; journalctl -u observaone-agent.`);
+  }
+  if (x.ping === false) {
+    return out('host_unreachable', 'critical', 'Host not reachable', `${addr} does not answer ping from ObservaOne: the machine is down or rebooting, or the network path is broken. (Where ICMP is blocked by policy this probe cannot tell.)`);
+  }
+  return out('no_heartbeat', 'warning', 'No heartbeat', 'The agent stopped reporting. There is no reachability probe for this host, so it is unknown whether the machine itself is up.');
 }

@@ -1,8 +1,11 @@
-# ObservaOne Linux Agent (Go agent 1.1)
+# ObservaOne Linux Agent (Go agent 1.2)
 
 One small Go binary per Linux server (about 7 MB, about 11 MB of RAM, standard library only). It enrolls once, sends a
 heartbeat every 30 s and sends host metrics every 15 s, all over HTTPS to the ObservaOne server. No port is opened
 on the monitored server.
+
+**Pull mode** (1.2, optional): Prometheus scrapes the agent instead, over mutual TLS with certificates that ObservaOne
+issues automatically. Heartbeats still go out over HTTPS. See [Pull mode](#13-pull-mode).
 
 Status: **built and tested end to end on Linux in a lab** (see [Test results](#test-results)). Not yet run on a real
 cloud VM with real systemd: follow [Testing on a real VM](#testing-on-a-real-vm).
@@ -23,9 +26,10 @@ cloud VM with real systemd: follow [Testing on a real VM](#testing-on-a-real-vm)
                                                       └────────────────────────────────────────────────┘
 ```
 
-* **Control plane** (`/api/agent/v1/enroll`, `/api/agent/v1/heartbeat`): identity, status, diagnostics. It is stored in
-  PostgreSQL and does not depend on Prometheus.
-* **Metrics path** (`/api/agent/v1/metrics`): the agent POSTs the Prometheus text format (gzip). The server
+* **Control plane** (`/api/v1/agents/register`, `/api/v1/agents/{id}/heartbeat`): identity, status, diagnostics. It
+  is stored in PostgreSQL and does not depend on Prometheus. The id in the path must be the credential's own agent
+  (403 otherwise). Agent 1.1 paths (`/api/agent/v1/enroll|heartbeat|metrics`) still work for one release.
+* **Metrics path** (`/api/v1/agents/{id}/metrics`, push mode): the agent POSTs the Prometheus text format (gzip). The server
   * checks every line (finite numbers only, at most 20,000 series and 30 labels),
   * sets the identity labels itself from the database (`host`, `agent_id`, `job`, `platform`, `env`, `role`, plus custom labels),
   * corrects a wrong host clock,
@@ -42,10 +46,11 @@ The code is split so other platforms plug in without touching the core:
 
 ```
 agent/go/
-  cmd/observaone-agent/       commands: run, enroll, status, check-config, config show, reload, version
+  cmd/observaone-agent/       commands: run, enroll, status, check-config, config show, config migrate, reload, version
   internal/core/              config (+conf.d, remote settings), identity/credential storage, HTTPS client, backoff,
                               metric batch (refuses NaN/Inf/negative counters), counter-delta rates
-  internal/agent/             run loop: collect -> buffer -> upload, heartbeats, reload, status file, local /metrics
+  internal/agent/             run loop: collect -> buffer -> upload (push) or HTTPS endpoint (pull), heartbeats,
+                              reload, status file, local /metrics
   internal/collector/         Collector interface (shared by every platform)
   internal/collector/linux/   cpu, memory, load, uptime, filesystem, disk, network, system, agent
 ```
@@ -66,7 +71,9 @@ marks them **Previous agent**.
 | From | To | Port | Why |
 |---|---|---|---|
 | Monitored server | ObservaOne server | **TCP 443** (HTTPS) | enrollment, heartbeats, metrics, installer download |
-| - | Monitored server | **none** | the agent opens no inbound port (diagnostics are on 127.0.0.1:9109 only) |
+| - | Monitored server | **none** (push) | the agent opens no inbound port (diagnostics are on 127.0.0.1:9109 only) |
+| ObservaOne server | Monitored server | **TCP 9110** (pull mode only) | Prometheus scrapes the agent (mutual TLS) |
+| ObservaOne server | Monitored server | ICMP (optional) | reachability probe for the diagnosis; blocked ICMP only makes it "unknown" |
 
 * `server` must be the address of the ObservaOne server **as the monitored server reaches it**. Never `localhost`:
   the agent refuses it.
@@ -99,7 +106,9 @@ What the installer does:
 * checks systemd, CPU type, free space, and HTTPS reachability with a verified certificate;
 * downloads `observaone-agent-linux-<arch>` and checks it against `SHA256SUMS`;
 * creates the system user `observaone-agent` and the folders `/etc/observaone-agent` (0750) and `/var/lib/observaone-agent` (0750);
-* writes `agent.conf` (first time only; later runs change only the options you pass and keep your edits);
+* writes `agent.yaml` (first time only; later runs change only the options you pass and keep your edits; labels and
+  pull options from a re-run go to `conf.d/50-installer.yaml`). An agent 1.1 `agent.conf` is converted once
+  (`agent.conf.migrated` is kept);
 * enrolls as the agent user: the token is exchanged for the agent's own credential (`/var/lib/observaone-agent/credential`,
   0600), then the token file is deleted;
 * installs and starts the hardened systemd unit and waits for the first heartbeat.
@@ -118,17 +127,43 @@ Files are read in this order. Later wins, and the host always has the final say:
 2. settings sent by the ObservaOne server in the heartbeat answer (only: `collect_interval`, `heartbeat_interval`,
    `disable`, `buffer_payloads`, `env`, `role`, `label.*`; saved in `/var/lib/observaone-agent/server-settings.json`).
    The agent supports this already; the server-side screen to set them is the next step, so today this layer is empty.
-3. `/etc/observaone-agent/agent.conf`
-4. `/etc/observaone-agent/conf.d/*.conf` (name order)
+3. `/etc/observaone-agent/agent.yaml`
+4. `/etc/observaone-agent/conf.d/*.yaml` (name order)
 
-The server can never change `server`, `ca_file`, paths or `listen`, and it can never run commands on the host.
+The server can never change `server`, `ca_file`, paths, `listen`, `mode` or `pull.*`, and it can never run commands on
+the host.
+
+The format is a small, strict YAML subset: `key: value`, the `labels:` and `pull:` sections, lists as `[a, b]` or
+`- item`, `#` comments, quotes optional. Anchors, tabs, flow maps and several documents are refused with the line
+number. An agent 1.1 `agent.conf` (`key = value`) is still read, with a warning, for one release:
+`sudo observaone-agent config migrate` converts it (the installer does this for you).
+
+```yaml
+config_version: 2
+server: "https://observaone.example.com"
+env: prod
+role: web
+labels:
+  team: payments
+mode: push            # or pull
+pull:
+  listen: ":9110"
+  # advertise: "10.0.0.5"     # address Prometheus should use (NAT, several networks)
+  # allow: [10.0.0.0/8]       # only these source addresses may connect
+collect_interval: 15s
+disable: [network]
+```
 
 | Setting | Default | Meaning |
 |---|---|---|
 | `server` | (required) | `https://` address of ObservaOne as this server reaches it |
 | `ca_file` | system trust | CA / self-signed certificate to trust (the installer sets it) |
 | `env`, `role` | empty | labels on every metric |
-| `label.<name>` | - | up to 10 extra labels; names `a-z0-9_`, values `A-Za-z0-9._-` |
+| `labels:` | - | up to 10 extra labels; names `a-z0-9_`, values `A-Za-z0-9._-` |
+| `mode` | `push` | `push`: send metrics over HTTPS; `pull`: Prometheus scrapes the agent (restart to change) |
+| `pull.listen` | `:9110` | pull mode: address and port of the HTTPS endpoint (restart to change) |
+| `pull.advertise` | - | pull mode: host name or IP Prometheus should use; goes into the certificate |
+| `pull.allow` | any | pull mode: source IPs / CIDRs allowed to connect (a client certificate is always required as well) |
 | `hostname` | short host name | name requested at enrollment (the server may add `-2` if it is taken) |
 | `collect_interval` | `15s` | 5s - 5m |
 | `heartbeat_interval` | server's value (30s) | 5s - 5m |
@@ -137,12 +172,12 @@ The server can never change `server`, `ca_file`, paths or `listen`, and it can n
 | `listen` | `127.0.0.1:9109` | local diagnostics (`/metrics`, `/healthz`); loopback only; empty = off |
 | `state_dir` | `/var/lib/observaone-agent` | identity, credential, status |
 | `proc_path`, `sys_path`, `root_path` | `/proc`, `/sys`, `/` | for running in a container against the host |
-| `config_version` | `1` | a file written for a newer agent is refused |
+| `config_version` | `2` | a file written for a newer agent is refused (`1` = old agent.conf) |
 
 Change, check, apply without a restart:
 
 ```bash
-sudo nano /etc/observaone-agent/conf.d/20-mine.conf    # e.g.  collect_interval = 30s
+sudo nano /etc/observaone-agent/conf.d/20-mine.yaml    # e.g.  collect_interval: 30s
 sudo observaone-agent check-config                      # validates; nothing is applied
 sudo systemctl reload observaone-agent                  # an invalid file is refused; the agent keeps its old settings
 sudo observaone-agent config show                       # every setting, its value and where it came from
@@ -180,7 +215,7 @@ rates. A reboot is detected from the boot time and resets all rates.
 | Load / time | `node_load1`, `node_load5`, `node_load15`, `node_boot_time_seconds`, `observaone_uptime_seconds`, `node_time_seconds` |
 | System | `node_uname_info{sysname,release,machine,nodename}`, `node_os_info{id,name,pretty_name,version_id,version_codename}` |
 | Agent itself | `observaone_agent_info{version}`, `observaone_agent_collector_success{collector}`, `observaone_agent_collector_duration_seconds{collector}`, `observaone_agent_upload_failures_total`, `observaone_agent_buffered_payloads`, `observaone_agent_dropped_payloads_total`, `process_resident_memory_bytes`, `process_cpu_seconds_total`, `go_goroutines` |
-| Added by the server | `up{job="linux",agent="observaone"} = 1` for every accepted upload; labels `host, agent_id, job, platform, agent, os, env, role` + custom labels |
+| Added by the server | push: `up{job="linux",agent="observaone"} = 1` for every accepted upload; pull: Prometheus's own `up`. Same labels either way: `host, agent_id, job, platform, agent, os, env, role` + custom labels |
 
 There are no per-process labels and nothing from environment variables, command lines or file contents. A typical server
 has about 200 series.
@@ -202,6 +237,27 @@ Every time is the **server's** time of receipt; the agent's clock is never used.
 One missed heartbeat never changes the status: 150 s is 5 heartbeats. Previous-generation agents have no heartbeat
 and are judged by their last upload.
 
+### Diagnosis: why an agent looks the way it does
+
+The status says *what*; the diagnosis on the Agents page says *why*, from signals collected independently of the agent:
+heartbeats, metric uploads (push), Prometheus's scrape result (pull), a blackbox ICMP ping of the host and a TCP connect
+to the pull port. Each agent gets one reason and the evidence behind it.
+
+| Signals | Diagnosis |
+|---|---|
+| heartbeats + data | **Healthy** (or *Healthy, rebooted recently* when the host started less than 15 min ago) |
+| heartbeats, no uploads (push) | **Heartbeats arrive, metrics do not**: Nginx / Prometheus remote write |
+| heartbeats, pull endpoint not open | **Pull endpoint not running** (no certificate yet, port in use) |
+| heartbeats, scrape times out / port closed | **Prometheus cannot reach the agent**: firewall, security group, or set `pull.advertise` |
+| heartbeats, connections closed by `pull.allow` | **The agent refuses ObservaOne** |
+| heartbeats, TLS error | **Certificate problem on the pull endpoint** |
+| no heartbeat, scrape OK (pull) | **Scraped, but no heartbeats**: outbound HTTPS from the host blocked |
+| no heartbeat, host answers ping / port | **Host up, agent silent**: the agent stopped, or outbound 443 blocked |
+| no heartbeat, no ping answer | **Host not reachable**: down, rebooting, or network |
+| no heartbeat, no probe possible | **No heartbeat** (unknown whether the host is up) |
+
+Probes that cannot run are "not measured", never "down".
+
 ## 9. Tokens and security
 
 * **Enrollment token** (`oat_…`): created by an admin (`integrations.manage`) with a validity and a maximum number of
@@ -218,7 +274,11 @@ and are judged by their last upload.
   * 10 failed enrollments per address per 10 min, and 300 enrollments in total, so a fleet behind one NAT address can enroll together;
   * request bodies: enroll and heartbeat 8 kB, metrics 4 MB;
   * at most one heartbeat write per agent every 5 s (a burst is answered but not written).
-* **Audit log:** `agent.token.create`, `agent.token.revoke`, `agent.enroll`, `agent.reenroll`, `agent.enroll.denied`,
+* **Registration replay protection (1.2):** every registration carries a random nonce and the agent's time. The server
+  refuses a nonce it has seen in the last 10 minutes and a time more than 5 minutes off its own (check NTP).
+* **Rename:** an admin can rename an enrolled agent on the Agents page (`PATCH /api/agents/{id}`). New samples use the new
+  `host` label at once (push) or at the next discovery refresh (pull, 30 s); old samples keep the old name.
+* **Audit log:** `agent.renamed`, `agent.pull_certificate`, `agent.token.create`, `agent.token.revoke`, `agent.enroll`, `agent.reenroll`, `agent.enroll.denied`,
   `agent.enroll.rate_limited`, `agent.first_heartbeat`, `agent.heartbeat.denied`, `agent.block`, `agent.unblock`,
   `agent.remove`, `agent.impersonation_refused`.
 * **Retries:** exponential backoff with jitter (2 s up to 2 min) and the server's `Retry-After`. A fleet never retries in
@@ -238,6 +298,9 @@ and are judged by their last upload.
 | TLS error in the log | certificate changed or expired: re-run the installer with the new `--ca-sha256` |
 | Credential refused (401) | the agent was removed in ObservaOne: `sudo rm /var/lib/observaone-agent/{credential,identity.json}` and re-run the installer with a new token |
 | Same server counted twice | it is also in `prometheus/targets/linux*.yml`: remove it there once the agent is installed |
+| `replay_check` at enrollment | the host clock is more than 5 minutes off: fix NTP (`timedatectl`), run the installer again |
+| Pull mode: diagnosis says Prometheus cannot reach the agent | open TCP 9110 from the ObservaOne server; behind NAT set `pull.advertise` |
+| Pull mode: "not scraped yet" for minutes | `docker compose logs prometheus` (the `observaone-agents` job); the files in volume `agent-pull` |
 
 ## 11. Upgrade, rollback, uninstall
 
@@ -251,9 +314,12 @@ and are judged by their last upload.
   agent on the Agents page.
 * **Previous-generation Linux agent** (otelcol + node_exporter): the installer replaces it. It stops
   `observaone-node-exporter` and removes the old binaries, config and token.
+* **1.1 → 1.2:** the installer converts `agent.conf` to `agent.yaml` with the new binary. If the 1.2 agent does not send
+  a heartbeat within 45 s, the rollback also restores `agent.conf` and the old unit (the 1.1 binary reads only that).
 * **Server side:** `docker compose up -d --build`. The `agent-build` service compiles the agent (Go 1.24 image) into
-  `agent/files/` before Nginx starts. Database migration 5 only adds columns and indexes, so going back to the
-  previous version is safe; the new columns are simply ignored.
+  `agent/files/` before Nginx starts; `agent-pki-init` creates the agent CA before Prometheus starts. Database
+  migrations 5-7 only add columns, tables and indexes, so going back to the previous version is safe; the new columns
+  are simply ignored.
 
 ## 12. Testing on a real VM
 
@@ -267,13 +333,58 @@ sudo reboot
 sudo bash vm-check.sh --reboot-check
 ```
 
-Paste the output back. On the ObservaOne server, `agent/test/scenarios.sh` runs the server-side scenario suite
-(see the header of the script).
+Paste the output back. On the ObservaOne server, `agent/test/scenarios.sh` runs the server-side scenario suite and
+`agent/test/pull-scenarios.sh` the 1.2 / pull-mode suite (see the headers of the scripts).
+
+## 13. Pull mode
+
+```bash
+sudo bash observaone-install.sh --server https://observaone.example.com --ca-sha256 <FP> --mode pull [--pull-port 9110] \
+  [--pull-advertise 10.0.0.5] [--pull-allow 10.0.0.0/8]
+```
+
+1. The agent enrolls and sends heartbeats as in push mode (outbound HTTPS).
+2. It makes its own P-256 key (`/var/lib/observaone-agent/pull.key`, 0600; it never leaves the host) and asks
+   ObservaOne for a certificate (`POST /api/v1/agents/{id}/pull-certificate`) for its addresses. The name in the
+   certificate is the agent id from the credential. Certificates last 90 days and are renewed at 2/3 of their life or when
+   the host's addresses change.
+3. It serves `https://<address>:9110/metrics`. Every connection must present the **Prometheus client certificate** from
+   the same ObservaOne agent CA with the name `observaone-prometheus`; anything else is refused during the TLS handshake.
+   `pull.allow` restricts source addresses further.
+4. Prometheus finds the agents through **HTTP service discovery** (`/api/v1/sd/agents`, job `observaone-agents` in
+   `prometheus/prometheus.yml`), with the same identity labels as push. The discovery endpoint needs its own token, is
+   called inside the stack only, and is refused through Nginx.
+
+The ObservaOne agent CA, the Prometheus client certificate and the discovery token are created on first start
+(service `agent-pki-init`) in the `observa-data` volume, and copied for Prometheus to the `agent-pull` volume
+(readable by Prometheus only). The CA key never leaves `observa-data`.
+
+When to use pull: Prometheus must own the scrape schedule, or policy forbids monitored hosts from pushing data. Otherwise
+push is simpler: no inbound port, and it buffers through short outages (in pull mode a missed scrape is a gap).
 
 ## Test results
 
 Re-run on 2026-10-18 after merging into `react` (React Agents screens): scenarios.sh 41 PASS / 0 FAIL, server tests 40/40,
 Go tests pass, Agents and Metrics UI checks pass. S46/S67/S73 still need a real VM (see above).
+
+### 1.2 (2026-10-19)
+
+Lab as below, plus a blackbox exporter and Prometheus with the `observaone-agents` / probe jobs. The lab agent (1.1, with
+an `agent.conf`) was upgraded by the installer: the config was converted, the identity kept, heartbeats moved to the
+`/api/v1/agents` paths.
+
+* `agent/test/pull-scenarios.sh`: **20 PASS, 0 FAIL** (S80-S99): replay protection (nonce reuse, 10-minute clock skew,
+  missing nonce), path id must match the credential, certificate requests validated (loopback, bad key), certificates
+  signed by the agent CA with the agent id, discovery token required and refused through the proxy, mutual TLS on the
+  pull endpoint (no client certificate, a same-name certificate from another CA, an agent certificate, plain HTTP: all
+  refused), Prometheus scrapes with the same labels as push, diagnosis for a firewalled pull port, blocked outbound
+  HTTPS and a stopped agent, rename reaching Prometheus through discovery, config migration.
+* Also checked by hand: `pull.allow` excluding ObservaOne → "The agent refuses ObservaOne".
+* `agent/test/scenarios.sh` against the 1.2 agent in push mode: see below.
+* Go unit tests (YAML parser, migration round trip, certificate renewal rules), server unit tests (diagnosis matrix,
+  discovery, replay check, the CA): all pass.
+
+### 1.1 (2026-10-11)
 
 Run on 2026-10-11 in a Linux lab: Ubuntu 24.04, PostgreSQL 16, Prometheus 3.5 (remote-write receiver), Nginx with a
 self-signed TLS certificate, the ObservaOne app from this branch, and the agent installed by `install.sh`. systemd is not
@@ -360,3 +471,8 @@ in dark and light.
 * A host monitored by both a Prometheus scrape and the agent is shown once, but its data exists twice in Prometheus:
   remove the scrape target.
 * Rate limits are kept in memory in one UI container; with several UI containers each has its own counters.
+* Pull mode: no buffer (a missed scrape is a gap); the agent CA is single-level, with no revocation list: a removed or
+  blocked agent's certificate stays valid until it expires (90 days), but discovery drops the agent at once, so
+  Prometheus stops scraping it.
+* The ICMP probe needs the blackbox container's NET_RAW capability; where ICMP is filtered the diagnosis cannot tell
+  "host down" from "agent stopped".

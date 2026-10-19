@@ -66,6 +66,60 @@ scrape_configs:
         target_label: host
         replacement: "monitoring-server"
 
+  # ---- ObservaOne Agents in pull mode (mode: pull in agent.yaml) ----
+  # The target list comes from ObservaOne (enrolled agents, their addresses and labels). HTTPS both ways:
+  # agents have certificates from the ObservaOne agent CA, and Prometheus shows its client certificate.
+  # The files in /etc/prometheus-agents are written by the observa container (volume agent-pull).
+  - job_name: observaone-agents
+    scrape_interval: 15s
+    scheme: https
+    http_sd_configs:
+      - url: http://observa:8080/api/v1/sd/agents?kind=pull
+        refresh_interval: 30s
+        authorization:
+          credentials_file: /etc/prometheus-agents/sd-token
+    tls_config:
+      ca_file: /etc/prometheus-agents/ca.crt
+      cert_file: /etc/prometheus-agents/prometheus.crt
+      key_file: /etc/prometheus-agents/prometheus.key
+
+  # ---- Reachability of agent hosts, for the Agents page diagnosis (blackbox exporter) ----
+  - job_name: observaone-agent-ping
+    scrape_interval: 30s
+    metrics_path: /probe
+    params:
+      module: [icmp]
+    http_sd_configs:
+      - url: http://observa:8080/api/v1/sd/agents?kind=ping
+        refresh_interval: 60s
+        authorization:
+          credentials_file: /etc/prometheus-agents/sd-token
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox:9115
+
+  - job_name: observaone-agent-port
+    scrape_interval: 30s
+    metrics_path: /probe
+    params:
+      module: [tcp_connect]
+    http_sd_configs:
+      - url: http://observa:8080/api/v1/sd/agents?kind=port
+        refresh_interval: 60s
+        authorization:
+          credentials_file: /etc/prometheus-agents/sd-token
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox:9115
+
   # ---- The monitoring stack watches itself ----
   - job_name: prometheus
     metrics_path: /prometheus/metrics

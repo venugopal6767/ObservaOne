@@ -58,6 +58,12 @@ func NewClient(cfg *Config, version string) (*Client, error) {
 	}, nil
 }
 
+// API paths (server 2026.10+). The 1.1 agent's /api/agent/v1/* paths stay on the server as aliases.
+const RegisterPath = "/api/v1/agents/register"
+
+// AgentPath is /api/v1/agents/<id>/<what>.
+func AgentPath(agentID, what string) string { return "/api/v1/agents/" + agentID + "/" + what }
+
 // APIError is an answer from the server that was not 2xx.
 type APIError struct {
 	Status int
@@ -86,7 +92,7 @@ func (c *Client) PostJSON(ctx context.Context, path, secret string, body, out an
 }
 
 // PostMetrics sends a gzip-compressed Prometheus text payload.
-func (c *Client) PostMetrics(ctx context.Context, secret, text string, collectedAtMs int64) error {
+func (c *Client) PostMetrics(ctx context.Context, agentID, secret, text string, collectedAtMs int64) error {
 	var buf bytes.Buffer
 	zw := gzip.NewWriter(&buf)
 	_, _ = zw.Write([]byte(text))
@@ -96,7 +102,7 @@ func (c *Client) PostMetrics(ctx context.Context, secret, text string, collected
 		"X-Agent-Time":   strconv.FormatInt(time.Now().UnixMilli(), 10),
 		"X-Collected-At": strconv.FormatInt(collectedAtMs, 10),
 	}
-	return c.do(ctx, "/api/agent/v1/metrics", secret, "text/plain; version=0.0.4", "gzip", buf.Bytes(), h, nil)
+	return c.do(ctx, AgentPath(agentID, "metrics"), secret, "text/plain; version=0.0.4", "gzip", buf.Bytes(), h, nil)
 }
 
 func (c *Client) do(ctx context.Context, path, secret, ctype, enc string, body []byte, hdr map[string]string, out any) error {

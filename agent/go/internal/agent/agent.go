@@ -4,6 +4,7 @@ package agent
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -54,6 +55,7 @@ type Agent struct {
 	wake        chan struct{}
 	hbInterval  time.Duration
 	serverState string
+	pullSt      *pullState
 }
 
 // Load reads config, server settings saved from the last heartbeat, and the identity.
@@ -101,6 +103,9 @@ func (a *Agent) Reload() {
 	if err == nil && cfg.Server != a.Config().Server {
 		err = fmt.Errorf("server cannot change on reload (re-enroll to move to another server)")
 	}
+	if old := a.Config(); err == nil && (cfg.Mode != old.Mode || cfg.PullListen != old.PullListen) {
+		err = fmt.Errorf("mode and pull.listen change only on restart: sudo systemctl restart observaone-agent")
+	}
 	var cl *core.Client
 	if err == nil {
 		cl, err = core.NewClient(cfg, a.Version)
@@ -135,11 +140,22 @@ func (a *Agent) setErr(s string) {
 
 // Run blocks until ctx is cancelled. reload receives SIGHUP.
 func (a *Agent) Run(ctx context.Context, reload <-chan struct{}) error {
-	a.Log.Info("agent starting", "version", a.Version, "agent_id", a.id.AgentID, "host", a.id.Host, "server", a.cfg.Server)
+	a.Log.Info("agent starting", "version", a.Version, "agent_id", a.id.AgentID, "host", a.id.Host, "server", a.cfg.Server, "mode", a.cfg.Mode)
+	for _, f := range a.cfg.LegacyFiles {
+		a.Log.Warn("old key = value configuration file; convert it with 'observaone-agent config migrate' (support ends in the next release)", "file", f)
+	}
+	push := a.cfg.Mode == "push"
 	var wg sync.WaitGroup
 	wg.Add(3)
 	go func() { defer wg.Done(); a.collectLoop(ctx) }()
-	go func() { defer wg.Done(); a.uploadLoop(ctx) }()
+	go func() {
+		defer wg.Done()
+		if push {
+			a.uploadLoop(ctx)
+		} else {
+			a.pullLoop(ctx)
+		}
+	}()
 	go func() { defer wg.Done(); a.heartbeatLoop(ctx) }()
 	var srv *http.Server
 	if l := a.cfg.Listen; l != "" {
@@ -215,11 +231,13 @@ func (a *Agent) collectOnce() {
 	text := out.Text(now.UnixMilli())
 	a.lastText = out.Text(0)
 	a.states = states
-	if len(a.buf) >= cfg.BufferPayloads { // bounded: drop the OLDEST so memory never grows without limit
-		a.buf = a.buf[1:]
-		a.dropped++
+	if cfg.Mode == "push" { // pull mode: Prometheus reads lastText, nothing is buffered
+		if len(a.buf) >= cfg.BufferPayloads { // bounded: drop the OLDEST so memory never grows without limit
+			a.buf = a.buf[1:]
+			a.dropped++
+		}
+		a.buf = append(a.buf, payload{text: text, collectedAt: now.UnixMilli()})
 	}
-	a.buf = append(a.buf, payload{text: text, collectedAt: now.UnixMilli()})
 	a.mu.Unlock()
 	select {
 	case a.wake <- struct{}{}:
@@ -287,7 +305,7 @@ func (a *Agent) flush(ctx context.Context) error {
 		cl, cred := a.client, a.cred
 		a.mu.Unlock()
 
-		err := cl.PostMetrics(ctx, cred, p.text, p.collectedAt)
+		err := cl.PostMetrics(ctx, a.id.AgentID, cred, p.text, p.collectedAt)
 		var ae *core.APIError
 		switch {
 		case err == nil:
@@ -357,16 +375,24 @@ func (a *Agent) heartbeatOnce(ctx context.Context, bo *core.Backoff) time.Durati
 		"droppedPayloads":   a.dropped,
 		"lastError":         a.lastErr,
 		"hostLocked":        a.cfg.HostLocked(),
+		"mode":              a.cfg.Mode,
 	}
+	pullMode := a.cfg.Mode == "pull"
 	if !a.lastPushOK.IsZero() {
 		body["lastUploadAgoSeconds"] = int(time.Since(a.lastPushOK).Seconds())
 	}
 	a.mu.Unlock()
+	if pullMode {
+		body["pull"] = a.pullReport()
+	}
+	if ips, _ := pullAddresses(&core.Config{}); len(ips) > 0 {
+		body["addresses"] = ips // for reachability probes from the server (ping / TCP)
+	}
 	if up, bt, k := hostTimes(a.env); up > 0 {
 		body["uptimeSeconds"], body["bootTime"], body["kernel"] = up, bt, k
 	}
 	var ans hbAnswer
-	err := cl.PostJSON(ctx, "/api/agent/v1/heartbeat", cred, body, &ans)
+	err := cl.PostJSON(ctx, core.AgentPath(a.id.AgentID, "heartbeat"), cred, body, &ans)
 	if err != nil {
 		var ae *core.APIError
 		if errors.As(err, &ae) && ae.Status == 401 {
@@ -577,6 +603,11 @@ type EnrollRequest struct {
 	Role        string            `json:"role,omitempty"`
 	Labels      map[string]string `json:"labels,omitempty"`
 	MachineHash string            `json:"machineHash,omitempty"`
+	Mode        string            `json:"mode,omitempty"`
+	// replay protection: a captured registration cannot be sent again (the server remembers the nonce
+	// for 10 minutes and refuses timestamps more than 5 minutes off)
+	Nonce     string `json:"nonce"`
+	Timestamp int64  `json:"timestamp"`
 }
 
 type enrollAnswer struct {
@@ -607,9 +638,10 @@ func Enroll(ctx context.Context, cfg *core.Config, version, token, osName, kerne
 		return nil, err
 	}
 	req := EnrollRequest{Hostname: host, Platform: "linux", OS: osName, Kernel: kernel, Arch: runtime.GOARCH, Version: version,
-		Env: cfg.Env, Role: cfg.Role, Labels: cfg.Labels, MachineHash: machineHash(cfg.RootPath)}
+		Env: cfg.Env, Role: cfg.Role, Labels: cfg.Labels, MachineHash: machineHash(cfg.RootPath), Mode: cfg.Mode,
+		Nonce: randomHex(16), Timestamp: time.Now().UnixMilli()}
 	var ans enrollAnswer
-	if err := cl.PostJSON(ctx, "/api/agent/v1/enroll", token, req, &ans); err != nil {
+	if err := cl.PostJSON(ctx, core.RegisterPath, token, req, &ans); err != nil {
 		return nil, err
 	}
 	id := &core.Identity{AgentID: ans.AgentID, Host: ans.Host, Server: cfg.Server, EnrolledAt: time.Now().UTC()}
@@ -620,6 +652,14 @@ func Enroll(ctx context.Context, cfg *core.Config, version, token, osName, kerne
 		log.Warn("another enrolled machine already uses this host name; this one is shown as "+ans.Host, "requested", host)
 	}
 	return id, nil
+}
+
+func randomHex(n int) string {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		panic(err) // no randomness = no safe secrets; never continue
+	}
+	return hex.EncodeToString(b)
 }
 
 // machineHash identifies the machine (not the install): lets a re-installed agent take back its old record.

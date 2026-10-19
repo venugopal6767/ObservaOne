@@ -252,7 +252,9 @@ api.get('/prom/targets', wrap(async (req, res) => {
       });
     }
   }
-  res.json([...servers.values(), ...pulled.filter((t) => !isServer(t))]);
+  // blackbox probes of agent hosts feed the Agents page diagnosis; they are not monitored components
+  const probe = (t) => /^observaone-agent-(ping|port)$/.test(t.job);
+  res.json([...servers.values(), ...pulled.filter((t) => !isServer(t) && !probe(t))]);
 }));
 
 // ---------------- Overview (one call for the whole page) ----------------

@@ -1,0 +1,15 @@
+# Blackbox exporter: can ObservaOne reach an agent's host? Used by the Agents page diagnosis
+# ("host up, agent silent" vs "host unreachable" vs "pull port blocked").
+modules:
+  icmp:
+    prober: icmp
+    timeout: 5s
+    icmp:
+      preferred_ip_protocol: ip4
+      ip_protocol_fallback: true
+  tcp_connect:
+    prober: tcp
+    timeout: 5s
+    tcp:
+      preferred_ip_protocol: ip4
+      ip_protocol_fallback: true

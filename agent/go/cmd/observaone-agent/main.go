@@ -3,8 +3,9 @@
 //	observaone-agent run            [--config FILE]   run (what systemd starts)
 //	observaone-agent enroll         [--config FILE] [--token-file FILE]   (token from the file, or typed on stdin)
 //	observaone-agent status         [--config FILE]   what the running agent last did
-//	observaone-agent check-config   [--config FILE]   validate agent.conf + conf.d/*.conf
+//	observaone-agent check-config   [--config FILE]   validate agent.yaml + conf.d/*.yaml
 //	observaone-agent config show    [--config FILE]   settings in effect and where each one comes from
+//	observaone-agent config migrate [--config FILE]   turn an old agent.conf into agent.yaml
 //	observaone-agent reload         [--config FILE]   apply config changes without a restart (SIGHUP)
 //	observaone-agent version
 package main
@@ -18,6 +19,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -28,9 +30,7 @@ import (
 )
 
 // version is set at build time: -ldflags "-X main.version=1.1.0"
-var version = "1.1.0"
-
-const defaultConfig = "/etc/observaone-agent/agent.conf"
+var version = "1.2.0"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -38,11 +38,11 @@ func main() {
 		os.Exit(2)
 	}
 	cmd, args := os.Args[1], os.Args[2:]
-	if cmd == "config" && len(args) > 0 && args[0] == "show" {
-		cmd, args = "config-show", args[1:]
+	if cmd == "config" && len(args) > 0 && (args[0] == "show" || args[0] == "migrate") {
+		cmd, args = "config-"+args[0], args[1:]
 	}
 	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
-	cfgPath := fs.String("config", defaultConfig, "configuration file")
+	cfgPath := fs.String("config", core.DefaultConfigPath(), "configuration file (agent.yaml; an old agent.conf is still read)")
 	tokenFile := fs.String("token-file", "", "enroll: read the enrollment token from this file (deleted after a successful enrollment)")
 	force := fs.Bool("force", false, "enroll: enroll again even if this agent already has an identity")
 	_ = fs.Parse(args)
@@ -57,12 +57,18 @@ func main() {
 	case "status":
 		err = status(*cfgPath)
 	case "check-config":
-		_, err = core.LoadConfig(*cfgPath)
+		var c *core.Config
+		c, err = core.LoadConfig(*cfgPath)
 		if err == nil {
+			for _, f := range c.LegacyFiles {
+				fmt.Printf("note: %s uses the old key = value format; run 'observaone-agent config migrate'\n", f)
+			}
 			fmt.Println("configuration OK")
 		}
 	case "config-show":
 		err = showConfig(*cfgPath)
+	case "config-migrate":
+		err = migrateConfig(*cfgPath)
 	case "reload":
 		err = reload(*cfgPath)
 	case "version", "--version", "-v":
@@ -78,7 +84,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: observaone-agent run|enroll|status|check-config|config show|reload|version [--config FILE]")
+	fmt.Fprintln(os.Stderr, "usage: observaone-agent run|enroll|status|check-config|config show|config migrate|reload|version [--config FILE]")
 }
 
 func run(cfgPath string, log *slog.Logger) error {
@@ -196,6 +202,54 @@ func showConfig(cfgPath string) error {
 	for _, r := range cfg.Effective() {
 		fmt.Printf("%-20s %-45s %s\n", r[0], nz(r[1], "(empty)"), r[2])
 	}
+	return nil
+}
+
+// migrateConfig writes agent.yaml next to an old agent.conf (same settings) and renames the old file
+// to agent.conf.migrated. conf.d/*.conf files are converted the same way. Safe to run twice.
+func migrateConfig(cfgPath string) error {
+	if !core.IsLegacyPath(cfgPath) {
+		if _, err := os.Stat(cfgPath); err == nil {
+			fmt.Printf("%s is already YAML; nothing to migrate.\n", cfgPath)
+			return nil
+		}
+		cfgPath = strings.TrimSuffix(strings.TrimSuffix(cfgPath, ".yaml"), ".yml") + ".conf"
+	}
+	if _, err := core.LoadConfig(cfgPath); err != nil {
+		return fmt.Errorf("the old configuration is not valid, fix it first: %w", err)
+	}
+	dir := filepath.Dir(cfgPath)
+	files := []string{cfgPath}
+	extra, _ := filepath.Glob(filepath.Join(dir, "conf.d", "*.conf"))
+	files = append(files, extra...)
+	for _, f := range files {
+		c := core.Defaults()
+		if err := c.ReadOne(f); err != nil {
+			return err
+		}
+		out := strings.TrimSuffix(f, ".conf") + ".yaml"
+		if f == cfgPath {
+			out = filepath.Join(dir, "agent.yaml")
+		}
+		if _, err := os.Stat(out); err == nil {
+			return fmt.Errorf("%s already exists; not overwriting it", out)
+		}
+		st, _ := os.Stat(f)
+		if err := core.WriteFileAtomic(out, []byte(c.HostYAML()), st.Mode().Perm()); err != nil {
+			return err
+		}
+		if sys, ok := st.Sys().(*syscall.Stat_t); ok {
+			_ = os.Chown(out, int(sys.Uid), int(sys.Gid))
+		}
+		if err := os.Rename(f, f+".migrated"); err != nil {
+			return err
+		}
+		fmt.Printf("%s -> %s\n", f, out)
+	}
+	if _, err := core.LoadConfig(filepath.Join(dir, "agent.yaml")); err != nil {
+		return fmt.Errorf("migrated configuration does not validate (the old files are kept as *.migrated): %w", err)
+	}
+	fmt.Println("Done. Point the service at agent.yaml (the installer does this) and restart the agent.")
 	return nil
 }
 

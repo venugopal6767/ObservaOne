@@ -75,6 +75,8 @@ export const config = {
     enrollFailuresPer10Min: Number(env('AGENT_ENROLL_FAILURES', '10')),
     tokenPurgeMinutes: Number(env('AGENT_TOKEN_PURGE_MINUTES', '5')),     // revoked/expired tokens deleted after this; 0 = keep    // failed enrollments per address / 10 min
     remoteWriteUrl: env('PROMETHEUS_REMOTE_WRITE_URL', ''),   // default: <Prometheus data source>/api/v1/write
+    pkiDir: env('AGENT_PKI_DIR', ''),                          // agent CA for pull mode (default <DATA_DIR>/agent-pki)
+    prometheusDir: env('AGENT_PROMETHEUS_DIR', ''),            // copy of CA + Prometheus client cert + SD token for Prometheus (empty = off)
   },
   dataDir: path.resolve(env('DATA_DIR', './data')),
   configDir: path.resolve(env('CONFIG_DIR', './config')),

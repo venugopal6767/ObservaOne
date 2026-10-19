@@ -365,9 +365,10 @@ table.tbl { width: 100%; border-collapse: collapse; }
 .empty-title { color: var(--text-2); font-weight: 600; }
 .spinner { width: 22px; height: 22px; border: 2.5px solid var(--border-2); border-top-color: var(--accent-2); border-radius: 50%; animation: spin 0.8s linear infinite; margin: 30px auto; }
 @keyframes spin { to { transform: rotate(360deg); } }
-.kv { display: grid; grid-template-columns: 160px 1fr; gap: 6px 14px; }
+.kv { display: grid; grid-template-columns: minmax(90px, 160px) minmax(0, 1fr); gap: 6px 14px; }
 .kv dt { color: var(--muted); }
-.kv dd { margin: 0; overflow-wrap: anywhere; }
+.kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.kv dd code { word-break: break-all; }
 code, .code { font-family: var(--mono); font-size: 12px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 5px; padding: 1px 6px; }
 pre.code { padding: 10px 12px; overflow: auto; white-space: pre-wrap; }
 .ds-icon { width: 34px; height: 34px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 14px; }
@@ -697,3 +698,19 @@ table.kv td { padding: 5px 0; overflow-wrap: anywhere; }
   .mx-mobile-pick { display: block; }
   .mx-filter .select { min-width: 0; }
 }
+
+/* Agents: diagnosis + pull mode */
+.mode-chip { margin-left: 6px; font-size: 10.5px; padding: 0 6px; vertical-align: 1px; }
+.diag { margin-bottom: 14px; border-left: 3px solid var(--border); }
+.diag-critical { border-left-color: var(--red-text); }
+.diag-warning { border-left-color: var(--orange-text); }
+.diag-ok { border-left-color: var(--green-text); }
+.diag-info { border-left-color: var(--blue-text); }
+.diag-detail { margin: 8px 0 10px; }
+.diag-evidence { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12.5px; }
+.diag-evidence li { display: inline-flex; align-items: center; gap: 5px; }
+.diag-evidence .sig { color: var(--muted, inherit); }
+.diag-evidence .val { overflow-wrap: anywhere; }
+.diag-evidence li.ok svg { color: var(--green-text); }
+.diag-evidence li.bad svg, .diag-evidence li.bad .val { color: var(--red-text); }
+.diag-evidence li.unk svg { opacity: 0.5; }

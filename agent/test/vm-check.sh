@@ -65,19 +65,19 @@ chk "same identity after restart ($(id_now))" [ "$(id_now)" = "$ID0" ]
 chk "heartbeat after restart ($(hb_age) s ago)" [ "$(hb_age)" -lt 45 ]
 
 echo "-- config reload"
-cp /etc/observaone-agent/agent.conf /tmp/agent.conf.bak
-echo "collect_interval = 1s" > /etc/observaone-agent/conf.d/99-test.conf
+echo "collect_interval: 1s" > /etc/observaone-agent/conf.d/99-test.yaml
 if observaone-agent check-config >/dev/null 2>&1; then bad "invalid value accepted"; else ok "invalid config value refused by check-config"; fi
 systemctl reload observaone-agent; sleep 3
 chk "agent still running after a bad reload" systemctl is-active --quiet observaone-agent
-echo "collect_interval = 20s" > /etc/observaone-agent/conf.d/99-test.conf
+echo "collect_interval: 20s" > /etc/observaone-agent/conf.d/99-test.yaml
 systemctl reload observaone-agent; sleep 3
 chk "valid change applied (config show)" bash -c "observaone-agent config show | grep -q 'collect_interval *20s'"
-rm -f /etc/observaone-agent/conf.d/99-test.conf; systemctl reload observaone-agent
+rm -f /etc/observaone-agent/conf.d/99-test.yaml; systemctl reload observaone-agent
 
 echo "-- network interruption (blocks the server for 70 s with iptables, then restores)"
-SRV=$(sed -n 's/^server *= *https:\/\/\([^:/]*\).*/\1/p' /etc/observaone-agent/agent.conf)
-PORT=$(sed -n 's/^server *= *https:\/\/[^:/]*:\([0-9]*\).*/\1/p' /etc/observaone-agent/agent.conf); PORT=${PORT:-443}
+SURL=$(observaone-agent config show | awk '$1=="server"{print $2}')
+SRV=$(echo "$SURL" | sed -n 's#^https://\([^:/]*\).*#\1#p')
+PORT=$(echo "$SURL" | sed -n 's#^https://[^:/]*:\([0-9]*\).*#\1#p'); PORT=${PORT:-443}
 IP=$(getent ahostsv4 "$SRV" | awk 'NR==1{print $1}')
 if command -v iptables >/dev/null && [ -n "$IP" ]; then
   iptables -I OUTPUT -d "$IP" -p tcp --dport "$PORT" -j REJECT
