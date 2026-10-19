@@ -21,7 +21,7 @@ import { requirePerm, httpError } from '../auth.js';
 import { promInstant } from '../datasources.js';
 import { compareVersions } from '../health.js';
 import { SETTINGS, ACTIONS, validateSettings, saveLayer, effectiveFor, queueAction, actionRow, envScopeId } from '../agentmgmt.js';
-import { AGENT_LATEST, describeAgent, forgetAgentCredential } from './agent-control.js';
+import { AGENT_LATEST, describeAgent, forgetAgentCredential, removeAgents } from './agent-control.js';
 import { serverUrl, certInfo } from './agents.js';
 
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -208,6 +208,28 @@ agentMgmtRouter.get('/targets', requirePerm('view'), wrap(async (req, res) => {
   const { rows } = await q(`SELECT t.*, (SELECT json_agg(json_build_object('id', a.id, 'host', a.host)) FROM agents a WHERE a.target_id = t.id) AS agents
                             FROM targets t WHERE ($1 = 't_default' OR t.tenant_id = $1) ORDER BY t.created_at DESC LIMIT 500`, [tn(req)]);
   res.json({ targets: rows.map((t) => ({ id: t.id, name: t.name, kind: t.kind, env: t.env, role: t.role, labels: t.labels, mode: t.mode, createdBy: t.created_by, createdAt: t.created_at, agents: t.agents || [] })) });
+}));
+
+// Remove a target: its token is revoked and its agents are removed too (?agents=keep only unbinds them).
+// Removed agents hear it at their next heartbeat: they stop, or with ?uninstall=1 uninstall themselves (1.3.1+).
+agentMgmtRouter.delete('/targets/:id', requirePerm('integrations.manage'), wrap(async (req, res) => {
+  const keep = req.query.agents === 'keep';
+  const uninstall = !keep && (req.query.uninstall === '1' || req.query.uninstall === 'true');
+  const t = await one(`SELECT id, name, token_id FROM targets WHERE id = $1 AND ($2 = 't_default' OR tenant_id = $2)`, [req.params.id, tn(req)]);
+  if (!t) throw httpError(404, 'Target not found.');
+  const removed = await tx(async (c) => {
+    const ids = (await c.query('SELECT id FROM agents WHERE target_id = $1', [t.id])).rows.map((r) => r.id);
+    let out = [];
+    if (keep) await c.query('UPDATE agents SET target_id = NULL WHERE target_id = $1', [t.id]);
+    else out = await removeAgents(c, ids, { uninstall, by: req.user?.username || '' });
+    if (t.token_id) await c.query('UPDATE agent_tokens SET revoked = TRUE, revoked_at = now() WHERE id = $1 AND NOT revoked', [t.token_id]);
+    await c.query(`DELETE FROM agent_configuration WHERE scope = 'target' AND scope_id = $1`, [t.id]);
+    await c.query('DELETE FROM targets WHERE id = $1', [t.id]);
+    return out;
+  });
+  if (keep) forgetAgentCredential();
+  audit(req, 'target.remove', { id: t.id, name: t.name, agents: removed.map((r) => r.host), uninstall, keptAgents: keep });
+  res.json({ ok: true, removedAgents: removed.map((r) => ({ id: r.id, host: r.host })), uninstall });
 }));
 
 // The wizard's live checklist. Every step says what it is waiting for and, when stuck, the likely cause.

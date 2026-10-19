@@ -156,3 +156,23 @@ func TestDiskBufferSpillPruneOrder(t *testing.T) {
 		t.Fatalf("spillAll: disk=%d mem=%d", n, len(b.buf))
 	}
 }
+
+func TestRemovedByServer(t *testing.T) {
+	a := testAgent(t, "root_path: "+t.TempDir()+"\n") // not "/": the updater check is skipped
+	a.removedByServer("agent_uninstall")
+	a.removedByServer("agent_uninstall") // a second 410 changes nothing
+	select {
+	case <-a.removed:
+	default:
+		t.Fatal("removed not signalled")
+	}
+	if _, err := os.Stat(filepath.Join(a.Config().StateDir, "uninstall-request.json")); err != nil {
+		t.Fatal("no uninstall request:", err)
+	}
+	b := testAgent(t, "")
+	b.removedByServer("agent_removed")
+	<-b.removed
+	if _, err := os.Stat(filepath.Join(b.Config().StateDir, "uninstall-request.json")); err == nil {
+		t.Fatal("agent_removed must not ask for uninstall")
+	}
+}

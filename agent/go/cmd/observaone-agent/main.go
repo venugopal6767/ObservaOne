@@ -65,6 +65,9 @@ func main() {
 		if errors.Is(err, agent.ErrRestartRequested) {
 			os.Exit(agent.RestartExitCode) // systemd (Restart=on-failure) starts the agent again
 		}
+		if errors.Is(err, agent.ErrRemoved) {
+			os.Exit(0) // clean exit: systemd leaves it stopped (it starts again only at boot, and stops again)
+		}
 	case "diagnostics":
 		err = diagnostics(*cfgPath, log)
 	case "check-credential":
@@ -132,6 +135,9 @@ func checkCredential(cfgPath string) int {
 	case err == nil:
 		fmt.Printf("credential accepted (%s)\n", id.AgentID)
 		return 0
+	case errors.As(err, &ae) && ae.Status == 410:
+		fmt.Printf("%s was removed in ObservaOne (%s)\n", id.AgentID, ae.Code)
+		return 3
 	case errors.As(err, &ae) && ae.Status == 401:
 		fmt.Printf("credential refused: %s is not known to %s any more (removed on the Agents page, or the server's database was reset)\n", id.AgentID, cfg.Server)
 		return 3

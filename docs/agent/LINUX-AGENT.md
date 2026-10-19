@@ -398,6 +398,10 @@ on the host are shown as locked: the file wins.
 | Restart agent | The agent reports, then exits with code 75; systemd (`Restart=on-failure`) starts it again in about 10 s. Done actions are remembered on disk, so it never restarts twice. |
 | Upgrade to x.y.z | The agent writes `upgrade-request.json`; the root-owned **updater** (`observaone-agent-updater.path` → `.service`, installed by the installer) downloads the published build from the same server with the same trust settings, checks `SHA256SUMS` and its signature, runs `check-config` with the new binary as the agent user, swaps it (keeping `.prev`), restarts and waits 60 s for a heartbeat from the new version. Otherwise it **rolls back** and keeps the failed binary as `.failed`. The result appears on the Agents page. The agent itself never replaces its binary and never runs as root; the updater reads only the action id from the request (the version installed is whatever the server publishes). |
 | Rotate credential | See section 16. |
+| Remove (agent list, trash icon) | **Remove and uninstall** (default): at its next heartbeat the agent gets `410 agent_uninstall`, asks the root updater (`uninstall-request.json`), which stops and disables the service and deletes `/opt/observaone-agent`, `/etc/observaone-agent`, `/var/lib/observaone-agent` and the user. **Remove, only stop**: `410 agent_removed`, the agent exits cleanly and systemd leaves it stopped (at boot it starts, hears it again, and stops). Running the install command again re-enrolls the host. Agents before 1.3.1 just get refused. |
+
+**Removing a target** (`DELETE /api/targets/<id>?uninstall=1`) revokes its token and removes its agents the same
+way (`?agents=keep` only unbinds them). ObservaOne remembers removed credentials for 30 days to answer 410.
 
 Actions are delivered with the next heartbeat, expire after 24 hours, and are refused for blocked agents. A host
 view (`/metrics/host/<host>`) shows a health strip: overall diagnosis, agent status, metrics, reachability, last metric

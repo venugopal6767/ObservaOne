@@ -102,7 +102,9 @@ func TestNginxJolokiaExporters(t *testing.T) {
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, "# HELP x_requests_total Requests.\n# TYPE x_requests_total counter\nx_requests_total{path=\"/a\",host=\"evil\"} 12\n# TYPE x_lat histogram\nx_lat_bucket{le=\"0.1\"} 3\nx_lat_bucket{le=\"+Inf\"} 4\nx_lat_sum 0.7\nx_lat_count 4\nx_temp{room=\"a \\\"b\\\"\"} 21.5 1700000000000\n")
 	})
-	mux.HandleFunc("/redirect", func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "http://169.254.169.254/", http.StatusFound) })
+	mux.HandleFunc("/redirect", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://169.254.169.254/", http.StatusFound)
+	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 	u := strings.Replace(srv.URL, "http://", "http://mon:s3cret@", 1)

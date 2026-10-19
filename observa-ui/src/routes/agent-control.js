@@ -374,6 +374,26 @@ agentControlRouter.post('/agent/v1/enroll', enrollHandler); // agent 1.1
 // Remove nonces older than twice the timestamp window (called every minute by the server)
 export async function purgeNonces() {
   await q("DELETE FROM agent_nonces WHERE seen_at < now() - interval '10 minutes'");
+  await q("DELETE FROM agents_removed WHERE removed_at < now() - interval '30 days'");
+}
+
+// A removed agent (Agents page, or with its target): told 410 so it stops or uninstalls itself (agent 1.3.1+).
+async function removedAgent(cred) {
+  const h = sha256(cred);
+  return one('SELECT id, uninstall FROM agents_removed WHERE (credential_hash = $1 OR credential_prev_hash = $1) AND removed_at > now() - interval \'30 days\' LIMIT 1', [h]);
+}
+
+// Removes agents and remembers their credentials so they hear about it. `c`: a transaction client, or null.
+export async function removeAgents(c, ids, { uninstall = false, by = '' } = {}) {
+  if (!ids.length) return [];
+  const run = c ? (sql, p) => c.query(sql, p) : q;
+  await run(`INSERT INTO agents_removed (id, host, credential_hash, credential_prev_hash, uninstall, removed_by, tenant_id)
+             SELECT id, host, credential_hash, credential_prev_hash, $2, $3, tenant_id FROM agents WHERE id = ANY($1) AND credential_hash IS NOT NULL
+             ON CONFLICT (id) DO UPDATE SET uninstall = EXCLUDED.uninstall, removed_by = EXCLUDED.removed_by, removed_at = now()`, [ids, !!uninstall, by]);
+  await run(`DELETE FROM agent_configuration WHERE scope = 'agent' AND scope_id = ANY($1)`, [ids]);
+  const { rows } = await run('DELETE FROM agents WHERE id = ANY($1) RETURNING id, host', [ids]);
+  for (const r of rows) forgetAgentCredential(r.id);
+  return rows;
 }
 
 // Credential check shared by every per-agent call. Sends the error answer itself and returns null on failure.
@@ -384,6 +404,13 @@ async function authAgent(req, res, failKey) {
   if (!agent) {
     if (rateLimited(`${failKey}:${ip}`, 30, 60_000)) { res.set('Retry-After', '60'); fail(res, 429, 'rate_limited', 'Too many failed requests from this address.'); return null; }
     if (!rateLimited(`${failKey}-audit:${ip}`, 1, 300_000)) audit(req, `agent.${failKey}.denied`, { username: 'agent', reason: cred ? 'invalid_credential' : 'missing_credential' });
+    const gone = cred && CREDENTIAL_RE.test(cred) ? await removedAgent(cred) : null;
+    if (gone) {
+      // agent 1.3.1+: agent_removed -> stops itself; agent_uninstall -> asks its root updater to uninstall it
+      fail(res, 410, gone.uninstall ? 'agent_uninstall' : 'agent_removed',
+        gone.uninstall ? 'This agent was removed in ObservaOne and is to be uninstalled.' : 'This agent was removed in ObservaOne: it stops itself.');
+      return null;
+    }
     fail(res, 401, 'invalid_credential', 'Agent credential missing or not valid. Re-enroll this agent.');
     return null;
   }

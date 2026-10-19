@@ -58,13 +58,15 @@ type Agent struct {
 	serverState string
 	pullSt      *pullState
 
-	LogRing  *core.LogRing // recent log lines for diagnostics bundles (optional)
-	started  time.Time
-	done     map[int64]bool // actions already carried out (persisted)
-	restart  chan struct{}
-	applied  int64  // server settings version in effect
-	cfgErr   string // why the server's latest settings were refused
-	rejected int64  // version refused (not retried until a newer one arrives)
+	LogRing    *core.LogRing // recent log lines for diagnostics bundles (optional)
+	started    time.Time
+	done       map[int64]bool // actions already carried out (persisted)
+	restart    chan struct{}
+	removed    chan struct{} // closed when ObservaOne answered 410 (agent removed)
+	removeOnce sync.Once
+	applied    int64  // server settings version in effect
+	cfgErr     string // why the server's latest settings were refused
+	rejected   int64  // version refused (not retried until a newer one arrives)
 }
 
 // Load reads config, server settings saved from the last heartbeat, and the identity.
@@ -93,6 +95,9 @@ func (a *Agent) Load() error {
 	a.cfg, a.client, a.id, a.cred, a.remote = cfg, cl, id, cred, remote
 	a.hbInterval = cfg.HeartbeatInterval
 	a.applied, _ = strconv.ParseInt(remote["_version"], 10, 64)
+	if a.removed == nil {
+		a.removed = make(chan struct{})
+	}
 	if a.restart == nil {
 		a.restart = make(chan struct{}, 1)
 		a.started = time.Now()
@@ -183,15 +188,28 @@ func (a *Agent) Run(ctx context.Context, reload <-chan struct{}) error {
 	if l := a.cfg.Listen; l != "" {
 		srv = a.localServer(l)
 	}
-	restartRequested := false
+	restartRequested, removed := false, false
+	removedCh := a.removed
 	for {
 		select {
+		case <-removedCh:
+			removed = true
+			removedCh = nil // fire once
+			cancel()
 		case <-reload:
 			a.Reload()
 		case <-a.restart:
 			restartRequested = true
 			cancel()
 		case <-ctx.Done():
+			if removed { // nothing more is accepted for this identity: do not send or keep anything
+				if srv != nil {
+					_ = srv.Close()
+				}
+				wg.Wait()
+				a.writeStatus()
+				return ErrRemoved
+			}
 			a.Log.Info("stopping: sending what is buffered (max 5 s)")
 			fctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			a.flush(fctx)
@@ -370,6 +388,9 @@ func (a *Agent) flush(ctx context.Context) error {
 				a.lastErr = ""
 			}
 			a.mu.Unlock()
+		case errors.As(err, &ae) && ae.Status == 410:
+			a.removedByServer(ae.Code)
+			return err
 		case errors.As(err, &ae) && !ae.Retryable() && ae.Status != 401 && ae.Status != 403:
 			// the server refused THIS payload (bad data): drop it, keep going
 			a.mu.Lock()
@@ -470,7 +491,10 @@ func (a *Agent) heartbeatOnce(ctx context.Context, bo *core.Backoff) time.Durati
 	err := cl.PostJSON(ctx, core.AgentPath(a.id.AgentID, "heartbeat"), cred, body, &ans)
 	if err != nil {
 		var ae *core.APIError
-		if errors.As(err, &ae) && ae.Status == 401 {
+		if errors.As(err, &ae) && ae.Status == 410 {
+			a.removedByServer(ae.Code)
+			return time.Hour
+		} else if errors.As(err, &ae) && ae.Status == 401 {
 			a.Log.Error("heartbeat refused: the credential is not valid any more (agent removed?). Re-enroll with a new token.")
 		} else if errors.As(err, &ae) && ae.Status == 403 {
 			a.Log.Error("heartbeat refused: this agent is blocked on the Agents page")

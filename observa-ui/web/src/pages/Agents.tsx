@@ -238,8 +238,9 @@ function Fleet({ agents, data, canManage, showPlatform, platform, status, setSta
                     : <button className="btn btn-sm" title="Refuse everything this agent sends" onClick={async () => {
                       if (await confirm(`Block ${a.host}?`, 'The agent keeps running but ObservaOne refuses its heartbeats and data until you allow it again.', 'Block')) act(`/agents/${encodeURIComponent(a.id)}/block`, 'POST', `${a.host} blocked`);
                     }}>Block</button>)}
-                  {canManage && a.status !== 'online' && a.status !== 'attention' && <button className="icon-btn" title="Remove this agent (after you uninstalled it)" aria-label={`Remove ${a.host}`} style={{ marginLeft: 4 }} onClick={async () => {
-                    if (await confirm(`Remove ${a.host}?`, a.enrolled ? 'Removes it and its credential. If the agent is still installed it can no longer send anything; install it again with a new token to bring it back.' : 'Removes it from this list. A previous-generation agent that still has a valid token comes back when it next sends data.', 'Remove')) act(`/agents/${encodeURIComponent(a.id)}`, 'DELETE', `${a.host} removed`);
+                  {canManage && (a.enrolled || (a.status !== 'online' && a.status !== 'attention')) && <button className="icon-btn" title="Remove this agent" aria-label={`Remove ${a.host}`} style={{ marginLeft: 4 }} onClick={async () => {
+                    if (a.enrolled) { open((close) => <RemoveAgentDialog a={a} onClose={close} onDone={() => qc.invalidateQueries({ queryKey: ['agents'] })} />); return; }
+                    if (await confirm(`Remove ${a.host}?`, 'Removes it from this list. A previous-generation agent that still has a valid token comes back when it next sends data.', 'Remove')) act(`/agents/${encodeURIComponent(a.id)}`, 'DELETE', `${a.host} removed`);
                   }}><Trash2 size={15} /></button>}
                 </td>
               </tr>
@@ -531,6 +532,32 @@ function InstallWizard({ p, info, latest, goTokens }: { p: Platform; info: Insta
         </div>
       </section>
     </div>
+  );
+}
+
+// ------------------------------------------------------------ remove an agent
+// Agent 1.3.1+ hears it at its next heartbeat (410): it stops itself, or its root updater uninstalls it.
+function RemoveAgentDialog({ a, onClose, onDone }: { a: Agent; onClose: () => void; onDone: () => void }) {
+  const [how, setHow] = useState<'uninstall' | 'stop'>('uninstall');
+  const knows = !!a.version && /^\d+\.\d+\.\d+$/.test(a.version) && a.version.split('.').map(Number).reduce((x, n) => x * 1000 + n, 0) >= 1003001;
+  return (
+    <Modal title={`Remove ${a.host}?`} onClose={onClose} actions={[
+      { label: 'Cancel' },
+      { label: 'Remove', primary: true, danger: true, onClick: async () => {
+        try {
+          await api(`/agents/${encodeURIComponent(a.id)}${how === 'uninstall' ? '?uninstall=1' : ''}`, { method: 'DELETE' });
+          toast(how === 'uninstall' ? `${a.host} removed: the agent uninstalls itself within a minute` : `${a.host} removed: the agent stops itself within a minute`);
+          onDone();
+        } catch (e) { toast((e as Error).message, 'err'); return false; }
+      } },
+    ]}>
+      <p style={{ marginTop: 0 }}>Removes it from ObservaOne with its credential and settings. Its metrics already stored stay until they age out.</p>
+      <label className="check-row"><input type="radio" name="rm-how" checked={how === 'uninstall'} onChange={() => setHow('uninstall')} />
+        <span><b>Remove and uninstall the agent from the host</b><br /><span className="dim">At its next heartbeat the agent stops and is removed from the host (service, files, user).</span></span></label>
+      <label className="check-row"><input type="radio" name="rm-how" checked={how === 'stop'} onChange={() => setHow('stop')} />
+        <span><b>Remove, and only stop the agent</b><br /><span className="dim">The agent stops itself and stays installed; run the install command again to bring the host back.</span></span></label>
+      {!knows && <InfoBox>This agent runs {a.version || 'an unknown version'}: only 1.3.1 and newer stop or uninstall themselves. Older ones keep running and are refused; remove them on the host with <code>sudo bash observaone-install.sh --uninstall</code>.</InfoBox>}
+    </Modal>
   );
 }
 

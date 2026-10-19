@@ -33,6 +33,32 @@ import (
 // ErrRestartRequested is returned by Run when the Agents page asked for a restart.
 var ErrRestartRequested = errors.New("restart requested from ObservaOne")
 
+// ErrRemoved is returned by Run when ObservaOne says this agent was removed (410). The process then exits 0, so
+// systemd (Restart=on-failure) leaves it stopped; with agent_uninstall the root updater also uninstalls it.
+var ErrRemoved = errors.New("this agent was removed in ObservaOne")
+
+// removedByServer handles a 410 from ObservaOne: once, stop (and ask for uninstall when told to).
+func (a *Agent) removedByServer(code string) {
+	a.removeOnce.Do(func() {
+		if code == "agent_uninstall" {
+			if _, err := os.Stat("/etc/systemd/system/observaone-agent-updater.path"); err == nil || a.Config().RootPath != "/" {
+				b, _ := json.Marshal(map[string]any{"requestedAt": time.Now().UTC().Format(time.RFC3339), "reason": "removed in ObservaOne"})
+				if err := core.WriteFileAtomic(filepath.Join(a.Config().StateDir, "uninstall-request.json"), b, 0o640); err == nil {
+					a.Log.Error("this agent was removed in ObservaOne and is to be uninstalled: the updater removes it now")
+				} else {
+					a.Log.Error("this agent was removed in ObservaOne; could not ask the updater to uninstall it: stopping", "error", err.Error())
+				}
+			} else {
+				a.Log.Error("this agent was removed in ObservaOne; no updater on this host to uninstall it: stopping (remove it with: sudo bash observaone-install.sh --uninstall)")
+			}
+		} else {
+			a.Log.Error("this agent was removed in ObservaOne: stopping. To monitor this host again, run the install command from the Agents page.")
+		}
+		a.setErr("removed in ObservaOne (" + code + ")")
+		close(a.removed)
+	})
+}
+
 // RestartExitCode: non-zero so systemd's Restart=on-failure starts the agent again.
 const RestartExitCode = 75
 

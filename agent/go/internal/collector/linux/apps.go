@@ -306,4 +306,3 @@ func (Exporters) Collect(env *collector.Env, b *core.Batch) error {
 }
 
 var reservedForward = map[string]bool{"host": true, "job": true, "instance": true, "agent": true, "agent_id": true, "platform": true, "env": true, "role": true, "tenant": true, "exporter": true}
-

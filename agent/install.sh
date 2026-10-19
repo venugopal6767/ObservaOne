@@ -94,9 +94,9 @@ if [ "$UNINSTALL" -eq 1 ]; then
     systemctl daemon-reload 2>/dev/null || true
   fi
   if [ -f "$PREFIX/docker-compose.yml" ] && command -v docker >/dev/null 2>&1; then (cd "$PREFIX" && docker compose down) || true; fi
-  rm -rf "$PREFIX" "$ETC" "$VAR"
+  rm -rf "$PREFIX" "$ETC" "$VAR"; rm -f /usr/local/bin/observaone-agent
   id "$SVC_USER" >/dev/null 2>&1 && { userdel "$SVC_USER" 2>/dev/null || true; }
-  ok "Agent removed. It shows as Offline in ObservaOne until you remove it on the Agents page."
+  ok "Agent removed. It shows as Not reporting in ObservaOne until you remove it on the Agents page."
   exit 0
 fi
 
@@ -183,7 +183,7 @@ if [ -s "$PINNED" ] && [ -s "$TMP/release.pub" ] && ! cmp -s "$PINNED" "$TMP/rel
 fi
 KEY="$PINNED"; { [ -s "$KEY" ] && [ "${PINNED_NEW:-0}" -eq 0 ]; } || KEY="$TMP/release.pub"
 if [ -s "$TMP/SHA256SUMS.sig" ] && [ -s "$KEY" ]; then
-  IV="$("$PREFIX/bin/observaone-agent" version 2>/dev/null | awk '{print $2}')"
+  IV="$("$PREFIX/bin/observaone-agent" version 2>/dev/null | awk '{print $2}' || true)"
   # the installed agent verifies if it knows the command (1.3+; older ones answer with their usage line)
   VR="$("$PREFIX/bin/observaone-agent" verify-release 2>&1 || true)"
   if [ -n "$IV" ] && ! grep -q '^usage:' <<<"$VR"; then
@@ -341,6 +341,9 @@ say "Checking the configuration"
 runuser -u "$SVC_USER" -- "$NEW" check-config --config "$CONF" || die "The configuration is not valid (see above). Fix $CONF and run the installer again."
 
 # ---------------------------------------------------------------- enrollment (once; identity is kept on re-runs)
+# a running agent that was removed in ObservaOne may ask its updater to uninstall it: not while installing
+systemctl stop observaone-agent-updater.path observaone-agent.service 2>/dev/null || true
+rm -f "$VAR/uninstall-request.json"
 if [ -s "$VAR/credential" ] && [ -s "$VAR/identity.json" ]; then
   OLDID="$(sed -n 's/.*"agentId": *"\([^"]*\)".*/\1/p' "$VAR/identity.json")"
   # does the server still know this identity? (it is forgotten when the agent is removed on the Agents page
@@ -435,6 +438,19 @@ set -uo pipefail
 PREFIX=${OBSERVA_PREFIX:-/opt/observaone-agent} VAR=${OBSERVA_VAR:-/var/lib/observaone-agent} ETC=${OBSERVA_ETC:-/etc/observaone-agent} SVC_USER=observaone-agent
 AGENT="$PREFIX/bin/observaone-agent"
 REQ="$VAR/upgrade-request.json" RES="$VAR/upgrade-result.json"
+# Removed in ObservaOne with "uninstall": the agent got 410 agent_uninstall and asked for it. The request carries
+# no instructions; it only says "uninstall", which the agent user could do anyway by stopping the agent for good.
+if [ -f "$VAR/uninstall-request.json" ]; then
+  logger -t observaone-agent-updater "removed in ObservaOne: uninstalling the ObservaOne Agent" 2>/dev/null || true
+  systemctl disable --now observaone-agent.service 2>/dev/null || true
+  systemctl disable observaone-agent-updater.path 2>/dev/null || true
+  rm -f /etc/systemd/system/observaone-agent.service /etc/systemd/system/observaone-agent-updater.path /etc/systemd/system/observaone-agent-updater.service
+  rm -f /usr/local/bin/observaone-agent
+  rm -rf "$PREFIX" "$ETC" "$VAR"
+  id "$SVC_USER" >/dev/null 2>&1 && { userdel "$SVC_USER" 2>/dev/null || true; }
+  systemctl daemon-reload 2>/dev/null || true
+  exit 0
+fi
 [ -f "$REQ" ] || exit 0
 WORK="$(mktemp -p "$VAR" upgrade.XXXXXX)"; mv -f "$REQ" "$WORK"
 ACTION="$(head -c 4096 "$WORK" | sed -n 's/.*"actionId": *\([0-9]\{1,18\}\).*/\1/p' | head -1)"; rm -f "$WORK"
@@ -489,7 +505,7 @@ UPDATER
 chmod 0755 "$UPD.new"; mv -f "$UPD.new" "$UPD"
 cat > /etc/systemd/system/observaone-agent-updater.service <<EOF
 [Unit]
-Description=ObservaOne Agent updater (upgrades requested on the Agents page)
+Description=ObservaOne Agent updater (upgrades and removals requested on the Agents page)
 After=network-online.target
 
 [Service]
@@ -503,6 +519,7 @@ Description=Watch for upgrade requests from the ObservaOne Agent
 
 [Path]
 PathExists=$VAR/upgrade-request.json
+PathExists=$VAR/uninstall-request.json
 
 [Install]
 WantedBy=multi-user.target
@@ -519,7 +536,7 @@ say "Waiting for the first heartbeat"
 OKHB=0
 for _ in $(seq 1 45); do
   # a heartbeat from THIS start (status.json survives restarts, so an old success must not count)
-  HB="$(sed -n 's/.*"lastHeartbeatOk": *"\([^"]*\)".*/\1/p' "$VAR/status.json" 2>/dev/null)"
+  HB="$(sed -n 's/.*"lastHeartbeatOk": *"\([^"]*\)".*/\1/p' "$VAR/status.json" 2>/dev/null || true)"   # no status.json yet on a first install
   if [ -n "$HB" ] && [ "$(date -d "$HB" +%s 2>/dev/null || echo 0)" -ge "$STARTED_AT" ]; then OKHB=1; break; fi
   sleep 1
 done

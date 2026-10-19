@@ -5,13 +5,13 @@ import fs from 'node:fs';
 import crypto from 'node:crypto';
 import { config } from '../config.js';
 import { compareVersions } from '../health.js';
-import { q, one } from '../db.js';
+import { q, one, tx } from '../db.js';
 import { audit } from '../store.js';
 import { sha256, randomToken } from '../secrets.js';
 import { requirePerm, httpError } from '../auth.js';
 import { promInstant } from '../datasources.js';
 import { cpuByHost, memByHost, diskFreeByHost } from '../queries.js';
-import { CREDENTIAL_RE, AGENT_LATEST, agentForCredential, forgetAgentCredential, describeAgent } from './agent-control.js';
+import { CREDENTIAL_RE, AGENT_LATEST, agentForCredential, forgetAgentCredential, describeAgent, removeAgents } from './agent-control.js';
 import { agentAddress } from './agent-sd.js';
 import { fleetSignals, diagnosisFor } from '../agenthealth.js';
 
@@ -284,12 +284,14 @@ agentsRouter.post('/agents/:id/unblock', requirePerm('integrations.manage'), wra
 
 // Forget an agent that was uninstalled. If it is still sending with a valid token it comes back.
 agentsRouter.delete('/agents/:id', requirePerm('integrations.manage'), wrap(async (req, res) => {
-  const r = await one(`DELETE FROM agents WHERE id = $1 AND ($2 = 't_default' OR tenant_id = $2) RETURNING host`, [req.params.id, tn(req)]);
+  // ?uninstall=1: the agent (1.3.1+) uninstalls itself at its next heartbeat; otherwise it only stops itself
+  const uninstall = req.query.uninstall === '1' || req.query.uninstall === 'true';
+  const r = await one(`SELECT id, host FROM agents WHERE id = $1 AND ($2 = 't_default' OR tenant_id = $2)`, [req.params.id, tn(req)]);
   if (!r) throw httpError(404, 'Agent not found.');
+  await tx((c) => removeAgents(c, [r.id], { uninstall, by: req.user?.username || '' }));
   seen.delete(req.params.id);
-  forgetAgentCredential(req.params.id);
-  audit(req, 'agent.remove', { id: req.params.id, host: r.host });
-  res.json({ ok: true });
+  audit(req, 'agent.remove', { id: req.params.id, host: r.host, uninstall });
+  res.json({ ok: true, uninstall });
 }));
 
 // ---- enrollment tokens ----

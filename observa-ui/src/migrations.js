@@ -291,4 +291,23 @@ export const EXTRA_MIGRATIONS = [
       ALTER TABLE agents ADD COLUMN IF NOT EXISTS gateway_id TEXT;                        -- set while it reports through a gateway
     `,
   },
+  {
+    id: 10,
+    name: 'agents: removed agents are told so (stop, or uninstall themselves)',
+    sql: `
+      -- an agent removed on the Agents page (or with its target) still holds its credential; for 30 days its
+      -- requests get 410 agent_removed (+ uninstall) instead of a bare 401, so it stops (or uninstalls) itself
+      CREATE TABLE IF NOT EXISTS agents_removed (
+        id                   TEXT PRIMARY KEY,
+        host                 TEXT NOT NULL DEFAULT '',
+        credential_hash      TEXT,
+        credential_prev_hash TEXT,
+        uninstall            BOOLEAN NOT NULL DEFAULT FALSE,
+        removed_by           TEXT NOT NULL DEFAULT '',
+        removed_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+        tenant_id            TEXT NOT NULL DEFAULT 't_default'
+      );
+      CREATE INDEX IF NOT EXISTS agents_removed_cred_idx ON agents_removed (credential_hash);
+    `,
+  },
 ];
