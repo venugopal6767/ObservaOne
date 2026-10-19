@@ -245,7 +245,7 @@ agentMgmtRouter.get('/targets/:id/progress', requirePerm('view'), wrap(async (re
   step('enrolled', 'Agent enrolled', !!a, expired ? 'The token expired before the agent enrolled: add the target again for a new one.'
     : t.revoked ? 'The token was revoked.'
       : age > 180_000 ? 'Nothing yet. On the server: did the installer finish? Typical causes: DNS or firewall (outbound 443 to this address), the certificate fingerprint, or a mistyped token.'
-        : 'Run the two commands on the server and paste the token when asked.');
+        : 'Run the two commands on the server (the token is already in them).');
   const d = a ? describeAgent(a) : null;
   step('heartbeat', 'First heartbeat', a?.last_heartbeat, a ? 'Enrolled but no heartbeat: the service did not start. On the server: systemctl status observaone-agent; journalctl -u observaone-agent -n 30.' : '');
   let metrics = false, prom = false, series = 0;
