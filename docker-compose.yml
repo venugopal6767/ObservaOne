@@ -31,9 +31,14 @@ services:
     command: ["pki-init"]
     environment:
       AGENT_PROMETHEUS_DIR: /etc/prometheus-agents
+      # also creates Alertmanager's config file from the base on the first start (notification channels)
+      AM_CONFIG_FILE: /etc/alertmanager-ui/alertmanager.yml
+      AM_BASE_CONFIG: /etc/alertmanager-base/alertmanager.yml
     volumes:
       - observa-data:/data
       - agent-pull:/etc/prometheus-agents
+      - am-config:/etc/alertmanager-ui
+      - ./alertmanager:/etc/alertmanager-base:ro
     restart: "no"
 
   auth-init:
@@ -130,6 +135,10 @@ services:
       GRAFANA_URL: http://grafana:3000
       GRAFANA_PUBLIC_URL: /grafana/
       UI_RULES_FILE: /etc/prometheus-ui/ui-rules.yml
+      # Notification channels (Alerting -> Notifications): ObservaOne writes Alertmanager's config = the base file
+      # (alertmanager/alertmanager.yml: routes, grouping, inhibition) + the channels and email server from the UI
+      AM_CONFIG_FILE: /etc/alertmanager-ui/alertmanager.yml
+      AM_BASE_CONFIG: /etc/alertmanager-base/alertmanager.yml
       AUDIT_RETENTION_DAYS: ${AUDIT_RETENTION_DAYS:-365}
       # ObservaOne Agent: status thresholds and enrollment limits (docs/agent/LINUX-AGENT.md)
       AGENT_ONLINE_SECONDS: ${AGENT_ONLINE_SECONDS:-150}
@@ -189,6 +198,8 @@ services:
       - ./nginx/certs/server.crt:/certs/server.crt:ro   # fingerprint for agent install commands
       - ui-rules:/etc/prometheus-ui
       - agent-pull:/etc/prometheus-agents              # pull mode: files Prometheus needs to scrape agents
+      - am-config:/etc/alertmanager-ui                 # Alertmanager config written by ObservaOne
+      - ./alertmanager:/etc/alertmanager-base:ro        # the base it starts from
     depends_on:
       certs-init:
         condition: service_completed_successfully
@@ -286,12 +297,16 @@ services:
   alertmanager:
     image: prom/alertmanager:v0.34.1
     command:
-      - --config.file=/etc/alertmanager/alertmanager.yml
+      # written by ObservaOne from alertmanager/alertmanager.yml + the channels set in Alerting -> Notifications
+      - --config.file=/etc/alertmanager-ui/alertmanager.yml
       - --storage.path=/alertmanager
       - --web.external-url=https://${SERVER_NAME:-localhost}/alertmanager/
     volumes:
-      - ./alertmanager:/etc/alertmanager:ro
+      - am-config:/etc/alertmanager-ui:ro
       - alertmanager-data:/alertmanager
+    depends_on:
+      agent-pki-init:
+        condition: service_completed_successfully   # creates the config file on the first start
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:9093/alertmanager/-/healthy"]
       interval: 10s
@@ -460,6 +475,7 @@ volumes:
   observa-data:
   observa-db-data:
   ui-rules:
+  am-config:
   agent-pull:
   agent-signing:
   loki-data:

@@ -350,4 +350,29 @@ export const EXTRA_MIGRATIONS = [
       CREATE INDEX IF NOT EXISTS alert_episodes_tenant_idx ON alert_episodes (tenant_id, resolved_at DESC);
     `,
   },
+  {
+    id: 13,
+    name: 'notification channels (email, Teams, Slack, webhook, PagerDuty) managed in ObservaOne',
+    sql: `
+      -- ObservaOne writes them into Alertmanager's configuration (notify.js); secrets are encrypted with the app secret
+      CREATE TABLE IF NOT EXISTS notification_channels (
+        id              BIGSERIAL PRIMARY KEY,
+        name            TEXT NOT NULL,
+        type            TEXT NOT NULL,                 -- email | teams | slack | webhook | pagerduty
+        team            TEXT NOT NULL,                 -- alerts with team="<team>" (or the default team) go here
+        settings        JSONB NOT NULL DEFAULT '{}'::jsonb,  -- non-secret: email addresses, Slack channel
+        secret          TEXT,                          -- encrypted JSON: webhook URL, token, routing key
+        display         TEXT NOT NULL DEFAULT '',      -- what the UI shows as "sends to" (secrets masked)
+        send_resolved   BOOLEAN NOT NULL DEFAULT TRUE,
+        enabled         BOOLEAN NOT NULL DEFAULT TRUE,
+        created_by      TEXT,
+        created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+        last_test_at    TIMESTAMPTZ,
+        last_test_ok    BOOLEAN,
+        last_test_error TEXT
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS notification_channels_name ON notification_channels (lower(name));
+    `,
+  },
 ];

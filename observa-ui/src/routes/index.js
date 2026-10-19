@@ -5,8 +5,9 @@ import { agentMgmtRouter } from './agent-mgmt.js';
 import { tenantsRouter } from './tenants.js';
 import { gatewaysRouter } from './gateways.js';
 import { alertingRouter } from './alerting.js';
+import { notificationsRouter } from './notifications.js';
 
 export const extraRouters = {
   public: [],
-  private: [agentsRouter, agentMgmtRouter, tenantsRouter, gatewaysRouter, alertingRouter],
+  private: [agentsRouter, agentMgmtRouter, tenantsRouter, gatewaysRouter, alertingRouter, notificationsRouter],
 };

@@ -3,12 +3,13 @@
 // Also rules (create with a test first), silences and where notifications go.
 import { useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQueryClient } from '@tanstack/react-query';
 import { Plus, Trash2, BellOff, Bell, Search } from 'lucide-react';
 import { api } from '@/lib/api';
 import { dateTime, timeHeader } from '@/lib/format';
 import { rangeParams, useApp, usePlainQuery, useRangeQuery } from '@/app/AppContext';
 import { ErrorState, Field, InfoBox, Modal, PageHead, Pill, Select, StateView, TableWrap, Time, toast, useDialogs } from '@/components/ui';
+import { Notifications } from '@/components/notifications';
 import { CreateAlert, SeverityPill, StatePill, durationText, valueText, type AlertRow } from '@/components/alerts';
 
 interface Alert { fingerprint: string; name: string; severity: string; state: 'active' | 'suppressed' | 'unprocessed'; silencedBy: string[]; inhibitedBy: string[]; startsAt: string; summary: string; description: string; labels: Record<string, string> }
@@ -197,29 +198,3 @@ function SilenceDialog({ a, onClose, onDone }: { a: AlertRow; onClose: () => voi
   );
 }
 
-function Notifications() {
-  const q = useQuery({ queryKey: ['notifications'], queryFn: () => api<{ receivers: { name: string; channels: { type: string; targets: string[] }[] }[]; route: { receiver?: string; groupBy?: string[]; repeat?: string } }>('/notifications') });
-  if (q.isPending) return <TableWrap label="Notifications"><StateView kind="loading" skeleton="table" /></TableWrap>;
-  if (q.isError) return <TableWrap label="Notifications"><ErrorState error={q.error} what="Notifications" /></TableWrap>;
-  const n = q.data;
-  const none = n.receivers.every((r) => !r.channels.length);
-  return (
-    <>
-      {none && <InfoBox tone="error">No notification channel is set up yet, so alerts are only shown here. Add email/Teams/webhook in alertmanager/alertmanager.yml (see README).</InfoBox>}
-      <TableWrap label="Notification receivers">
-        <table className="tbl">
-          <thead><tr><th>Receiver</th><th>Channel</th><th>Sends to</th></tr></thead>
-          <tbody>
-            {n.receivers.flatMap((r) => (r.channels.length ? r.channels : [{ type: '(none)', targets: [] as string[] }]).map((c, i) => (
-              <tr key={`${r.name}-${i}`}>
-                <td><b style={{ fontWeight: 600 }}>{r.name}</b>{r.name === n.route.receiver && <span style={{ marginLeft: 8 }}><Pill tone="blue">default</Pill></span>}</td>
-                <td>{c.type}</td><td className="mono">{c.targets.join(', ') || '-'}</td>
-              </tr>
-            )))}
-          </tbody>
-        </table>
-      </TableWrap>
-      <p className="muted" style={{ marginTop: 10 }}>Alerts are grouped by {(n.route.groupBy || []).join(', ')} and repeated every {n.route.repeat || '4h'} while still firing.</p>
-    </>
-  );
-}

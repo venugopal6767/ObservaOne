@@ -533,18 +533,7 @@ api.delete('/silences/:id', requirePerm('alerts.silence'), wrap(async (req, res)
   res.json({ ok: true });
 }));
 
-api.get('/notifications', wrap(async (req, res) => {
-  const s = await am('/api/v2/status');
-  const cfg = YAML.parse(s.config?.original || '') || {};
-  const receivers = (cfg.receivers || []).map((r) => ({
-    name: r.name,
-    channels: Object.keys(r).filter((k) => k.endsWith('_configs')).map((k) => ({
-      type: k.replace('_configs', ''),
-      targets: (r[k] || []).map((c) => c.to || c.channel || c.url || c.api_url || '(configured)'),
-    })),
-  }));
-  res.json({ receivers, route: { receiver: cfg.route?.receiver, groupBy: cfg.route?.group_by, repeat: cfg.route?.repeat_interval } });
-}));
+// /notifications: routes/notifications.js (channels managed in ObservaOne, written into Alertmanager's config)
 
 // --- alert rules created in the UI (written to a rules file, Prometheus reloads it) ---
 function readUiRules() {

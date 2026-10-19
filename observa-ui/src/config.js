@@ -81,6 +81,9 @@ export const config = {
   },
   dataDir: path.resolve(env('DATA_DIR', './data')),
   configDir: path.resolve(env('CONFIG_DIR', './config')),
+  // Notification channels: ObservaOne writes Alertmanager's config = the base file + the channels from the UI
+  alertmanagerConfigFile: env('AM_CONFIG_FILE', ''),          // e.g. /etc/alertmanager-ui/alertmanager.yml (empty = read-only)
+  alertmanagerBaseConfig: env('AM_BASE_CONFIG', '/etc/alertmanager-base/alertmanager.yml'),
   rulesFile: env('UI_RULES_FILE', ''), // e.g. /etc/prometheus/rules/ui-rules.yml (empty = UI rule editing off)
 
   // PostgreSQL: DATABASE_URL, or the separate DB_* settings

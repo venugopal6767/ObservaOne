@@ -11,6 +11,7 @@ import { api } from './api.js';
 import { verifyAgent, purgeOldTokens } from './routes/agents.js';
 import { agentControlRouter, purgeNonces } from './routes/agent-control.js';
 import { startAlertTracker } from './alerting.js';
+import { applyConfig as applyNotificationConfig } from './notify.js';
 import { agentSdRouter } from './routes/agent-sd.js';
 import { initAgentPki } from './agentpki.js';
 
@@ -76,6 +77,7 @@ setInterval(() => cleanupSessions().catch((e) => console.error('[db] session cle
 setInterval(() => pruneAudit().catch((e) => console.error('[db] audit prune:', e.message)), 6 * 3_600_000).unref();
 pruneAudit().catch(() => {});
 setInterval(() => purgeOldTokens().catch((e) => console.error('[db] token purge:', e.message)), 60_000).unref();
+applyNotificationConfig({ force: true }); // channels from the UI -> Alertmanager's config (notify.js)
 startAlertTracker(); // alert history: pending -> firing -> resolved (alerting.js)
 setInterval(() => purgeNonces().catch((e) => console.error('[db] nonce purge:', e.message)), 60_000).unref();
 // pull mode: agent CA + Prometheus client certificate + SD token (created on first start, renewed daily)

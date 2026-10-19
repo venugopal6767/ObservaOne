@@ -54,7 +54,20 @@ containers can run; an advisory lock lets one write per round. History is kept 3
   tabs Overview, Metric Graph (the rule's value for this alert's series with the threshold line, from 1 h before it
   started), History (earlier episodes of the same alert), Labels, Annotations; on the right the server now (CPU, top
   processes) and the next steps: Open Metrics, Open Host, Investigate, Runbook.
-* Rules, Silences and Notifications stay as tabs of the same page.
+* **Notifications** (tab): where alerts are sent, set up in the UI (permission *Manage notification channels*).
+  * **Channels**: Email, Microsoft Teams (workflow URL), Slack (incoming webhook), Webhook (Alertmanager's JSON, optional
+    bearer token: ITSM / ServiceNow / scripts), PagerDuty (Events API v2 key). Each belongs to a **team**; an alert goes
+    to the channels of the team named on its rule (*Notify* in Create alert), or to the default team (`platform`).
+    A new team ("+ New team…") gets its route `team="<team>"` automatically and appears in Create alert's *Notify*.
+  * **Email server** (once): host:port, from, optional username / password, require TLS.
+  * **Send test**: ObservaOne sends a test message right now with the same settings and shows *Sent* or the reason
+    (`HTTP 404 …`, `mail server answered 535 …`, `no answer within 15 s (firewall or proxy?)`, untrusted certificate);
+    the last result stays in the table. *Add and send test* does both.
+  * **Who gets what**: the routes as Alertmanager runs them, top to bottom, with each team's channels; a team with no
+    channel shows *no channel: not sent*.
+  * Edit (empty secret fields keep the stored ones), disable, delete. Secrets (webhook URLs, tokens, keys, SMTP
+    password) are stored encrypted with the app secret, never returned by the API, shown masked (`https://host/…`).
+* Rules and Silences stay as tabs of the same page.
 
 ## Rules shipped
 
@@ -85,6 +98,27 @@ New rules can use them: `observaone:host_cpu_usage:percent > 85`.
   which agent-pushed hosts do not have, so it never matched them). A critical disk alert mutes the warning and the
   forecast for the same disk.
 
+## How channels reach Alertmanager
+
+```
+alertmanager/alertmanager.yml (base: routes, group_by, inhibit_rules, hand-written receivers)
+            +  channels and email server from Alerting -> Notifications (PostgreSQL, secrets encrypted)
+            =  /etc/alertmanager-ui/alertmanager.yml (volume am-config) -> Alertmanager /-/reload
+```
+
+* ObservaOne writes the file after every change and on start, then reloads Alertmanager. If Alertmanager refuses the
+  file, the previous one is put back and the error is shown on the Notifications tab. If Alertmanager is down, the
+  file is saved and used when it starts.
+* First start: `agent-pki-init` copies the base into the volume, so Alertmanager starts before `observa`.
+* The volume is readable by Alertmanager's user only (group 65534, mode 640): it holds the channel secrets.
+  Alertmanager's own status API shows them as `<secret>`.
+* To change routes, grouping or inhibition: edit `alertmanager/alertmanager.yml`, then `docker compose restart observa`.
+  Do not edit the generated file: it is overwritten.
+* Email channels are left out until the email server is set (Alertmanager would refuse the file).
+* Test sends go out from the `observa` container, real alerts from the `alertmanager` container: same network, but
+  an outbound proxy must allow both (Node's fetch does not use `HTTPS_PROXY`; Alertmanager does).
+* Without `AM_CONFIG_FILE` (old installs), the tab shows the channels of `alertmanager.yml`, read-only.
+
 ## Tenants
 
 * A tenant user's rule is stored with its query scoped (`tenant="<id>"` added to every selector) and a `tenant`
@@ -94,6 +128,8 @@ New rules can use them: `observaone:host_cpu_usage:percent > 85`.
   also sees platform alerts about its own servers.
 * Silences: a tenant's silence always carries its tenant matcher (a `tenant` it types is replaced); it lists and ends
   only its own.
+* Notification channels belong to the platform: a tenant user sees the team names (for *Notify*), not the channels,
+  and cannot add, change, test or delete them (403).
 * Not yet per tenant: Alertmanager receivers (routing per tenant needs a route per tenant label).
 
 ## Runbooks
@@ -113,7 +149,10 @@ New rules can use them: `observaone:host_cpu_usage:percent > 85`.
 |---|---|---|
 | `tests/alerting.test.js` | alert identity, threshold parsing, rule expressions, units, rows (state, duration, value) | 5 / 5 |
 | `tests/alerting-api.test.js` (needs `OBSERVA_TEST_URL`) | test query (valid / parse error / range vector refused), rule with team + labels + runbook, tenant rule scoped and labelled, tenant cannot see or open platform alerts, tenant silences, per-state lists and details | 6 / 6 |
-| `tests/metrics-consistency.test.js` | ran with the rest (94 tests: 92 pass, 1 skip) | the process-share check failed once while the lab agent was cut off and catching up; passed on rerun, not reproduced: watch it |
+| `tests/notify.test.js` | generated Alertmanager config: channels in their team receiver, base routes / grouping / inhibition kept, new team route first, disabled and email-without-server left out; input checks, secrets encrypted and masked, edit keeps secrets | 5 / 5 |
+| `tests/notify-api.test.js` (needs `OBSERVA_TEST_WEBHOOK`) | channel for a new team: stored, Alertmanager runs its route, secrets never returned, test delivered; duplicate name refused; failing channel reports `HTTP 404`; tenant user: no channels, 403 on add / test / delete | 3 / 3 |
+| Lab, live (Alertmanager 0.28) | email server + email channel: Alertmanager emailed the firing alerts to the mail sink at once; `team=payments` alert posted to Alertmanager -> payments webhook; test with token -> `Authorization: Bearer …` received; disabled channel removed from the file; UI: Add and send test, new team appears in Create alert | pass |
+| `tests/metrics-consistency.test.js` | ran with the rest (102 tests: 101 pass, 1 skip) | the process-share check failed once while the lab agent was cut off and catching up; passed on rerun, not reproduced: watch it |
 | Lab, live | metric form: CPU usage on prod-app-01 > 50% -> "1 would alert now (67.7%)", rule stored with the generated query + `unit=percent`, Pending within one evaluation; HighCPU created from the form → Pending → Firing → Resolved after the rule was removed (peak 68.9%, fired 2 m 34 s); grouping 10 servers → 1 notification; `team=infra` → infra-team | pass |
 
 ## Next
@@ -121,4 +160,6 @@ New rules can use them: `observaone:host_cpu_usage:percent > 85`.
 * Acknowledge / owner / notes on alerts, MTTA and MTTR per team.
 * Threshold layers per environment / target / host (like agent settings).
 * Maintenance windows (scheduled silences) from the Agents page and host view.
+* Not tested here: the compose wiring on Docker (checked statically), real Teams / Slack / PagerDuty endpoints
+  (no internet in the lab: test them with *Send test*).
 * Receivers per tenant; SLO burn-rate alerts; dead-man's switch (Watchdog to an external check).

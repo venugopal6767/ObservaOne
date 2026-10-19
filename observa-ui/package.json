@@ -16,6 +16,7 @@
     "bcryptjs": "3.0.3",
     "express": "5.2.1",
     "ldapts": "9.2.0",
+    "nodemailer": "7.0.9",
     "openid-client": "6.8.8",
     "pg": "8.23.1",
     "qrcode": "1.5.4",

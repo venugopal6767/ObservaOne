@@ -5,6 +5,7 @@ import { useQuery } from '@tanstack/react-query';
 import { CheckCircle2, AlertTriangle } from 'lucide-react';
 import { api, type PromVector } from '@/lib/api';
 import { METRICS, buildQuery, metricById } from '@/lib/catalog';
+import { useNotifyTeams } from '@/components/notifications';
 import { fmt } from '@/lib/format';
 import { Field, Modal, Pill, Select, toast, type Tone } from './ui';
 
@@ -53,7 +54,6 @@ export function durationText(sec: number): string {
 // Default: pick a metric by NAME (CPU usage, Disk usage ...), the servers it covers and a threshold. ObservaOne
 // writes the query (the same definitions as every screen) and shows each server's value now, so you see which
 // ones would alert before creating it. "Advanced" keeps a PromQL field for anything else.
-const TEAMS: [string, string][] = [['', 'Default (platform team)'], ['platform', 'Platform'], ['infra', 'Infra'], ['ops', 'Ops']];
 const OPS: [string, string][] = [['>', 'above'], ['>=', 'at or above'], ['<', 'below'], ['<=', 'at or below']];
 const OP_SIGN: Record<string, string> = { '>': '>', '>=': '≥', '<': '<', '<=': '≤' };
 const UNIT_WORD: Record<string, string> = { percent: '%', bytes: 'bytes', Bps: 'bytes/s', bps: 'bits/s', ms: 'ms', s: 's', reqps: 'req/s', iops: 'IO/s' };
@@ -83,6 +83,8 @@ export function CreateAlert({ onClose, onDone, initial }: { onClose: () => void;
   const [team, setTeam] = useState('');
   const [runbook, setRunbook] = useState('');
   const [test, setTest] = useState<TestResult | null>(null);
+  const teamsQ = useNotifyTeams();
+  const TEAMS: [string, string][] = [['', 'Default team'], ...(teamsQ.data || []).map((t) => [t, t] as [string, string])];
   const [testing, setTesting] = useState(false);
 
   const envs = useQuery({ queryKey: ['lv', 'env'], queryFn: () => api<string[]>('/prom/label-values', { query: { label: 'env' } }).catch(() => [] as string[]), enabled: mode === 'metric' });

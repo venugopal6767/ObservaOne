@@ -1,7 +1,8 @@
-# Alertmanager: decides who gets which alert, and how.
-# Out of the box alerts are only SHOWN (Grafana + Alertmanager page), not emailed.
-# To turn on email: fill the smtp_* lines and the email_configs block, then
-#   docker compose restart alertmanager
+# Alertmanager BASE configuration: routes, grouping, inhibition.
+# Channels (email, Microsoft Teams, Slack, webhook, PagerDuty) and the email server are set in ObservaOne:
+# Alerting -> Notifications. ObservaOne adds them to the receivers below ("<team>-team") and writes the file
+# Alertmanager runs (volume am-config). After editing this file: docker compose restart observa
+# (Channels written here by hand still work and show on the Notifications tab as "(file)".)
 
 global:
   resolve_timeout: 5m
