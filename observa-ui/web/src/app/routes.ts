@@ -40,6 +40,7 @@ const DETAIL_ROUTES: { match: RegExp; navPath: string }[] = [
   { match: /^\/metrics\/(explore|kubernetes|investigate|host\/[^/]+)$/, navPath: '/metrics' },
   { match: /^\/infrastructure\/add$/, navPath: '/infrastructure' },
   { match: /^\/alerting\/alert\/[0-9]+$/, navPath: '/alerting' },
+  { match: /^\/alerting\/open$/, navPath: '/alerting' },
 ];
 
 export function findRoute(path: string): (NavItem & { navPath: string }) | null {

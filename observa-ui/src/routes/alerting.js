@@ -3,6 +3,8 @@
 //   GET  /alerts/list?state=all|firing|pending|resolved&start&end&severity&q   alerts with value, duration, team
 //   GET  /alerts/item/:id                                                     one episode: rule, threshold, history,
 //                                                                            labels, annotations, evidence query
+//   GET  /alerts/find?name&host&at                                          the episode a notification links to (by
+//                                                                            alert name, host, start time) -> { id }
 //   POST /rules/test  { expr } | { query, op, threshold }                     "valid, N instances affected" before creating
 //
 // Tenants: a user of a non-default tenant only sees alerts whose series carry their tenant label; every query they
@@ -68,6 +70,27 @@ alertingRouter.get('/alerts/list', wrap(async (req, res) => {
   const c = (await episodeRows(`${tenantSql(1)} AND (resolved_at IS NULL OR resolved_at BETWEEN $2 AND $3)`, params.slice(0, 3), 5000))
     .reduce((acc, e) => { acc[e.resolved_at ? 'resolved' : e.state]++; return acc; }, { firing: 0, pending: 0, resolved: 0 });
   res.json({ alerts: list, counts: { ...c, all: c.firing + c.pending + c.resolved }, alertmanager: amMap !== null });
+}));
+
+// Links in Slack / Teams / email point here: Alertmanager knows the alert's labels and start time, not our id.
+alertingRouter.get('/alerts/find', wrap(async (req, res) => {
+  const name = String(req.query.name || ''), host = String(req.query.host || '');
+  if (!/^[A-Za-z_:][A-Za-z0-9_:]{0,200}$/.test(name)) throw httpError(400, 'name: an alert name');
+  const at = Number(req.query.at);
+  const p = [name, currentTenant()];
+  let where = `alertname = $1 AND ${tenantSql(2)}`;
+  if (host) { p.push(host.slice(0, 300)); where += ` AND host = $${p.length}`; }
+  let rows = [];
+  if (Number.isFinite(at) && at > 0) {
+    // the episode that was active at that moment (Alertmanager's start can be a few seconds off ours)
+    p.push(at);
+    rows = await episodeRows(`${where} AND active_at <= to_timestamp($${p.length}) + interval '5 minutes'
+                              AND COALESCE(resolved_at, now()) >= to_timestamp($${p.length}) - interval '5 minutes'`, p, 1);
+    p.pop();
+  }
+  if (!rows.length) rows = await episodeRows(where, p, 1);
+  if (!rows.length) throw httpError(404, 'No record of this alert (it may be older than 30 days or from another tenant).');
+  res.json({ id: Number(rows[0].id) });
 }));
 
 alertingRouter.get('/alerts/item/:id', wrap(async (req, res) => {

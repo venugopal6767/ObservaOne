@@ -67,6 +67,24 @@ containers can run; an advisory lock lets one write per round. History is kept 3
     channel shows *no channel: not sent*.
   * Edit (empty secret fields keep the stored ones), disable, delete. Secrets (webhook URLs, tokens, keys, SMTP
     password) are stored encrypted with the app secret, never returned by the API, shown masked (`https://host/…`).
+* **What the messages look like** (Slack and Teams; layout written by ObservaOne into Alertmanager's config):
+  * Title: state, alert, severity, environment, number of alerts: `🔴 FIRING: HighCPUUsage · critical · prod · 3 alerts`,
+    `🟠` warning, `🔵` info, `✅ RESOLVED`. Slack colour bar: red critical, amber warning, green resolved.
+  * One line per server (first 10, then "…and N in total · see all"): `• prod-app-01: CPU usage is 94.2% on
+    prod-app-01 (> 85%)`, then `since <time>` (firing) or `lasted 17 min, resolved <time>` (resolved), then the links
+    **Details** (that alert's page), **Host** (host view), **Runbook** (when the rule has one).
+  * Button / link **Open in ObservaOne**: the alert list filtered on the alert (firing or resolved tab).
+  * Footer: team (and service). Phone notification text: `FIRING: HighCPUUsage (prod) on prod-app-01, prod-app-02`.
+  * Times: Slack shows each reader's own time zone; Teams uses `NOTIFY_TIMEZONE` (e.g. `Asia/Kolkata` -> `IST`,
+    default UTC). A fixed offset is written in (Alertmanager's image may have no time-zone data and a failing
+    template would drop the message), so zones with summer time are right for the offset at the last write.
+  * Links need `PUBLIC_URL` = ObservaOne's address **as the readers open it** (default `https://SERVER_NAME`): a name
+    only your PC resolves (hosts file) will not open for colleagues. Without it, messages have no links.
+  * **Details** opens `/alerting/open?name&host&at`: finds the alert active at that time (by name, host, start) and
+    opens its page; signed out -> sign-in, then the page; not found (older than 30 days, another tenant) -> the alert
+    list filtered on its name.
+  * Email keeps Alertmanager's own layout (no ObservaOne links yet).
+  * Preview: [slack-message.png](slack-message.png) (rendered from real Alertmanager 0.34.1 messages).
 * Rules and Silences stay as tabs of the same page.
 
 ## Rules shipped
@@ -149,12 +167,13 @@ alertmanager/alertmanager.yml (base: routes, group_by, inhibit_rules, hand-writt
 |---|---|---|
 | `tests/alerting.test.js` | alert identity, threshold parsing, rule expressions, units, rows (state, duration, value) | 5 / 5 |
 | `tests/alerting-api.test.js` (needs `OBSERVA_TEST_URL`) | test query (valid / parse error / range vector refused), rule with team + labels + runbook, tenant rule scoped and labelled, tenant cannot see or open platform alerts, tenant silences, per-state lists and details | 6 / 6 |
-| `tests/notify.test.js` | generated Alertmanager config: channels in their team receiver, base routes / grouping / inhibition kept, new team route first, disabled and email-without-server left out; input checks, secrets encrypted and masked, edit keeps secrets | 5 / 5 |
+| `tests/notify.test.js` | message layouts (links only with PUBLIC_URL, IST offset, no offset for UTC, unknown zone -> UTC); generated Alertmanager config: channels in their team receiver, base routes / grouping / inhibition kept, new team route first, disabled and email-without-server left out; input checks, secrets encrypted and masked, edit keeps secrets | 6 / 6 |
 | `tests/notify-api.test.js` (needs `OBSERVA_TEST_WEBHOOK`) | channel for a new team: stored, Alertmanager runs its route, secrets never returned, test delivered; duplicate name refused; failing channel reports `HTTP 404`; tenant user: no channels, 403 on add / test / delete | 3 / 3 |
 | Lab, live (Alertmanager 0.28) | email server + email channel: Alertmanager emailed the firing alerts to the mail sink at once; `team=payments` alert posted to Alertmanager -> payments webhook; test with token -> `Authorization: Bearer …` received; disabled channel removed from the file; UI: Add and send test, new team appears in Create alert | pass |
 | Alertmanager 0.34.1 (the compose version), as user `nobody`, config folder group 65534 / file 640 like the `am-config` volume | `amtool check-config` on the generated file: SUCCESS; one alert per team -> Teams (adaptive card), Slack (`#ops-alerts`), webhook (`Bearer` token, `payments-team`), PagerDuty (trigger, routing key), email (subject `[FIRING:1] …`) all delivered, 0 errors; another user cannot read the file | pass |
+| Message layout on Alertmanager 0.34.1 | 3 servers firing then resolving, Slack + Teams: titles, colours, one line per server, Details / Host / Runbook links, "lasted 17 min", IST times in Teams; `amtool check-config` SUCCESS, 0 errors; Details link signed out -> sign-in -> the alert page; unknown alert -> list filtered on its name | pass |
 | Rollback | base file broken (route to an unknown receiver) -> Alertmanager refused it, the previous file was put back (same checksum), Alertmanager kept its routes, the tab showed "undefined receiver …"; fixed base -> applied | pass |
-| `tests/metrics-consistency.test.js` | ran with the rest (102 tests: 101 pass, 1 skip) | the process-share check failed once while the lab agent was cut off and catching up; passed on rerun, not reproduced: watch it |
+| `tests/metrics-consistency.test.js` | ran with the rest (103 tests: 102 pass, 1 skip) | the process-share check failed once while the lab agent was cut off and catching up; passed on rerun, not reproduced: watch it |
 | Lab, live | metric form: CPU usage on prod-app-01 > 50% -> "1 would alert now (67.7%)", rule stored with the generated query + `unit=percent`, Pending within one evaluation; HighCPU created from the form → Pending → Firing → Resolved after the rule was removed (peak 68.9%, fired 2 m 34 s); grouping 10 servers → 1 notification; `team=infra` → infra-team | pass |
 
 ## Next

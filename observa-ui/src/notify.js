@@ -121,12 +121,79 @@ export const publicChannel = (r) => ({
 
 const secretOf = (r) => (r.secret ? JSON.parse(decrypt(r.secret)) : {});
 
+// ---------------------------------------------------------------- message layout (Alertmanager Go templates)
+// Slack: colour by severity; one line per server: what, since when (shown in each reader's own time zone), links to
+// the alert's details, the host and the runbook in ObservaOne; resolved ones with how long they lasted.
+// Links need PUBLIC_URL (ObservaOne's address as users open it); without it the messages have no links.
+const MAX_LINES = 10;
+/** Message time zone as a fixed offset (Alertmanager's image may have no time-zone data, and a failing template
+ *  would drop the notification). Zones with summer time are right for the offset of when the file was written. */
+export function zoneOf(name = 'UTC', at = new Date()) {
+  try {
+    const get = (locale, style) => new Intl.DateTimeFormat(locale, { timeZone: name, timeZoneName: style }).formatToParts(at).find((x) => x.type === 'timeZoneName')?.value || '';
+    const m = /GMT(?:([+-])(\d{1,2})(?::(\d{2}))?)?/.exec(get('en-US', 'shortOffset'));
+    const minutes = m && m[1] ? (m[1] === '-' ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3] || 0)) : 0;
+    const short = get('en-IN', 'short');
+    const hhmm = `${minutes < 0 ? '-' : '+'}${String(Math.floor(Math.abs(minutes) / 60)).padStart(2, '0')}:${String(Math.abs(minutes) % 60).padStart(2, '0')}`;
+    const label = minutes === 0 ? 'UTC' : (/^[A-Z]{2,5}$/.test(short) ? short : `UTC${hhmm}`);
+    return { minutes, label };
+  } catch {
+    console.warn(`[notify] unknown NOTIFY_TIMEZONE "${name}": using UTC`);
+    return { minutes: 0, label: 'UTC' };
+  }
+}
+const at = (field, fmt, z) => `{{ (${field}.UTC${z.minutes ? `.Add ${z.minutes * 60 * 1e9}` : ''}).Format "${fmt}" }} ${z.label}`;
+const who = '{{ or $a.Labels.host $a.Labels.instance $a.Labels.service $a.Labels.job "-" }}';
+const what = '{{ or $a.Annotations.summary $a.Labels.alertname }}';
+function links(oo, md) {
+  if (!oo) return '';
+  const l = (text, url) => (md === 'slack' ? `<${url}|${text}>` : `[${text}](${url})`);
+  return ` · ${l('Details', `${oo}/alerting/open?name={{ $a.Labels.alertname | urlquery }}&host={{ $a.Labels.host | urlquery }}&at={{ $a.StartsAt.Unix }}`)}`
+    + `{{ with $a.Labels.host }} · ${l('Host', `${oo}/metrics/host/{{ . | urlquery }}`)}{{ end }}`
+    + `{{ with $a.Annotations.runbook_url }} · ${l('Runbook', '{{ . }}')}{{ end }}`;
+}
+const listUrl = (oo) => `${oo}/alerting?tab={{ if eq .Status "firing" }}firing{{ else }}resolved{{ end }}&q={{ .CommonLabels.alertname | urlquery }}`;
+const TITLE = '{{ if eq .Status "firing" }}{{ if eq .CommonLabels.severity "critical" }}🔴{{ else if eq .CommonLabels.severity "warning" }}🟠{{ else }}🔵{{ end }} FIRING{{ else }}✅ RESOLVED{{ end }}: '
+  + '{{ .CommonLabels.alertname }}{{ with .CommonLabels.severity }} · {{ . }}{{ end }}{{ with .CommonLabels.env }} · {{ . }}{{ end }}'
+  + '{{ if gt (len .Alerts) 1 }} · {{ len .Alerts }} alerts{{ end }}';
+
+export function slackLayout(oo, z = zoneOf(config.notifyTimezone)) {
+  const since = `<!date^{{ $a.StartsAt.Unix }}^{date_short_pretty} {time}|${at('$a.StartsAt', '2006-01-02 15:04', z)}>`;
+  const firing = `{{ range $i, $a := .Alerts.Firing }}{{ if lt $i ${MAX_LINES} }}• *${who}*: ${what}\n      since ${since}${links(oo, 'slack')}\n{{ end }}{{ end }}`
+    + `{{ if gt (len .Alerts.Firing) ${MAX_LINES} }}…and {{ len .Alerts.Firing }} in total${oo ? ` · <${listUrl(oo)}|see all>` : ''}\n{{ end }}`;
+  const resolved = `{{ if .Alerts.Resolved }}{{ if .Alerts.Firing }}*Resolved:*\n{{ end }}{{ range $i, $a := .Alerts.Resolved }}{{ if lt $i ${MAX_LINES} }}`
+    + `✓ *${who}*: ${what}\n      lasted {{ printf "%.0f" ($a.EndsAt.Sub $a.StartsAt).Minutes }} min, resolved <!date^{{ $a.EndsAt.Unix }}^{time}|${at('$a.EndsAt', '15:04', z)}>${links(oo, 'slack')}\n{{ end }}{{ end }}{{ end }}`;
+  return {
+    color: '{{ if eq .Status "resolved" }}good{{ else if eq .CommonLabels.severity "critical" }}danger{{ else if eq .CommonLabels.severity "warning" }}warning{{ else }}#3b82f6{{ end }}',
+    title: TITLE,
+    ...(oo ? { title_link: listUrl(oo) } : {}),
+    text: firing + resolved,
+    fallback: '{{ if eq .Status "firing" }}FIRING{{ else }}RESOLVED{{ end }}: {{ .CommonLabels.alertname }}{{ with .CommonLabels.env }} ({{ . }}){{ end }} on {{ range $i, $a := .Alerts }}{{ if $i }}, {{ end }}' + who + '{{ end }}',
+    footer: 'ObservaOne{{ with .CommonLabels.team }} · team {{ . }}{{ end }}{{ with .CommonLabels.service }} · service {{ . }}{{ end }}',
+    ...(oo ? { actions: [{ type: 'button', text: 'Open in ObservaOne', url: listUrl(oo) }] } : {}),
+  };
+}
+
+// Teams (Workflows adaptive card): same content, markdown links, times in NOTIFY_TIMEZONE (a card cannot localise)
+export function teamsLayout(oo, z = zoneOf(config.notifyTimezone)) {
+  const line = (state) => (state === 'firing'
+    ? `- **${who}**: ${what} · since ${at('$a.StartsAt', 'Jan 2 15:04', z)}${links(oo, 'md')}`
+    : `- ✓ **${who}**: ${what} · lasted {{ printf "%.0f" ($a.EndsAt.Sub $a.StartsAt).Minutes }} min${links(oo, 'md')}`);
+  return {
+    title: TITLE,
+    text: `{{ range $i, $a := .Alerts.Firing }}{{ if lt $i ${MAX_LINES} }}${line('firing')}\n\n{{ end }}{{ end }}`
+      + `{{ if gt (len .Alerts.Firing) ${MAX_LINES} }}…and {{ len .Alerts.Firing }} in total${oo ? ` · [see all](${listUrl(oo)})` : ''}\n\n{{ end }}`
+      + `{{ if .Alerts.Resolved }}{{ if .Alerts.Firing }}**Resolved:**\n\n{{ end }}{{ range $i, $a := .Alerts.Resolved }}{{ if lt $i ${MAX_LINES} }}${line('resolved')}\n\n{{ end }}{{ end }}{{ end }}`
+      + `ObservaOne{{ with .CommonLabels.team }} · team {{ . }}{{ end }}${oo ? ` · [Open in ObservaOne](${listUrl(oo)})` : ''}`,
+  };
+}
+
 function amChannel(r) {
   const s = secretOf(r), sr = r.send_resolved;
   switch (r.type) {
     case 'email': return { to: r.settings.to, send_resolved: sr };
-    case 'teams': return { webhook_url: s.url, send_resolved: sr };
-    case 'slack': return { api_url: s.url, ...(r.settings.channel ? { channel: r.settings.channel } : {}), send_resolved: sr };
+    case 'teams': return { webhook_url: s.url, send_resolved: sr, ...teamsLayout(config.publicUrl) };
+    case 'slack': return { api_url: s.url, ...(r.settings.channel ? { channel: r.settings.channel } : {}), send_resolved: sr, ...slackLayout(config.publicUrl) };
     case 'webhook': return { url: s.url, send_resolved: sr, ...(s.token ? { http_config: { authorization: { type: 'Bearer', credentials: s.token } } } : {}) };
     case 'pagerduty': return { routing_key: s.routingKey, send_resolved: sr };
     default: return null;
@@ -280,14 +347,26 @@ export async function sendTest(row, by) {
       } finally { t.close(); }
       return;
     }
-    case 'teams':
+    case 'teams': {
+      const oo = config.publicUrl;
       await post(s.url, { type: 'message', attachments: [{ contentType: 'application/vnd.microsoft.card.adaptive', content: {
         $schema: 'http://adaptivecards.io/schemas/adaptive-card.json', type: 'AdaptiveCard', version: '1.2', msteams: { width: 'full' },
-        body: [{ type: 'TextBlock', text: title, weight: 'Bolder', size: 'Medium', wrap: true, color: 'Accent' }, { type: 'TextBlock', text, wrap: true }],
+        body: [
+          { type: 'TextBlock', text: `🔵 TEST: ObservaOneTestNotification · info · team ${row.team}`, weight: 'Bolder', size: 'Medium', wrap: true },
+          { type: 'TextBlock', text: `- **test-host**: ${text}${oo ? ` · [Open ObservaOne](${oo}/alerting)` : ''}`, wrap: true },
+          { type: 'TextBlock', text: `Real alerts look like this: a title with the state, alert, severity and environment; one line per server with its value, since when, and links to Details, Host and Runbook.${oo ? '' : ' (Set PUBLIC_URL to get links to ObservaOne.)'}`, wrap: true, isSubtle: true },
+        ],
       } }] });
       return;
+    }
     case 'slack': {
-      const out = await post(s.url, { ...(row.settings.channel ? { channel: row.settings.channel } : {}), text: `*${title}*\n${text}` });
+      const oo = config.publicUrl, ts = Math.floor(Date.now() / 1000);
+      const out = await post(s.url, { ...(row.settings.channel ? { channel: row.settings.channel } : {}), attachments: [{
+        color: '#3b82f6', title: `🔵 TEST: ObservaOneTestNotification · info · team ${row.team}`, ...(oo ? { title_link: `${oo}/alerting` } : {}),
+        text: `• *test-host*: ${text}\n      since <!date^${ts}^{date_short_pretty} {time}|now>${oo ? ` · <${oo}/alerting|Open ObservaOne>` : ''}\n_Real alerts look like this: one line per server with its value, since when, and links to Details, Host and Runbook.${oo ? '' : ' (Set PUBLIC_URL to get links to ObservaOne.)'}_`,
+        footer: `ObservaOne · team ${row.team}`, fallback: `TEST from ObservaOne (${row.name})`, mrkdwn_in: ['text'],
+        ...(oo ? { actions: [{ type: 'button', text: 'Open in ObservaOne', url: `${oo}/alerting` }] } : {}),
+      }] });
       if (out && out.trim() !== 'ok' && /error|invalid/i.test(out)) throw new Error(out.slice(0, 300));
       return;
     }

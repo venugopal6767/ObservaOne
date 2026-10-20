@@ -26,6 +26,7 @@ const PAGES: Record<string, ComponentType> = {
   '/infrastructure/add': lazy(() => import('@/pages/AddTarget')),
   '/alerting': lazy(() => import('@/pages/Alerting')),
   '/alerting/alert/:id': lazy(() => import('@/pages/AlertDetail')),
+  '/alerting/open': lazy(() => import('@/pages/AlertOpen')),
   '/agents': lazy(() => import('@/pages/Agents')),
   '/datasources': lazy(() => import('@/pages/DataSources')),
   '/settings': lazy(() => import('@/pages/Settings')),

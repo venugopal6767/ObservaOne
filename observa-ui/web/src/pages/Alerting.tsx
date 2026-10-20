@@ -28,7 +28,7 @@ export default function Alerting() {
   const initial = params.get('tab') === 'active' ? 'firing' : (params.get('tab') as TabKey);
   const [tab, setTabState] = useState<TabKey>(initial && [...ALERT_TABS, 'rules', 'silences', 'notifications'].includes(initial) ? initial : 'all');
   const [sevFilter, setSevFilter] = useState('');
-  const [search, setSearch] = useState('');
+  const [search, setSearch] = useState(params.get('q') || ''); // links from notifications: ?q=<alert name>
   const setTab = (k: TabKey) => { setTabState(k); const n = new URLSearchParams(params); n.set('tab', k); setParams(n, { replace: true }); };
 
   const q = usePlainQuery(['alerting'], async () => {

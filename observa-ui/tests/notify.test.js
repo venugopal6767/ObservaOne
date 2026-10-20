@@ -39,8 +39,12 @@ test('a new team gets a receiver and a route before the severity routes; the def
   ], null);
   assert.deepEqual(cfg.route.routes[0], { matchers: ['team="payments"'], receiver: 'payments-team' });
   assert.equal(cfg.route.routes.length, 3);
-  assert.deepEqual(cfg.receivers.find((r) => r.name === 'payments-team').msteamsv2_configs, [{ webhook_url: 'https://x.webhook.office.com/a', send_resolved: true }]);
-  assert.deepEqual(cfg.receivers.find((r) => r.name === 'platform-team').slack_configs, [{ api_url: 'https://hooks.slack.com/s/1', channel: '#alerts', send_resolved: true }]);
+  const tm = cfg.receivers.find((r) => r.name === 'payments-team').msteamsv2_configs;
+  assert.equal(tm.length, 1); assert.equal(tm[0].webhook_url, 'https://x.webhook.office.com/a'); assert.equal(tm[0].send_resolved, true);
+  assert.match(tm[0].title, /FIRING/);
+  const sl = cfg.receivers.find((r) => r.name === 'platform-team').slack_configs;
+  assert.equal(sl.length, 1); assert.equal(sl[0].api_url, 'https://hooks.slack.com/s/1'); assert.equal(sl[0].channel, '#alerts');
+  assert.ok(sl[0].text && sl[0].color && sl[0].fallback, 'Slack messages use the ObservaOne layout');
 });
 
 test('disabled channels and email without a mail server are left out (Alertmanager would refuse the file)', () => {
@@ -73,4 +77,23 @@ test('input checks: types, teams, addresses, URLs; secrets are stored encrypted 
   assert.equal(again.type, 'webhook', 'the type cannot change on edit');
   const e = cleanChannel({ name: 'Mail', type: 'email', team: 'platform', to: 'a@b.local; c@d.local' });
   assert.equal(e.settings.to, 'a@b.local, c@d.local');
+});
+
+test('Slack / Teams layouts: links to ObservaOne only with PUBLIC_URL, times in the message time zone', async () => {
+  const { slackLayout, teamsLayout, zoneOf } = await import('../src/notify.js');
+  const ist = zoneOf('Asia/Kolkata');
+  assert.deepEqual(ist, { minutes: 330, label: 'IST' });
+  assert.deepEqual(zoneOf('No/Such_Zone'), { minutes: 0, label: 'UTC' });
+  const s = slackLayout('https://observaone.bank.local', ist);
+  assert.match(s.text, /<https:\/\/observaone\.bank\.local\/alerting\/open\?name=\{\{ \$a\.Labels\.alertname \| urlquery \}\}&host=.*\|Details>/);
+  assert.match(s.text, /\/metrics\/host\/\{\{ \. \| urlquery \}\}\|Host>/);
+  assert.match(s.text, /Add 19800000000000\)\.Format "2006-01-02 15:04" \}\} IST/);
+  assert.equal(s.actions[0].text, 'Open in ObservaOne');
+  assert.match(s.color, /danger/);
+  const bare = slackLayout('', zoneOf('UTC'));
+  assert.ok(!/https?:\/\/|\|Details>/.test(bare.text) && !bare.actions && !bare.title_link, 'no links without PUBLIC_URL');
+  assert.ok(!/\.Add /.test(bare.text), 'UTC needs no offset');
+  const t = teamsLayout('https://observaone.bank.local', ist);
+  assert.match(t.text, /\[Details\]\(https:\/\/observaone\.bank\.local\/alerting\/open\?/);
+  assert.match(t.text, /since \{\{ \(\$a\.StartsAt\.UTC\.Add 19800000000000\)\.Format "Jan 2 15:04" \}\} IST/);
 });
