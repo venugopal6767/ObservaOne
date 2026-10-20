@@ -93,7 +93,7 @@ export function Shell({ children }: { children: ReactNode }) {
             options={REFRESH.map(([ms, l]) => [ms, ms ? `↻ ${l}` : '↻ Off'] as [number, string])} onChange={setRefreshMs} disabled={range.kind === 'absolute'} />
         </div>
         {moduleOn('alerting') && (
-          <button className="icon-btn" title={bell.data ? `${bell.data.active} active alert(s), ${bell.data.critical} critical` : 'Active alerts'} aria-label="Active alerts" onClick={() => navigate('/alerting')}>
+          <button className="icon-btn" title={bell.data ? `${bell.data.active} active alert(s), ${bell.data.critical} critical` : 'Active alerts'} aria-label="Active alerts" onClick={() => navigate('/alerting/active?tab=firing')}>
             <Bell size={17} />
             {!!bell.data?.active && <span className={`count ${bell.data.critical ? '' : 'warn'}`}>{bell.data.active > 99 ? '99+' : bell.data.active}</span>}
           </button>
@@ -118,9 +118,19 @@ export function Shell({ children }: { children: ReactNode }) {
                 {s.items.map((i) => {
                   const Icon = NAV_ICONS[i.icon];
                   return (
-                    <NavLink key={i.path} to={i.path} title={i.label} className={() => `nav-item ${active === i.path ? 'active' : ''}`}>
-                      <span className="ic"><Icon size={17} strokeWidth={1.8} aria-hidden /></span><span className="label">{i.label}</span>
-                    </NavLink>
+                    <div key={i.path}>
+                      <NavLink to={i.path} title={i.label} className={() => `nav-item ${active === i.path ? 'active' : ''}`}>
+                        <span className="ic"><Icon size={17} strokeWidth={1.8} aria-hidden /></span><span className="label">{i.label}</span>
+                      </NavLink>
+                      {i.children && active === i.path && !collapsed && (
+                        <div className="nav-sub">
+                          {i.children.filter((c) => !c.perm || can(c.perm)).map((c) => {
+                            const here = location.pathname === c.path || (c.path === '/alerting/active' && location.pathname.startsWith('/alerting/alert/'));
+                            return <NavLink key={c.path} to={c.path} end className={() => `nav-sub-item ${here ? 'active' : ''}`} aria-current={here ? 'page' : undefined}>{c.label}</NavLink>;
+                          })}
+                        </div>
+                      )}
+                    </div>
                   );
                 })}
               </div>

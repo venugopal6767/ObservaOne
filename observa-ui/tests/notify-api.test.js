@@ -20,7 +20,7 @@ async function session(user, password) {
   };
 }
 
-let admin, ta, tid; const ids = [];
+let admin, ta, tid; const ids = [], policyIds = [];
 before(async () => {
   if (skip) return;
   admin = await session(process.env.OBSERVA_TEST_ADMIN_USER || 'admin', process.env.OBSERVA_TEST_ADMIN_PASSWORD);
@@ -31,26 +31,41 @@ before(async () => {
   await admin(`/users/${RUN}u/tenant`, { method: 'PUT', body: { tenant: tid } });
   ta = await session(`${RUN}u`, pw);
 });
-after(async () => { if (!skip) for (const id of ids) await admin(`/notifications/channels/${id}`, { method: 'DELETE' }); });
+after(async () => {
+  if (skip) return;
+  for (const id of policyIds) await admin(`/notifications/policies/${id}`, { method: 'DELETE' });
+  for (const id of ids) await admin(`/notifications/channels/${id}`, { method: 'DELETE' });
+});
 
-test('a channel for a new team: stored, routed, secrets never returned, test send delivered', { skip }, async () => {
-  const r = await admin('/notifications/channels', { method: 'POST', body: { name: `Hook ${RUN}`, type: 'webhook', team: `t-${RUN}`, url: `${HOOK}?k=SECRET1`, token: 'TOKEN1' } });
+test('a channel and a policy for it: stored, routed by Alertmanager, secrets never returned, test send delivered', { skip }, async () => {
+  const r = await admin('/notifications/channels', { method: 'POST', body: { name: `Hook ${RUN}`, type: 'webhook', url: `${HOOK}?k=SECRET1`, token: 'TOKEN1' } });
   assert.equal(r.status, 200, JSON.stringify(r.data));
   ids.push(r.data.channel.id);
   assert.equal(r.data.apply.ok, true, r.data.apply.error);
+  const pol = await admin('/notifications/policies', { method: 'POST', body: { name: `Policy ${RUN}`, matchers: [{ label: 'team', op: '=', value: `t-${RUN}` }], channels: [r.data.channel.id], repeatInterval: '1h' } });
+  assert.equal(pol.status, 200, JSON.stringify(pol.data));
+  policyIds.push(pol.data.policy.id);
+  assert.equal(pol.data.apply.ok, true, pol.data.apply.error);
   const list = await admin('/notifications');
   assert.ok(!JSON.stringify(list.data).includes('SECRET1') && !JSON.stringify(list.data).includes('TOKEN1'), 'secrets must not be returned');
-  assert.ok(list.data.routes.some((x) => x.matchers.includes(`team="t-${RUN}"`) && x.team === `t-${RUN}`), 'Alertmanager runs the new route');
-  assert.ok((await admin('/notifications/teams')).data.includes(`t-${RUN}`));
+  assert.deepEqual(list.data.channels.find((c) => c.id === r.data.channel.id).usedBy.map((p) => p.name), [`Policy ${RUN}`]);
+  const prev = await admin('/notifications/policies/preview', { method: 'POST', body: { labels: { team: `t-${RUN}`, severity: 'warning' } } });
+  assert.deepEqual(prev.data.policies.map((p) => p.name), [`Policy ${RUN}`]);
+  const other = await admin('/notifications/policies/preview', { method: 'POST', body: { labels: { team: `nobody-${RUN}`, severity: 'info', env: 'none' } } });
+  assert.ok(!other.data.policies.some((p) => p.name === `Policy ${RUN}`));
   const t = await admin(`/notifications/channels/${r.data.channel.id}/test`, { method: 'POST' });
   assert.equal(t.data.ok, true, t.data.error);
-  const dup = await admin('/notifications/channels', { method: 'POST', body: { name: `hook ${RUN}`, type: 'webhook', team: 'ops', url: HOOK } });
+  const dup = await admin('/notifications/channels', { method: 'POST', body: { name: `hook ${RUN}`, type: 'webhook', url: HOOK } });
   assert.equal(dup.status, 409, 'names are unique (any case)');
+  const bad = await admin('/notifications/policies', { method: 'POST', body: { name: `Bad ${RUN}`, matchers: [{ label: 'env', op: '=~', value: '(' }] } });
+  assert.equal(bad.status, 400);
+  const def = (await admin('/notifications/policies')).data.policies.find((p) => p.isDefault);
+  assert.equal((await admin(`/notifications/policies/${def.id}`, { method: 'DELETE' })).status, 409, 'the Default policy cannot be deleted');
 });
 
 test('a failing channel reports why', { skip }, async () => {
   const u = new URL(HOOK); u.pathname = '/missing';
-  const r = await admin('/notifications/channels', { method: 'POST', body: { name: `Bad ${RUN}`, type: 'webhook', team: 'ops', url: u.toString() } });
+  const r = await admin('/notifications/channels', { method: 'POST', body: { name: `Bad ${RUN}`, type: 'webhook', url: u.toString() } });
   ids.push(r.data.channel.id);
   const t = await admin(`/notifications/channels/${r.data.channel.id}/test`, { method: 'POST' });
   assert.equal(t.data.ok, false);
@@ -59,12 +74,16 @@ test('a failing channel reports why', { skip }, async () => {
   assert.equal(row.lastTest.ok, false);
 });
 
-test('tenant users cannot see or change channels', { skip }, async () => {
+test('tenant users cannot see or change channels or policies', { skip }, async () => {
   const l = await ta('/notifications');
   assert.equal(l.status, 200);
   assert.equal(l.data.channels.length, 0);
   assert.equal(l.data.editable, false);
-  assert.equal((await ta('/notifications/channels', { method: 'POST', body: { name: 'x', type: 'webhook', team: 'ops', url: HOOK } })).status, 403);
+  assert.equal((await ta('/notifications/channels', { method: 'POST', body: { name: 'x', type: 'webhook', url: HOOK } })).status, 403);
+  assert.equal((await ta('/notifications/policies', { method: 'POST', body: { name: 'x' } })).status, 403);
+  const tp = await ta('/notifications/policies');
+  assert.equal(tp.data.editable, false);
+  assert.ok(tp.data.policies.every((p) => Object.keys(p).sort().join() === 'id,name'), 'a tenant sees policy names only');
   assert.equal((await ta(`/notifications/channels/${ids[0]}/test`, { method: 'POST' })).status, 403);
   assert.equal((await ta(`/notifications/channels/${ids[0]}`, { method: 'DELETE' })).status, 403);
 });

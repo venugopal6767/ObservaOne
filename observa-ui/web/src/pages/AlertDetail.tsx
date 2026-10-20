@@ -15,7 +15,7 @@ import { TimeChart } from '@/components/charts';
 import { ProcessTable, useProcesses } from '@/components/ProcessTable';
 import { SeverityPill, StatePill, durationText, valueText, type AlertRow } from '@/components/alerts';
 
-interface Detail {
+export interface Detail {
   alert: AlertRow;
   labels: Record<string, string>; annotations: Record<string, string>;
   rule: { expr: string; forSec: number; op: string | null; threshold: number | null; graphQuery: string };
@@ -28,14 +28,14 @@ export default function AlertDetail() {
   const { id = '' } = useParams();
   const q = useQuery({ queryKey: ['alert-item', id], queryFn: () => api<Detail>(`/alerts/item/${encodeURIComponent(id)}`), refetchInterval: 15_000 });
   const [tab, setTab] = useState<Tab>('overview');
-  const back = <Link to="/alerting">Alerting</Link>;
+  const back = <Link to="/alerting/active">Active Alerts</Link>;
   if (q.isPending) return <><PageHead title="Alert" sub={back} /><StateView kind="loading" /></>;
   if (q.isError) return <><PageHead title="Alert" sub={back} /><ErrorState error={q.error} what="Alert" /></>;
   const d = q.data, a = d.alert;
   const thresholdText = d.rule.threshold === null ? 'none (the query itself decides)' : `${d.rule.op} ${valueText(d.rule.threshold, a.unit)}`;
   return (
     <>
-      <div className="crumbs"><Link to="/alerting">Alerting</Link> › <span>{a.name}</span></div>
+      <div className="crumbs"><Link to="/alerting">Alerts</Link> › <Link to="/alerting/active">Active Alerts</Link> › <span>{a.name}</span></div>
       <div className={`alert-head state-${a.state}`}>
         <div className="alert-head-main">
           <span className={`alert-state-badge ${a.state}`}>{a.neverFired ? 'CLEARED' : a.state.toUpperCase()}</span>
@@ -81,7 +81,7 @@ function Fact({ k, v }: { k: string; v: React.ReactNode }) {
 }
 
 /** the rule's value for THIS alert's series, with the threshold line, from 1 h before it started */
-function Evidence({ d, tall }: { d: Detail; tall?: boolean }) {
+export function Evidence({ d, tall, compact }: { d: Detail; tall?: boolean; compact?: boolean }) {
   const a = d.alert;
   const start = Math.floor(Date.parse(a.activeAt) / 1000) - 3600;
   const end = a.resolvedAt ? Math.floor(Date.parse(a.resolvedAt) / 1000) + 900 : Math.floor(Date.now() / 1000);
@@ -105,8 +105,8 @@ function Evidence({ d, tall }: { d: Detail; tall?: boolean }) {
     <Panel title="Metric graph" right={<span className="dim" style={{ fontSize: 12 }}>{dateTime(start * 1000).slice(11, 16)} – {a.resolvedAt ? dateTime(end * 1000).slice(11, 16) : 'now'}</span>}>
       {q.isPending ? <StateView kind="loading" /> : q.isError ? <ErrorState error={q.error} what="Graph" /> : !series.length
         ? <StateView kind="empty" title="No data for this alert's series in this window" text="The series may have stopped (e.g. the agent stopped sending)." />
-        : <TimeChart series={series} unit={a.unit} className="chart-box" style={tall ? { height: 340 } : undefined} legend />}
-      <p className="dim" style={{ margin: '8px 0 0', fontSize: 12 }}>Started {dateTime(Date.parse(a.activeAt)).slice(0, 16)}{a.firedAt ? `, firing from ${dateTime(Date.parse(a.firedAt)).slice(11, 16)}` : ''}{a.resolvedAt ? `, resolved ${dateTime(Date.parse(a.resolvedAt)).slice(11, 16)}` : ''}.</p>
+        : <TimeChart series={series} unit={a.unit} className="chart-box" style={tall ? { height: 340 } : compact ? { height: 180 } : undefined} legend={!compact} />}
+      {!compact && <p className="dim" style={{ margin: '8px 0 0', fontSize: 12 }}>Started {dateTime(Date.parse(a.activeAt)).slice(0, 16)}{a.firedAt ? `, firing from ${dateTime(Date.parse(a.firedAt)).slice(11, 16)}` : ''}{a.resolvedAt ? `, resolved ${dateTime(Date.parse(a.resolvedAt)).slice(11, 16)}` : ''}.</p>}
     </Panel>
   );
 }

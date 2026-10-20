@@ -79,12 +79,16 @@ export function CreateAlert({ onClose, onDone, initial }: { onClose: () => void;
   const [threshold, setThreshold] = useState(initial?.threshold !== undefined ? String(initial.threshold) : String(def.crit ?? def.warn ?? 80));
   const [forMin, setForMin] = useState(5);
   const [severity, setSeverity] = useState('warning');
-  const [labels, setLabels] = useState('');
-  const [team, setTeam] = useState('');
+  const [labelRows, setLabelRows] = useState<{ k: string; v: string }[]>([{ k: 'team', v: '' }, { k: 'service', v: '' }]);
+  const [description, setDescription] = useState('');
+  const [summaryText, setSummaryText] = useState('');
   const [runbook, setRunbook] = useState('');
+  const [interval, setIntervalSel] = useState('');
+  const [policy, setPolicy] = useState('auto');
   const [test, setTest] = useState<TestResult | null>(null);
   const teamsQ = useNotifyTeams();
-  const TEAMS: [string, string][] = [['', 'Default team'], ...(teamsQ.data || []).map((t) => [t, t] as [string, string])];
+  const policiesQ = useQuery({ queryKey: ['policies'], queryFn: () => api<{ editable: boolean; policies: { id: number; name: string; isDefault: boolean; enabled: boolean }[] }>('/notifications/policies').catch(() => ({ editable: false, policies: [] })) });
+  const policyOpts = (policiesQ.data?.policies || []).filter((p) => !p.isDefault && p.enabled);
   const [testing, setTesting] = useState(false);
 
   const envs = useQuery({ queryKey: ['lv', 'env'], queryFn: () => api<string[]>('/prom/label-values', { query: { label: 'env' } }).catch(() => [] as string[]), enabled: mode === 'metric' });
@@ -120,16 +124,27 @@ export function CreateAlert({ onClose, onDone, initial }: { onClose: () => void;
   };
   const parsedLabels = (() => {
     const out: Record<string, string> = {}, errors: string[] = [];
-    for (const item of labels.split(',').map((x) => x.trim()).filter(Boolean)) {
-      const i = item.indexOf('=');
-      if (i < 1) { errors.push(`"${item}": write it as name=value`); continue; }
-      const k = item.slice(0, i).trim(), v = item.slice(i + 1).trim();
-      if (!/^[a-z][a-z0-9_]{0,30}$/.test(k)) errors.push(`"${k}": lower-case a-z, 0-9, _`);
-      else if (!v) errors.push(`${k}: needs a value`);
+    for (const { k: k0, v: v0 } of labelRows) {
+      const k = k0.trim(), v = v0.trim();
+      if (!k && !v) continue;
+      if (!v) continue; // a label row left empty is not sent
+      if (!/^[a-z][a-z0-9_]{0,30}$/.test(k)) errors.push(`"${k || '(no name)'}": label names are lower-case a-z, 0-9, _`);
+      else if (['severity', 'tenant', 'alertname', 'created_by', 'observaone_policy'].includes(k)) errors.push(`"${k}" is set by ObservaOne`);
+      else if (!/^[A-Za-z0-9._ -]{1,64}$/.test(v)) errors.push(`${k}: letters, digits, space . _ - (max 64)`);
       else out[k] = v;
     }
     return { out, errors };
   })();
+  const autoSummary = mode === 'metric'
+    ? `${def.name} is {{ $value | printf "%.1f" }}${unit === 'percent' ? '%' : ''} on {{ $labels.${by} }} (${OP_SIGN[op]} ${threshold}${unit === 'percent' ? '%' : ''})`
+    : `${name} on {{ $labels.host }}: {{ $value | printf "%.1f" }}`;
+  // where it will be sent: the policy it names, or the one its labels match
+  const routeLabels = { alertname: name, severity, ...(env ? { env } : {}), ...(host ? { host } : {}), ...parsedLabels.out, ...(policy !== 'auto' ? { observaone_policy: `p${policy}` } : {}) };
+  const route = useQuery({
+    queryKey: ['policy-preview', routeLabels],
+    queryFn: () => api<{ policies: { id: number; name: string; isDefault: boolean; channels: { name: string; type: string }[] }[] }>('/notifications/policies/preview', { method: 'POST', body: { labels: routeLabels } }),
+    enabled: !!policiesQ.data?.editable,
+  });
   const nameOk = /^[A-Za-z][A-Za-z0-9_]{2,63}$/.test(name);
   const ready = nameOk && !!effQuery && thOk && parsedLabels.errors.length === 0;
   const where = [env && `env ${env}`, host && `host ${host}`].filter(Boolean).join(', ') || 'all servers';
@@ -147,12 +162,10 @@ export function CreateAlert({ onClose, onDone, initial }: { onClose: () => void;
       { label: 'Cancel' },
       { label: 'Create alert', primary: true, disabled: !ready, onClick: async () => {
         await api('/rules', { method: 'POST', body: {
-          name, query: effQuery, op, threshold: th, forMinutes: forMin, severity, team: team || undefined, runbookUrl: runbook.trim() || undefined,
-          labels: { ...parsedLabels.out, ...(unit !== 'none' ? { unit } : {}) },
-          summary: mode === 'metric'
-            ? `${def.name} is {{ $value | printf "%.1f" }}${unit === 'percent' ? '%' : ''} on {{ $labels.${by} }} (${OP_SIGN[op]} ${threshold}${unit === 'percent' ? '%' : ''})`
-            : `${name} on {{ $labels.host }}: {{ $value | printf "%.1f" }}`,
-          description: mode === 'metric' ? `${def.name} ${OPS.find(([o]) => o === op)?.[1]} ${threshold}${unitWord && unitWord !== '%' ? ` ${unitWord}` : unitWord} for ${forMin} min, ${where}. ${def.description}` : '',
+          name, query: effQuery, op, threshold: th, forMinutes: forMin, severity, runbookUrl: runbook.trim() || undefined, interval: interval || undefined,
+          labels: { ...parsedLabels.out, ...(unit !== 'none' ? { unit } : {}), ...(policy !== 'auto' ? { observaone_policy: `p${policy}` } : {}) },
+          summary: summaryText.trim() || autoSummary,
+          description: description.trim() || (mode === 'metric' ? `${def.name} ${OPS.find(([o]) => o === op)?.[1]} ${threshold}${unitWord && unitWord !== '%' ? ` ${unitWord}` : unitWord} for ${forMin} min, ${where}. ${def.description}` : ''),
         } });
         toast('Alert created: Prometheus checks it from now on');
         onDone();
@@ -226,24 +239,54 @@ export function CreateAlert({ onClose, onDone, initial }: { onClose: () => void;
           </div>
         )}
 
+        <h4 className="ca-sec">Alert information</h4>
         <div className="form-row">
           <Field label="Alert name" hint="Letters, numbers and _ (suggested from the metric).">
             <input className="input" value={name} onChange={(e) => { setName(e.target.value); setNameTouched(true); }} aria-invalid={!!name && !nameOk} />
           </Field>
-          <Field label="Notify" hint="Which team gets it (Alertmanager routes on the team).">
-            <Select className="select" label="Notification policy" value={team} onChange={setTeam} options={TEAMS} />
+          <Field label="Description" hint="What it means and why it matters (shown in the alert and the message).">
+            <input className="input" placeholder={mode === 'metric' ? `${def.name} is above the limit on ${where}` : 'CPU usage is above threshold on Linux hosts'} value={description} onChange={(e) => setDescription(e.target.value)} />
           </Field>
         </div>
-        <details className="app-collectors">
-          <summary>More options: labels, runbook</summary>
-          <div className="form-row" style={{ marginTop: 10 }}>
-            <Field label="Labels" hint="key=value, comma separated (service, env ...): for routing and filters.">
-              <input className="input" placeholder="service=payments" value={labels} onChange={(e) => setLabels(e.target.value)} aria-invalid={parsedLabels.errors.length > 0} />
-              {parsedLabels.errors.map((e) => <div key={e} className="c-red" style={{ fontSize: 12, marginTop: 4 }}>{e}</div>)}
-            </Field>
-            <Field label="Runbook link"><input className="input" placeholder="https://wiki.example.local/runbooks/high-cpu" value={runbook} onChange={(e) => setRunbook(e.target.value)} /></Field>
+        <div className="ca-labels">
+          <div className="field-label">Labels <span className="dim" style={{ fontWeight: 400 }}>for routing, filters and grouping (team, service, …)</span></div>
+          {labelRows.map((r, i) => (
+            <div key={i} className="ca-label-row">
+              <input className="input mono" placeholder="name" list="ca-label-names" value={r.k} onChange={(e) => setLabelRows(labelRows.map((x, j) => (j === i ? { ...x, k: e.target.value } : x)))} aria-label={`Label ${i + 1} name`} />
+              <input className="input" placeholder={r.k === 'team' ? 'platform' : r.k === 'service' ? 'payments' : 'value'} list={r.k === 'team' ? 'ca-teams' : undefined} value={r.v} onChange={(e) => setLabelRows(labelRows.map((x, j) => (j === i ? { ...x, v: e.target.value } : x)))} aria-label={`Label ${i + 1} value`} />
+              <button type="button" className="icon-btn" aria-label={`Remove label ${i + 1}`} onClick={() => setLabelRows(labelRows.filter((_, j) => j !== i))}>×</button>
+            </div>
+          ))}
+          <datalist id="ca-label-names">{['team', 'service', 'owner', 'component', 'app'].map((x) => <option key={x} value={x} />)}</datalist>
+          <datalist id="ca-teams">{(teamsQ.data || []).map((t) => <option key={t} value={t} />)}</datalist>
+          <button type="button" className="btn btn-sm" onClick={() => setLabelRows([...labelRows, { k: '', v: '' }])}>+ Add label</button>
+          {parsedLabels.errors.map((e) => <div key={e} className="c-red" style={{ fontSize: 12, marginTop: 4 }}>{e}</div>)}
+        </div>
+
+        <h4 className="ca-sec">Annotations</h4>
+        <div className="form-row">
+          <Field label="Summary" hint={<>Message line per alert; empty = <span className="mono">{autoSummary.replace(/\{\{.*?\}\}/g, '…').slice(0, 60)}</span></>}>
+            <input className="input mono" placeholder={autoSummary} value={summaryText} onChange={(e) => setSummaryText(e.target.value)} />
+          </Field>
+          <Field label="Runbook URL"><input className="input" placeholder="https://wiki.company.com/runbooks/high-cpu" value={runbook} onChange={(e) => setRunbook(e.target.value)} /></Field>
+        </div>
+
+        <h4 className="ca-sec">Evaluation & notification</h4>
+        <div className="form-row">
+          <Field label="Evaluation interval" hint="How often Prometheus checks it.">
+            <Select className="select" label="Evaluation interval" value={interval} onChange={setIntervalSel} options={[['', 'Default (30s)'], ['15s', '15 seconds'], ['30s', '30 seconds'], ['1m', '1 minute'], ['2m', '2 minutes'], ['5m', '5 minutes'], ['10m', '10 minutes']]} />
+          </Field>
+          <Field label="Notification policy" hint="Automatic: the first policy its labels match. Or send it to one policy.">
+            <Select className="select" label="Notification policy" value={policy} onChange={setPolicy} options={[['auto', 'Automatic (by labels)'], ...policyOpts.map((p) => [String(p.id), p.name] as [string, string])]} />
+          </Field>
+        </div>
+        {route.data && (
+          <div className="ca-route" aria-live="polite">
+            <span className="dim">Will be sent by</span> {route.data.policies.map((p) => (
+              <span key={p.id}><b>{p.isDefault ? 'Default policy' : p.name}</b> → {p.channels.length ? p.channels.map((c) => c.name).join(', ') : <span className="c-orange">no channel: not sent</span>}</span>
+            ))}
           </div>
-        </details>
+        )}
 
         {mode === 'promql' && <>
           <div className="test-query">

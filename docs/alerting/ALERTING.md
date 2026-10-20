@@ -37,43 +37,61 @@ containers can run; an advisory lock lets one write per round. History is kept 3
 
 ## Screens
 
-* **Alerting → All Alerts / Firing / Pending / Resolved**: Severity, Alert Name, State (with Silenced / Muted),
-  Host / Resource, Current Value (peak for resolved ones), Duration, Team, Actions (Details, Silence). Filters: text,
-  severity, and the time range at the top for resolved alerts (active ones always show).
+**Alerts** in the left menu has sub-pages (old links such as `/alerting?tab=firing`, also in messages already sent,
+open the right one):
+
+| Page | What it shows |
+|---|---|
+| **Overview** (`/alerting`) | Firing now (critical count), Pending, Resolved in the time range, Muted now; the firing alerts; the most frequent alerts and most affected hosts; notification health (channels connected / failing, policies, a channel in no policy, a Default policy without channel) |
+| **Active Alerts** (`/alerting/active`) | tabs All / Firing / Pending / Resolved with counts; filters Severity, Environment, search; columns Severity, Alert Name, State (Silenced / Muted), Host / Resource, Current Value (peak when resolved), Duration, Team, Actions (host metrics, investigate, ⋮ Details / Open host / Runbook / Silence). A click on a row opens the **preview** under the table: state, current value, threshold, started, duration, severity, the graph against the threshold, Open Metrics / Open Host / Runbook / Details |
+| **Alert Rules** (`/alerting/rules`) | every rule Prometheus runs (search, state, group, query); *Create alert*; rules created here can be deleted |
+| **Notification Policies** (`/alerting/policies`) | which alerts go to which channels (below) |
+| **Notification Channels** (`/alerting/channels`) | where alerts are sent (below) |
+| **Silences** (`/alerting/silences`) | silences with their matchers, how many alerts each mutes now, *End now* |
+| **Inhibition** (`/alerting/inhibition`) | each inhibition rule in words ("while an alert where alertname matches ServerDown is firing, mute alerts where severity is warning with the same host"), how many it mutes now, and the alerts muted right now with the alert muting them |
+
 * **Create alert**, no query needed (default, *Pick a metric*): choose a metric by name (CPU usage, Memory usage,
   Disk usage, Network, Load, pod / service / database / VMware metrics ...), the environment and server (or all), the
-  threshold (comparison + value, with the metric's unit; defaults from the metric's critical level), *for*, severity
-  and team. The form says it in a sentence ("Alert when CPU usage is above 80% on all servers for 5 minutes") and shows
+  threshold (comparison + value, with the metric's unit; defaults from the metric's critical level), *for* and
+  severity. The form says it in a sentence ("Alert when CPU usage is above 80% on all servers for 5 minutes") and shows
   **Values now**: each server's current value, the ones past the threshold in red, "N would alert now". ObservaOne
-  writes the PromQL with the same definitions as every screen (keeps `host` and `env`), names the alert
-  (`HighCPUUsage`, editable), and adds a readable summary ("CPU usage is 94.0% on server-01 (> 80%)").
+  writes the PromQL with the same definitions as every screen (keeps `host` and `env`).
   *Advanced (PromQL)* keeps the query field, prefilled from the picked metric, with **Test query** ("Query is valid –
-  N instances affected" or the parse error). Labels and runbook link are under *More options*. Nothing is created
-  until *Create alert*.
+  N instances affected" or the parse error). Then:
+  * **Alert information**: name (suggested, e.g. `HighCPUUsage`), description, **labels** as rows (team, service, any
+    name; used by policies, filters and grouping).
+  * **Annotations**: summary (the message line; empty = "CPU usage is 94.0% on server-01 (> 80%)"), runbook URL.
+  * **Evaluation & notification**: evaluation interval (default 30 s, or 15 s … 10 min: the rule goes to the rule group
+    `ui-rules-<interval>`), **notification policy** (*Automatic*: the first policy its labels match; or one policy by
+    name, label `observaone_policy`), and a line **Will be sent by <policy> → <channels>** from the live policies.
+  Nothing is created until *Create alert*.
 * **Alert details** (`/alerting/alert/<id>`): state, host, current value, threshold, started, duration, *for*, team;
   tabs Overview, Metric Graph (the rule's value for this alert's series with the threshold line, from 1 h before it
   started), History (earlier episodes of the same alert), Labels, Annotations; on the right the server now (CPU, top
   processes) and the next steps: Open Metrics, Open Host, Investigate, Runbook.
-* **Notifications** (tab): where alerts are sent, set up in the UI (permission *Manage notification channels*).
-  * **Channels**: Email, Microsoft Teams (workflow URL), Slack (incoming webhook), Webhook (Alertmanager's JSON, optional
-    bearer token: ITSM / ServiceNow / scripts), PagerDuty (Events API v2 key). Each belongs to a **team**; an alert goes
-    to the channels of the team named on its rule (*Notify* in Create alert), or to the default team (`platform`).
-    A new team ("+ New team…") gets its route `team="<team>"` automatically and appears in Create alert's *Notify*.
+* **Notification Channels** (permission *Manage notification channels*):
+  * Email, Microsoft Teams (workflow URL), Slack (incoming webhook), Generic Webhook (Alertmanager's JSON, optional
+    bearer token: ITSM / ServiceNow / scripts), PagerDuty (Events API v2 key). A type not set up yet shows as a row
+    with *Configure*.
+  * Columns: Channel, Details (to / SMTP / from, Slack channel, masked URL or key, copy), **Status** (*Connected* = last
+    test succeeded and a policy uses it, *Test failed*, *Needs email server*, *In no policy*, *Not tested*, *Disabled*),
+    Last Test (time, Success / Failed and why), **Used by** (its policies), Actions (Test, Edit, ⋮ Enable/Disable, Delete).
+  * **Configure** opens a side panel: name, the type's fields (URL hidden by default, eye to show), *also notify when
+    resolved*, **Send alerts of these policies** (new channel: Default is ticked), **Message preview** (what an alert
+    looks like there: Slack / Teams card, email subject and body, PagerDuty incident, webhook JSON), and **Send Test
+    Notification** with the last result.
   * **Email server** (once): host:port, from, optional username / password, require TLS.
-  * **Send test**: ObservaOne sends a test message right now with the same settings and shows *Sent* or the reason
-    (`HTTP 404 …`, `mail server answered 535 …`, `no answer within 15 s (firewall or proxy?)`, untrusted certificate);
-    the last result stays in the table. *Add and send test* does both.
-  * **Who gets what**: the routes as Alertmanager runs them, top to bottom, with each team's channels; a team with no
-    channel shows *no channel: not sent*.
-  * Edit (empty secret fields keep the stored ones), disable, delete. Secrets (webhook URLs, tokens, keys, SMTP
-    password) are stored encrypted with the app secret, never returned by the API, shown masked (`https://host/…`).
+  * **Test**: ObservaOne sends a test message right now with the same settings and shows the result or the reason
+    (`HTTP 404 …`, `mail server answered 535 …`, `no answer within 15 s (firewall or proxy?)`, untrusted certificate).
+  * Secrets (webhook URLs, tokens, keys, SMTP password) are stored encrypted with the app secret, never returned by
+    the API, shown masked (`https://host/…`). Empty secret fields on edit keep the stored ones.
 * **What the messages look like** (Slack and Teams; layout written by ObservaOne into Alertmanager's config):
   * Title: state, alert, severity, environment, number of alerts: `🔴 FIRING: HighCPUUsage · critical · prod · 3 alerts`,
     `🟠` warning, `🔵` info, `✅ RESOLVED`. Slack colour bar: red critical, amber warning, green resolved.
   * One line per server (first 10, then "…and N in total · see all"): `• prod-app-01: CPU usage is 94.2% on
     prod-app-01 (> 85%)`, then `since <time>` (firing) or `lasted 17 min, resolved <time>` (resolved), then the links
     **Details** (that alert's page), **Host** (host view), **Runbook** (when the rule has one).
-  * Button / link **Open in ObservaOne**: the alert list filtered on the alert (firing or resolved tab).
+  * Button / link **Open in ObservaOne**: Active Alerts filtered on the alert (firing or resolved tab).
   * Footer: team (and service). Phone notification text: `FIRING: HighCPUUsage (prod) on prod-app-01, prod-app-02`.
   * Times: Slack shows each reader's own time zone; Teams uses `NOTIFY_TIMEZONE` (e.g. `Asia/Kolkata` -> `IST`,
     default UTC). A fixed offset is written in (Alertmanager's image may have no time-zone data and a failing
@@ -85,7 +103,6 @@ containers can run; an advisory lock lets one write per round. History is kept 3
     list filtered on its name.
   * Email keeps Alertmanager's own layout (no ObservaOne links yet).
   * Preview: [slack-message.png](slack-message.png) (rendered from real Alertmanager 0.34.1 messages).
-* Rules and Silences stay as tabs of the same page.
 
 ## Rules shipped
 
@@ -104,23 +121,35 @@ Recording rules (`prometheus/rules/recording.yml`) give one series per server fo
 with the same definitions as every ObservaOne screen (docs/metrics/METRICS.md), labels host, env, role, tenant.
 New rules can use them: `observaone:host_cpu_usage:percent > 85`.
 
-## Grouping, routing, muting
+## Notification policies (routing)
 
-* **Grouping** by `alertname`, `severity`, `env`: 100 servers with high CPU in prod = 1 notification listing them
-  (was `alertname, host`: one per server). Verified in the lab: 10 servers with AgentNotReporting -> 1 group.
-* **Routing** on labels, first match wins: `team="infra"` -> infra-team, `team="ops"` -> ops-team, critical in prod
-  -> platform-team every hour, everything else -> platform-team. Rules created in ObservaOne set `team` from the
-  *Notification policy* field and any labels you add (e.g. `service`, `env`). Fill the receivers' channels in
-  `alertmanager/alertmanager.yml` (email, `msteamsv2_configs` for Teams, webhook, Slack, PagerDuty ...).
-* **Inhibition**: ServerDown or AgentNotReporting mutes that host's warnings (matched on `host`; it was `instance`,
-  which agent-pushed hosts do not have, so it never matched them). A critical disk alert mutes the warning and the
-  forecast for the same disk.
+* A **policy** = conditions on the alert's labels (*equals*, *not equals*, *matches* / *does not match* a regex,
+  anchored like Alertmanager; any label: severity, env, team, service, host, alertname, role, …) → **channels**, plus
+  grouping and timing (group by, group wait, group interval, repeat interval; empty = as Default).
+* Checked **top to bottom**; the first policy whose conditions all match sends the alert to all its channels.
+  **Continue** also checks the policies below (an alert can go to several). **Default** (always last, cannot be
+  deleted) takes every alert nothing above matched; its grouping is the default for all.
+* A rule can name its policy (Create alert → Notification policy): that policy wins whatever the labels.
+* The page shows each policy's conditions, channels, timing, how many active alerts it takes now, an on/off switch,
+  move up / down, and **Where would an alert go?** (type severity / env / team / service → the policy and channels).
+  The editor shows how many active alerts match the conditions now (with examples).
+* **Grouping** (Default): by `alertname`, `severity`, `env`: 100 servers with high CPU in prod = 1 notification listing
+  them. Verified in the lab: 10 servers with AgentNotReporting -> 1 group.
+* **From teams to policies (automatic, once)**: on the first start of this version, the earlier setup (channels per
+  team + the base file's routes) becomes policies that send every alert where it went before: `Team payments`,
+  `Team infra`, `Team ops`, `Critical alerts in prod` (repeat 1 h), `Critical alerts` (repeat 1 h), `Default`. Lab:
+  5 teams + 2 critical routes -> 6 policies + Default, same channels and repeat intervals, `amtool check-config` SUCCESS.
+  Channels written by hand in `alertmanager.yml` are not used by policies (the Channels page lists them: add them in
+  ObservaOne).
+* **Inhibition** (base file, shown on the Inhibition page): ServerDown or AgentNotReporting mutes that host's warnings
+  (matched on `host`); a critical disk alert mutes the warning and the forecast for the same disk.
 
 ## How channels reach Alertmanager
 
 ```
-alertmanager/alertmanager.yml (base: routes, group_by, inhibit_rules, hand-written receivers)
-            +  channels and email server from Alerting -> Notifications (PostgreSQL, secrets encrypted)
+alertmanager/alertmanager.yml (base: global, inhibit_rules, time intervals; root grouping defaults)
+            +  notification policies  -> route (Default = root, one route per policy, explicit-choice routes first)
+            +  channels, email server -> receivers "default" / "policy-<id>" (PostgreSQL, secrets encrypted)
             =  /etc/alertmanager-ui/alertmanager.yml (volume am-config) -> Alertmanager /-/reload
 ```
 
@@ -130,12 +159,12 @@ alertmanager/alertmanager.yml (base: routes, group_by, inhibit_rules, hand-writt
 * First start: `agent-pki-init` copies the base into the volume, so Alertmanager starts before `observa`.
 * The volume is readable by Alertmanager's user only (group 65534, mode 640): it holds the channel secrets.
   Alertmanager's own status API shows them as `<secret>`.
-* To change routes, grouping or inhibition: edit `alertmanager/alertmanager.yml`, then `docker compose restart observa`.
-  Do not edit the generated file: it is overwritten.
+* Routes and grouping: the Notification Policies page. Inhibition and global settings: edit
+  `alertmanager/alertmanager.yml`, then `docker compose restart observa`. Do not edit the generated file: it is overwritten.
 * Email channels are left out until the email server is set (Alertmanager would refuse the file).
 * Test sends go out from the `observa` container, real alerts from the `alertmanager` container: same network, but
   an outbound proxy must allow both (Node's fetch does not use `HTTPS_PROXY`; Alertmanager does).
-* Without `AM_CONFIG_FILE` (old installs), the tab shows the channels of `alertmanager.yml`, read-only.
+* Without `AM_CONFIG_FILE` (old installs), the Channels page shows Alertmanager's receivers, read-only; policies need it.
 
 ## Tenants
 
@@ -146,8 +175,9 @@ alertmanager/alertmanager.yml (base: routes, group_by, inhibit_rules, hand-writt
   also sees platform alerts about its own servers.
 * Silences: a tenant's silence always carries its tenant matcher (a `tenant` it types is replaced); it lists and ends
   only its own.
-* Notification channels belong to the platform: a tenant user sees the team names (for *Notify*), not the channels,
-  and cannot add, change, test or delete them (403).
+* Notification channels and policies belong to the platform: a tenant user sees policy names only (to choose one in
+  Create alert), not the channels or conditions, and cannot add, change, test or delete them (403). The Inhibition
+  page shows a tenant only its own muted alerts.
 * Not yet per tenant: Alertmanager receivers (routing per tenant needs a route per tenant label).
 
 ## Runbooks
@@ -168,12 +198,14 @@ alertmanager/alertmanager.yml (base: routes, group_by, inhibit_rules, hand-writt
 | `tests/alerting.test.js` | alert identity, threshold parsing, rule expressions, units, rows (state, duration, value) | 5 / 5 |
 | `tests/alerting-api.test.js` (needs `OBSERVA_TEST_URL`) | test query (valid / parse error / range vector refused), rule with team + labels + runbook, tenant rule scoped and labelled, tenant cannot see or open platform alerts, tenant silences, per-state lists and details | 6 / 6 |
 | `tests/notify.test.js` | message layouts (links only with PUBLIC_URL, IST offset, no offset for UTC, unknown zone -> UTC); generated Alertmanager config: channels in their team receiver, base routes / grouping / inhibition kept, new team route first, disabled and email-without-server left out; input checks, secrets encrypted and masked, edit keeps secrets | 6 / 6 |
-| `tests/notify-api.test.js` (needs `OBSERVA_TEST_WEBHOOK`) | channel for a new team: stored, Alertmanager runs its route, secrets never returned, test delivered; duplicate name refused; failing channel reports `HTTP 404`; tenant user: no channels, 403 on add / test / delete | 3 / 3 |
+| `tests/policies.test.js` | matchers (parse, write, anchored regex, missing label); team setup -> policies sending each alert where it went before; order, continue, disabled, a rule naming its policy; Alertmanager config from policies (receivers, explicit routes first, base inhibition kept, email without server and disabled channels left out); input checks | 5 / 5 |
+| `tests/notify-api.test.js` (needs `OBSERVA_TEST_WEBHOOK`) | channel + policy: stored, used-by, routing preview, secrets never returned, test delivered; duplicate name, bad regex refused; Default cannot be deleted; failing channel reports `HTTP 404`; tenant user: no channels, policy names only, 403 on add / test / delete | 3 / 3 |
+| Lab, policies end to end | rule created in the new form (1 min interval, policy *Team ops*, labels team / service) -> group `ui-rules-1m` (60 s) in Prometheus -> fired -> Alertmanager receiver `policy-4` -> ITSM webhook; old links redirect; every sub-page without browser errors | pass |
 | Lab, live (Alertmanager 0.28) | email server + email channel: Alertmanager emailed the firing alerts to the mail sink at once; `team=payments` alert posted to Alertmanager -> payments webhook; test with token -> `Authorization: Bearer …` received; disabled channel removed from the file; UI: Add and send test, new team appears in Create alert | pass |
 | Alertmanager 0.34.1 (the compose version), as user `nobody`, config folder group 65534 / file 640 like the `am-config` volume | `amtool check-config` on the generated file: SUCCESS; one alert per team -> Teams (adaptive card), Slack (`#ops-alerts`), webhook (`Bearer` token, `payments-team`), PagerDuty (trigger, routing key), email (subject `[FIRING:1] …`) all delivered, 0 errors; another user cannot read the file | pass |
 | Message layout on Alertmanager 0.34.1 | 3 servers firing then resolving, Slack + Teams: titles, colours, one line per server, Details / Host / Runbook links, "lasted 17 min", IST times in Teams; `amtool check-config` SUCCESS, 0 errors; Details link signed out -> sign-in -> the alert page; unknown alert -> list filtered on its name | pass |
 | Rollback | base file broken (route to an unknown receiver) -> Alertmanager refused it, the previous file was put back (same checksum), Alertmanager kept its routes, the tab showed "undefined receiver …"; fixed base -> applied | pass |
-| `tests/metrics-consistency.test.js` | ran with the rest (103 tests: 102 pass, 1 skip) | the process-share check failed once while the lab agent was cut off and catching up; passed on rerun, not reproduced: watch it |
+| `tests/metrics-consistency.test.js` | ran with the rest (108 tests: 107 pass, 1 skip); the process-share check had a test bug (it summed the Windows part across hosts) found when the lab got Windows process data on several hosts: fixed | pass |
 | Lab, live | metric form: CPU usage on prod-app-01 > 50% -> "1 would alert now (67.7%)", rule stored with the generated query + `unit=percent`, Pending within one evaluation; HighCPU created from the form → Pending → Firing → Resolved after the rule was removed (peak 68.9%, fired 2 m 34 s); grouping 10 servers → 1 notification; `team=infra` → infra-team | pass |
 
 ## Next

@@ -16,6 +16,7 @@ import { encrypt, decrypt } from './secrets.js';
 import { getSetting, setSetting } from './settings.js';
 import { ds } from './datasources.js';
 import { httpError } from './auth.js';
+import { listPolicies, ensurePolicies, matcherString, SELECT_LABEL } from './policies.js';
 
 export const TYPES = {
   email: { name: 'Email', key: 'email_configs' },
@@ -46,8 +47,9 @@ export function cleanChannel(b = {}, old = null) {
   if (!TYPES[type]) throw httpError(400, 'Choose a channel type: Email, Microsoft Teams, Slack, Webhook or PagerDuty.');
   const name = String(b.name ?? old?.name ?? '').trim();
   if (!name || name.length > 60) throw httpError(400, 'Give the channel a name (up to 60 characters).');
-  const team = String(b.team ?? old?.team ?? '').trim().toLowerCase();
-  if (!TEAM_RE.test(team)) throw httpError(400, 'Team: lower-case letters, digits and -, starting with a letter (e.g. platform, infra, payments-ops).');
+  // channels no longer belong to a team (policies choose them); a team given is still checked and kept
+  const team = String(b.team ?? old?.team ?? '').trim().toLowerCase() || null;
+  if (team !== null && !TEAM_RE.test(team)) throw httpError(400, 'Team: lower-case letters, digits and -, starting with a letter (e.g. platform, infra, payments-ops).');
   const oldSecret = old?.secret ? JSON.parse(decrypt(old.secret)) : {};
   const settings = {}, secret = {};
   let display;
@@ -152,7 +154,7 @@ function links(oo, md) {
     + `{{ with $a.Labels.host }} · ${l('Host', `${oo}/metrics/host/{{ . | urlquery }}`)}{{ end }}`
     + `{{ with $a.Annotations.runbook_url }} · ${l('Runbook', '{{ . }}')}{{ end }}`;
 }
-const listUrl = (oo) => `${oo}/alerting?tab={{ if eq .Status "firing" }}firing{{ else }}resolved{{ end }}&q={{ .CommonLabels.alertname | urlquery }}`;
+const listUrl = (oo) => `${oo}/alerting/active?tab={{ if eq .Status "firing" }}firing{{ else }}resolved{{ end }}&q={{ .CommonLabels.alertname | urlquery }}`;
 const TITLE = '{{ if eq .Status "firing" }}{{ if eq .CommonLabels.severity "critical" }}🔴{{ else if eq .CommonLabels.severity "warning" }}🟠{{ else }}🔵{{ end }} FIRING{{ else }}✅ RESOLVED{{ end }}: '
   + '{{ .CommonLabels.alertname }}{{ with .CommonLabels.severity }} · {{ . }}{{ end }}{{ with .CommonLabels.env }} · {{ . }}{{ end }}'
   + '{{ if gt (len .Alerts) 1 }} · {{ len .Alerts }} alerts{{ end }}';
@@ -207,8 +209,10 @@ export function teamsOf(base, channels) {
   return [...t].sort();
 }
 
-/** Alertmanager config = base + channels + SMTP. Pure: used by the writer and the tests. */
-export function renderConfig(base, channels, smtp) {
+/** Alertmanager config = base (global, inhibition, time intervals) + SMTP + POLICIES (routes) + channels (receivers).
+ *  Pure: used by the writer and the tests. Without policies: the earlier team routing (only before the conversion). */
+export function renderConfig(base, channels, smtp, policies) {
+  if (policies?.length) return renderPolicies(base, channels, smtp, policies);
   const cfg = structuredClone(base || {});
   cfg.global ||= {};
   if (smtp?.configured) {
@@ -245,13 +249,62 @@ export function renderConfig(base, channels, smtp) {
   return cfg;
 }
 
+function withSmtp(cfg, smtp) {
+  cfg.global ||= {};
+  if (smtp?.configured) {
+    cfg.global.smtp_smarthost = smtp.smarthost;
+    cfg.global.smtp_from = smtp.from;
+    cfg.global.smtp_require_tls = smtp.requireTls;
+    if (smtp.username) { cfg.global.smtp_auth_username = smtp.username; cfg.global.smtp_auth_password = smtp.password || ''; }
+  }
+  return cfg;
+}
+
+/** Each policy = one receiver (its channels) + its route(s); the Default policy = the root route. */
+function renderPolicies(base, channels, smtp, policies) {
+  const cfg = withSmtp(structuredClone(base || {}), smtp);
+  const byId = new Map(channels.map((c) => [Number(c.id), c]));
+  const receiver = (name, ids) => {
+    const r = { name };
+    for (const id of ids || []) {
+      const c = byId.get(Number(id));
+      if (!c || !c.enabled || (c.type === 'email' && !smtp?.configured)) continue; // Alertmanager refuses email without a mail server
+      const conf = amChannel(c);
+      if (conf) (r[TYPES[c.type].key] ||= []).push(conf);
+    }
+    return r;
+  };
+  const timing = (p) => ({
+    ...(p.groupBy?.length ? { group_by: p.groupBy } : {}), ...(p.groupWait ? { group_wait: p.groupWait } : {}),
+    ...(p.groupInterval ? { group_interval: p.groupInterval } : {}), ...(p.repeatInterval ? { repeat_interval: p.repeatInterval } : {}),
+  });
+  const def = policies.find((p) => p.isDefault) || { channels: [] };
+  const list = policies.filter((p) => !p.isDefault && p.enabled).sort((a, b) => a.position - b.position || a.id - b.id);
+  const root = base?.route || {};
+  cfg.receivers = [receiver('default', def.channels), ...list.map((p) => receiver(`policy-${p.id}`, p.channels))];
+  cfg.route = {
+    receiver: 'default',
+    group_by: def.groupBy?.length ? def.groupBy : (root.group_by || ['alertname', 'severity', 'env']),
+    group_wait: def.groupWait || root.group_wait || '30s',
+    group_interval: def.groupInterval || root.group_interval || '5m',
+    repeat_interval: def.repeatInterval || root.repeat_interval || '4h',
+  };
+  const routes = [
+    // a rule that names its policy (Create alert -> Notification policy) goes there, whatever its labels
+    ...list.map((p) => ({ matchers: [`${SELECT_LABEL}="p${p.id}"`], receiver: `policy-${p.id}`, ...timing(p) })),
+    ...list.map((p) => ({ ...(p.matchers.length ? { matchers: p.matchers.map(matcherString) } : {}), receiver: `policy-${p.id}`, ...timing(p), ...(p.continue ? { continue: true } : {}) })),
+  ];
+  if (routes.length) cfg.route.routes = routes;
+  return cfg;
+}
+
 export function readBase() {
   return YAML.parse(fs.readFileSync(config.alertmanagerBaseConfig, 'utf8')) || {};
 }
 
 const HEADER = `# WRITTEN BY OBSERVAONE - do not edit here, changes are overwritten.
-# Edit routes / grouping / inhibition in alertmanager/alertmanager.yml (the base) and restart observa;
-# add channels and the email server in ObservaOne: Alerting -> Notifications.
+# Routes = ObservaOne's notification policies, receivers = its channels (Alerting -> Notification policies / channels).
+# global, inhibit_rules and time intervals come from alertmanager/alertmanager.yml (the base): edit it, restart observa.
 `;
 
 function writeFile(file, text) {
@@ -287,7 +340,8 @@ async function doApply(force) {
   if (!editable()) return status;
   const file = config.alertmanagerConfigFile;
   try {
-    const cfg = renderConfig(readBase(), await listChannels(), await getSmtp({ withPassword: true }));
+    await ensurePolicies(readBase, listChannels); // once: the team setup becomes policies
+    const cfg = renderConfig(readBase(), await listChannels(), await getSmtp({ withPassword: true }), await listPolicies());
     const text = HEADER + YAML.stringify(cfg, { lineWidth: 0 });
     const prev = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null;
     if (prev === text && !force) { status = { ...status, ok: status.ok ?? true, at: status.at || new Date().toISOString() }; return status; }
@@ -327,8 +381,8 @@ export async function sendTest(row, by) {
   const s = secretOf(row);
   const now = new Date().toISOString();
   const title = '[TEST] ObservaOne test notification';
-  const text = `This is a test from ObservaOne, sent by ${by} to check the channel "${row.name}" (team ${row.team}). Real alerts for this team arrive here the same way. No action is needed.`;
-  const labels = { alertname: 'ObservaOneTestNotification', severity: 'info', team: row.team };
+  const text = `This is a test from ObservaOne, sent by ${by} to check the channel "${row.name}". Alerts of the policies that use this channel arrive here the same way. No action is needed.`;
+  const labels = { alertname: 'ObservaOneTestNotification', severity: 'info' };
   switch (row.type) {
     case 'email': {
       const m = await getSmtp({ withPassword: true });
@@ -352,7 +406,7 @@ export async function sendTest(row, by) {
       await post(s.url, { type: 'message', attachments: [{ contentType: 'application/vnd.microsoft.card.adaptive', content: {
         $schema: 'http://adaptivecards.io/schemas/adaptive-card.json', type: 'AdaptiveCard', version: '1.2', msteams: { width: 'full' },
         body: [
-          { type: 'TextBlock', text: `🔵 TEST: ObservaOneTestNotification · info · team ${row.team}`, weight: 'Bolder', size: 'Medium', wrap: true },
+          { type: 'TextBlock', text: `🔵 TEST: ObservaOneTestNotification · info`, weight: 'Bolder', size: 'Medium', wrap: true },
           { type: 'TextBlock', text: `- **test-host**: ${text}${oo ? ` · [Open ObservaOne](${oo}/alerting)` : ''}`, wrap: true },
           { type: 'TextBlock', text: `Real alerts look like this: a title with the state, alert, severity and environment; one line per server with its value, since when, and links to Details, Host and Runbook.${oo ? '' : ' (Set PUBLIC_URL to get links to ObservaOne.)'}`, wrap: true, isSubtle: true },
         ],
@@ -362,9 +416,9 @@ export async function sendTest(row, by) {
     case 'slack': {
       const oo = config.publicUrl, ts = Math.floor(Date.now() / 1000);
       const out = await post(s.url, { ...(row.settings.channel ? { channel: row.settings.channel } : {}), attachments: [{
-        color: '#3b82f6', title: `🔵 TEST: ObservaOneTestNotification · info · team ${row.team}`, ...(oo ? { title_link: `${oo}/alerting` } : {}),
+        color: '#3b82f6', title: '🔵 TEST: ObservaOneTestNotification · info', ...(oo ? { title_link: `${oo}/alerting` } : {}),
         text: `• *test-host*: ${text}\n      since <!date^${ts}^{date_short_pretty} {time}|now>${oo ? ` · <${oo}/alerting|Open ObservaOne>` : ''}\n_Real alerts look like this: one line per server with its value, since when, and links to Details, Host and Runbook.${oo ? '' : ' (Set PUBLIC_URL to get links to ObservaOne.)'}_`,
-        footer: `ObservaOne · team ${row.team}`, fallback: `TEST from ObservaOne (${row.name})`, mrkdwn_in: ['text'],
+        footer: `ObservaOne · channel ${row.name}`, fallback: `TEST from ObservaOne (${row.name})`, mrkdwn_in: ['text'],
         ...(oo ? { actions: [{ type: 'button', text: 'Open in ObservaOne', url: `${oo}/alerting` }] } : {}),
       }] });
       if (out && out.trim() !== 'ok' && /error|invalid/i.test(out)) throw new Error(out.slice(0, 300));
@@ -372,7 +426,7 @@ export async function sendTest(row, by) {
     }
     case 'webhook':
       await post(s.url, {
-        version: '4', groupKey: '{}:{alertname="ObservaOneTestNotification"}', truncatedAlerts: 0, status: 'firing', receiver: `${row.team}-team`,
+        version: '4', groupKey: '{}:{alertname="ObservaOneTestNotification"}', truncatedAlerts: 0, status: 'firing', receiver: `channel-${row.id}`,
         groupLabels: { alertname: labels.alertname }, commonLabels: labels, commonAnnotations: { summary: title, description: text },
         externalURL: config.publicUrl || '', alerts: [{ status: 'firing', labels, annotations: { summary: title, description: text }, startsAt: now,
           endsAt: '0001-01-01T00:00:00Z', generatorURL: '', fingerprint: '0000000000000000' }],

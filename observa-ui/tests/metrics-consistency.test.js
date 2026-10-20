@@ -44,7 +44,8 @@ test('CPU stays right 2.5 minutes after a series starts (the old formula read fa
 });
 
 test('process CPU (% of server) is never above 100% and adds up to at most host CPU + margin', { skip }, async () => {
-  const procs = await fetch(`${P}/api/v1/query`, { method: 'POST', body: new URLSearchParams({ query: `sum by (host) (${buildQuery({ metric: 'processes_cpu', filters: {}, by: 'process', fn: 'sum' }).replace(/^sum by \(groupname\) /, '')})` }) }).then((r) => r.json());
+  const procs = await fetch(`${P}/api/v1/query`, { method: 'POST', body: new URLSearchParams({ query: `sum by (host) (${buildQuery({ metric: 'processes_cpu', filters: {}, by: 'process', fn: 'sum' }).replace(/sum by \((?:groupname|process)\) \(100/g, '(100')})` }) }).then((r) => r.json());
   assert.equal(procs.status, 'success');
+  assert.ok(procs.data.result.every((r) => r.metric.host), 'every per-host sum has its host (Linux and Windows parts)');
   for (const r of procs.data.result) assert.ok(Number(r.value[1]) <= 100.5, `${r.metric.host}: processes add up to ${r.value[1]}% of the server`);
 });

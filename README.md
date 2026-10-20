@@ -250,7 +250,7 @@ Data appears on the Logs and Traces pages as soon as it reaches Loki and Tempo. 
 
 - Alert rules are in `prometheus/rules/host-alerts.yml`: server down, CPU above 90%, memory above 90%, disk below 20% (warning) and below 10% (critical). After editing, run `docker compose restart prometheus`.
 - Admins can also create rules in **Alerting → New Alert Rule**. The UI checks the query, writes the rule and reloads Prometheus. If Prometheus rejects the rule, the change is undone.
-- To send alerts by **email, Microsoft Teams, Slack, webhook or PagerDuty**: ObservaOne → Alerting → Notifications → *Email server* (once, for email) and *Add channel*, then *Send test*. ObservaOne writes Alertmanager's configuration and reloads it (docs/alerting/ALERTING.md). Routes, grouping and inhibition stay in `alertmanager/alertmanager.yml` (restart `observa` after editing it).
+- To send alerts by **email, Microsoft Teams, Slack, webhook or PagerDuty**: ObservaOne → Alerts → Notification Channels → *Email server* (once, for email) and *Add Channel*, then *Test*; Notification Policies decide which alerts go to which channels. ObservaOne writes Alertmanager's configuration and reloads it (docs/alerting/ALERTING.md). Inhibition stays in `alertmanager/alertmanager.yml` (restart `observa` after editing it).
 - To **silence** an alert (for example during maintenance), switch off **Notify** on it in Alerting. This needs the operator role or higher.
 
 ## 7b. Tests

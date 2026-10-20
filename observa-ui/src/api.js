@@ -495,7 +495,7 @@ api.get('/rules', wrap(async (req, res) => {
         severity: r.labels?.severity || 'none', summary: r.annotations?.summary || '',
         firing: (r.alerts || []).filter((a) => a.state === 'firing').length,
         lastEvaluation: r.lastEvaluation, health: r.health, lastError: r.lastError,
-        custom: g.name === 'ui-rules' && custom.has(r.name), labels: r.labels || {}, runbook: r.annotations?.runbook_url || '',
+        custom: isUiGroup(g.name) && custom.has(r.name), labels: r.labels || {}, runbook: r.annotations?.runbook_url || '',
       });
     }
   }
@@ -536,15 +536,23 @@ api.delete('/silences/:id', requirePerm('alerts.silence'), wrap(async (req, res)
 // /notifications: routes/notifications.js (channels managed in ObservaOne, written into Alertmanager's config)
 
 // --- alert rules created in the UI (written to a rules file, Prometheus reloads it) ---
+// Rules created in the UI: group "ui-rules" (Prometheus' evaluation interval) or "ui-rules-<interval>" (their own).
+const EVAL_INTERVALS = ['15s', '30s', '1m', '2m', '5m', '10m'];
+const isUiGroup = (name) => name === 'ui-rules' || /^ui-rules-\d+[sm]$/.test(name);
 function readUiRules() {
   if (!config.rulesFile || !fs.existsSync(config.rulesFile)) return [];
   const doc = YAML.parse(fs.readFileSync(config.rulesFile, 'utf8')) || {};
-  return doc.groups?.find((g) => g.name === 'ui-rules')?.rules || [];
+  return (doc.groups || []).filter((g) => isUiGroup(g.name)).flatMap((g) => (g.rules || []).map((r) => (g.interval ? { ...r, _interval: g.interval } : r)));
 }
 
 async function writeUiRulesAndReload(rules) {
   const old = fs.existsSync(config.rulesFile) ? fs.readFileSync(config.rulesFile, 'utf8') : null;
-  const text = '# Managed by ObservaOne UI - edits here may be overwritten\n' + YAML.stringify({ groups: [{ name: 'ui-rules', rules }] });
+  const byInterval = new Map();
+  for (const { _interval, ...r } of rules) { const k = _interval || ''; if (!byInterval.has(k)) byInterval.set(k, []); byInterval.get(k).push(r); }
+  if (!byInterval.size) byInterval.set('', []);
+  const groups = [...byInterval.entries()].sort(([a], [b]) => (a ? 1 : 0) - (b ? 1 : 0) || a.localeCompare(b))
+    .map(([iv, rs]) => ({ name: iv ? `ui-rules-${iv}` : 'ui-rules', ...(iv ? { interval: iv } : {}), rules: rs }));
+  const text = '# Managed by ObservaOne UI - edits here may be overwritten\n' + YAML.stringify({ groups });
   fs.writeFileSync(config.rulesFile, text);
   const reload = async () => {
     const r = await fetch(`${ds('prometheus').url}/-/reload`, { method: 'POST' });
@@ -562,7 +570,8 @@ async function writeUiRulesAndReload(rules) {
 
 api.post('/rules', requirePerm('alerts.rules'), wrap(async (req, res) => {
   if (!config.rulesFile) throw httpError(400, 'Rule editing is off (UI_RULES_FILE not set).');
-  const { name, forMinutes = 5, severity = 'warning', summary = '', description = '', runbookUrl = '' } = req.body || {};
+  const { name, forMinutes = 5, severity = 'warning', summary = '', description = '', runbookUrl = '', interval = '' } = req.body || {};
+  if (interval && !EVAL_INTERVALS.includes(String(interval))) throw httpError(400, `Evaluation interval: one of ${EVAL_INTERVALS.join(', ')}.`);
   let expr = buildExpr(req.body || {}); // { expr } or { query, op, threshold }
   if (!/^[A-Za-z][A-Za-z0-9_]{2,63}$/.test(name || '')) throw httpError(400, 'Name: 3-64 letters, numbers or _ , starting with a letter (e.g. HighCpuAppServers).');
   if (!['critical', 'warning', 'info'].includes(severity)) throw httpError(400, 'Severity must be critical, warning or info.');
@@ -574,6 +583,7 @@ api.post('/rules', requirePerm('alerts.rules'), wrap(async (req, res) => {
   for (const [k, v] of Object.entries({ ...extra, ...(req.body?.team ? { team: req.body.team } : {}) })) {
     if (!/^[a-z][a-z0-9_]{0,30}$/.test(k) || ['severity', 'created_by', 'tenant', 'alertname', '__name__'].includes(k)) throw httpError(400, `Label "${k}": lower-case a-z 0-9 _, not a reserved name.`);
     if (!/^[A-Za-z0-9._ -]{1,64}$/.test(String(v))) throw httpError(400, `Label ${k}: letters, digits, space . _ - (max 64).`);
+    if (k === 'observaone_policy' && !/^p\d{1,12}$/.test(String(v))) throw httpError(400, 'Notification policy: choose one from the list.');
     labels[k] = String(v);
   }
   if (Object.keys(labels).length > 12) throw httpError(400, 'At most 10 labels.');
@@ -587,7 +597,7 @@ api.post('/rules', requirePerm('alerts.rules'), wrap(async (req, res) => {
   const rules = readUiRules();
   if (rules.some((r) => r.alert === name)) throw httpError(409, 'A rule with this name already exists.');
   rules.push({
-    alert: name, expr: String(expr), for: `${Math.max(0, Math.min(1440, Number(forMinutes) || 0))}m`,
+    alert: name, expr: String(expr), for: `${Math.max(0, Math.min(1440, Number(forMinutes) || 0))}m`, ...(interval ? { _interval: String(interval) } : {}),
     labels,
     annotations: { summary: String(summary).slice(0, 300) || name, description: String(description).slice(0, 1000), ...(runbookUrl ? { runbook_url: String(runbookUrl) } : {}) },
   });

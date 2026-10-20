@@ -1,4 +1,6 @@
-# Alertmanager BASE configuration: routes, grouping, inhibition.
+# Alertmanager BASE configuration: global settings, inhibition, grouping defaults.
+# Routing is done by ObservaOne's notification policies (Alerts -> Notification Policies); the routes and receivers
+# below were converted into policies on the first start of the policies version and are no longer used.
 # Channels (email, Microsoft Teams, Slack, webhook, PagerDuty) and the email server are set in ObservaOne:
 # Alerting -> Notifications. ObservaOne adds them to the receivers below ("<team>-team") and writes the file
 # Alertmanager runs (volume am-config). After editing this file: docker compose restart observa

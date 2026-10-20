@@ -1,6 +1,6 @@
 // Alerts API (hybrid alerting: Prometheus + Alertmanager do the work, ObservaOne shows, scopes and records it).
 //
-//   GET  /alerts/list?state=all|firing|pending|resolved&start&end&severity&q   alerts with value, duration, team
+//   GET  /alerts/list?state=all|firing|pending|resolved&start&end&severity&env&q   alerts with value, duration, team (+ envs)
 //   GET  /alerts/item/:id                                                     one episode: rule, threshold, history,
 //                                                                            labels, annotations, evidence query
 //   GET  /alerts/find?name&host&at                                          the episode a notification links to (by
@@ -61,15 +61,17 @@ alertingRouter.get('/alerts/list', wrap(async (req, res) => {
   parts.push(state === 'all' || state === 'resolved' ? '(resolved_at BETWEEN $2 AND $3)' : '(resolved_at BETWEEN $2 AND $3 AND FALSE)');
   let where = `${tenantSql(1)} AND (${parts.join(' OR ')})`;
   if (req.query.severity) { params.push(String(req.query.severity)); where += ` AND severity = $${params.length}`; }
+  if (req.query.env) { params.push(String(req.query.env)); where += ` AND labels->>'env' = $${params.length}`; }
   if (req.query.q) { params.push(`%${String(req.query.q).toLowerCase()}%`); where += ` AND (lower(alertname) LIKE $${params.length} OR lower(host) LIKE $${params.length} OR lower(labels::text) LIKE $${params.length})`; }
   const [rows, amMap] = await Promise.all([episodeRows(where, params), amStatus()]);
   const list = rows.map((e) => toRow(e, amMap));
   const rank = { firing: 0, pending: 1, resolved: 2 }, sev = { critical: 0, warning: 1, info: 2 };
   list.sort((a, b) => rank[a.state] - rank[b.state] || (sev[a.severity] ?? 3) - (sev[b.severity] ?? 3) || b.activeAt.localeCompare(a.activeAt));
   // counts for the tabs (active ones + resolved in the range), tenant-scoped like the list
-  const c = (await episodeRows(`${tenantSql(1)} AND (resolved_at IS NULL OR resolved_at BETWEEN $2 AND $3)`, params.slice(0, 3), 5000))
-    .reduce((acc, e) => { acc[e.resolved_at ? 'resolved' : e.state]++; return acc; }, { firing: 0, pending: 0, resolved: 0 });
-  res.json({ alerts: list, counts: { ...c, all: c.firing + c.pending + c.resolved }, alertmanager: amMap !== null });
+  const inRange = await episodeRows(`${tenantSql(1)} AND (resolved_at IS NULL OR resolved_at BETWEEN $2 AND $3)`, params.slice(0, 3), 5000);
+  const c = inRange.reduce((acc, e) => { acc[e.resolved_at ? 'resolved' : e.state]++; return acc; }, { firing: 0, pending: 0, resolved: 0 });
+  const envs = [...new Set(inRange.map((e) => e.labels?.env).filter(Boolean))].sort(); // the Environment filter's choices
+  res.json({ alerts: list, counts: { ...c, all: c.firing + c.pending + c.resolved }, envs, alertmanager: amMap !== null });
 }));
 
 // Links in Slack / Teams / email point here: Alertmanager knows the alert's labels and start time, not our id.

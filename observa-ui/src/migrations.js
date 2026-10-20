@@ -375,4 +375,32 @@ export const EXTRA_MIGRATIONS = [
       CREATE UNIQUE INDEX IF NOT EXISTS notification_channels_name ON notification_channels (lower(name));
     `,
   },
+  {
+    id: 14,
+    name: 'notification policies: conditions -> channels, grouping and timing (replace routing by team)',
+    sql: `
+      CREATE TABLE IF NOT EXISTS notification_policies (
+        id                BIGSERIAL PRIMARY KEY,
+        name              TEXT NOT NULL,
+        description       TEXT NOT NULL DEFAULT '',
+        matchers          JSONB NOT NULL DEFAULT '[]'::jsonb,   -- [{label, op: = != =~ !~, value}]
+        channel_ids       JSONB NOT NULL DEFAULT '[]'::jsonb,   -- notification_channels ids
+        group_by          JSONB,                                -- null = the Default policy's
+        group_wait        TEXT,
+        group_interval    TEXT,
+        repeat_interval   TEXT,
+        continue_matching BOOLEAN NOT NULL DEFAULT FALSE,       -- also check the policies below
+        enabled           BOOLEAN NOT NULL DEFAULT TRUE,
+        is_default        BOOLEAN NOT NULL DEFAULT FALSE,       -- the one that takes every alert nothing else matched
+        position          INT NOT NULL DEFAULT 0,               -- order: first match wins
+        created_by        TEXT,
+        created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS notification_policies_default ON notification_policies (is_default) WHERE is_default;
+      CREATE UNIQUE INDEX IF NOT EXISTS notification_policies_name ON notification_policies (lower(name));
+      -- channels no longer belong to a team (policies choose them); the column stays for the one-time conversion
+      ALTER TABLE notification_channels ALTER COLUMN team DROP NOT NULL;
+    `,
+  },
 ];

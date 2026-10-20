@@ -4,6 +4,7 @@ import { Link } from 'react-router-dom';
 import {
   LayoutGrid, LayoutDashboard, LineChart, FileText, Waypoints, Layers, Server, Bell, Cpu, Database, Settings,
   Activity, AlertTriangle, Clock, CircleSlash, X, Check, Info, type LucideIcon,
+  MoreVertical,
 } from 'lucide-react';
 import type { ApiError } from '@/lib/api';
 import { dateTime, timeTitle } from '@/lib/format';
@@ -250,7 +251,7 @@ export interface ModalAction { label: string; primary?: boolean; danger?: boolea
  * An action's onClick may be async; it closes the dialog when it resolves (return `false` to keep it open).
  * Errors become a red toast and keep the dialog open.
  */
-export function Modal({ title, onClose, actions = [], wide, children }: { title: ReactNode; onClose: () => void; actions?: ModalAction[]; wide?: boolean; children: ReactNode }) {
+export function Modal({ title, onClose, actions = [], wide, drawer, children }: { title: ReactNode; onClose: () => void; actions?: ModalAction[]; wide?: boolean; drawer?: boolean; children: ReactNode }) {
   const ref = useRef<HTMLDivElement>(null);
   const titleId = useId();
   const [busy, setBusy] = useState(false);
@@ -272,8 +273,8 @@ export function Modal({ title, onClose, actions = [], wide, children }: { title:
     return () => { document.removeEventListener('keydown', onKey); opener?.focus?.(); };
   }, [onClose]);
   return (
-    <div className="modal-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div ref={ref} className={`modal ${wide ? 'wide' : ''}`} role="dialog" aria-modal="true" aria-labelledby={titleId}>
+    <div className={`modal-overlay ${drawer ? 'side-panel' : ''}`} onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div ref={ref} className={`modal ${wide ? 'wide' : ''} ${drawer ? 'side-panel' : ''}`} role="dialog" aria-modal="true" aria-labelledby={titleId}>
         <div className="modal-head">
           <h3 id={titleId}>{title}</h3>
           <button className="icon-btn" onClick={onClose} aria-label="Close"><X size={18} /></button>
@@ -292,6 +293,32 @@ export function Modal({ title, onClose, actions = [], wide, children }: { title:
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+// ---------------- row menu (⋮): a few actions behind one button ----------------
+export interface MenuItem { label: string; onClick: () => void; danger?: boolean; disabled?: boolean; icon?: ReactNode }
+export function RowMenu({ items, label = 'More actions' }: { items: MenuItem[]; label?: string }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const away = (e: MouseEvent) => { if (!ref.current?.contains(e.target as Node)) setOpen(false); };
+    const esc = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
+    document.addEventListener('mousedown', away); document.addEventListener('keydown', esc);
+    return () => { document.removeEventListener('mousedown', away); document.removeEventListener('keydown', esc); };
+  }, [open]);
+  return (
+    <div className="row-menu" ref={ref}>
+      <button className="icon-btn" aria-label={label} title={label} aria-haspopup="menu" aria-expanded={open} onClick={(e) => { e.stopPropagation(); setOpen(!open); }}><MoreVertical size={16} /></button>
+      {open && (
+        <div className="row-menu-pop" role="menu">
+          {items.map((i) => (
+            <button key={i.label} role="menuitem" className={i.danger ? 'c-red' : ''} disabled={i.disabled} onClick={(e) => { e.stopPropagation(); setOpen(false); i.onClick(); }}>{i.icon}{i.label}</button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
