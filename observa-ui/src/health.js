@@ -101,10 +101,67 @@ function fmtAge(s) {
 //   lastSeenSec: when we last got data; upValue: what the agent said about its local exporter.
 // Silent agent = "not_reporting" (the host may be fine; the agent or network may have stopped).
 // "down" only when the agent itself reports the exporter as down.
-export function agentHostHealth({ nowSec, lastSeenSec, upValue, onlineSeconds }) {
+// Silent for longer than offlineSeconds (when given) = "offline", the same rule as enrolled agents.
+export function agentHostHealth({ nowSec, lastSeenSec, upValue, onlineSeconds, offlineSeconds }) {
   const stale = !lastSeenSec || nowSec - lastSeenSec > onlineSeconds;
+  if (stale && lastSeenSec && offlineSeconds && nowSec - lastSeenSec > offlineSeconds) return { health: 'offline', reason: 'The agent has sent nothing for a long time' };
   if (stale) return { health: 'not_reporting', reason: 'The agent stopped sending data' };
   return upValue ? { health: 'up', reason: '' } : { health: 'down', reason: 'The agent cannot read the local exporter' };
+}
+
+// ---------------- one status vocabulary for servers and agents ----------------
+// Infrastructure, Agents, Overview and Metrics all speak these five words (web/src/lib/status.ts shows them):
+//   up             reporting, and the data path works
+//   down           reporting, and it says the host / exporter is not answering (or Prometheus cannot scrape it)
+//   not_reporting  silent for a short while, or never reported yet: the host may be fine
+//   offline        silent for longer than the offline threshold
+//   disabled       blocked by an administrator: its data is refused
+// "Needs attention" (problems, outdated) is a flag next to the status, not a status of its own.
+export const HOST_STATUSES = ['up', 'down', 'not_reporting', 'offline', 'disabled'];
+
+/** agent status (agentStatus) -> host status */
+export function hostStatusOfAgent(status) {
+  return { online: 'up', attention: 'up', not_reporting: 'not_reporting', offline: 'offline', pending: 'not_reporting', blocked: 'disabled' }[status] || 'not_reporting';
+}
+
+/** Prometheus scrape health (up / down / unknown) -> host status */
+export function hostStatusOfScrape(health) {
+  return health === 'up' ? 'up' : health === 'down' ? 'down' : 'not_reporting';
+}
+
+/** live values (CPU, memory, disk) are shown only for a host that is up; anything else shows "—" + last seen */
+export const showsLiveValues = (status) => status === 'up';
+
+/** the server counts every page shows (Overview, Metrics, Infrastructure): one row per server */
+export function countServers(rows) {
+  const c = { total: rows.length, up: 0, down: 0, notReporting: 0, offline: 0, disabled: 0 };
+  for (const r of rows) {
+    const s = HOST_STATUSES.includes(r.health) ? r.health : 'not_reporting';
+    c[s === 'not_reporting' ? 'notReporting' : s]++;
+  }
+  return c;
+}
+
+// ---------------- one row per alert ----------------
+// When a host's env / role is edited, its series get the new labels while the old ones stay in Prometheus for a
+// while, so the same alert can be open twice ("vm" and "vm · lab"). Open episodes that differ only in those
+// host-metadata labels are one alert: the most recently seen one is kept. Resolved history is left as it is.
+export const HOST_META_LABELS = ['env', 'role'];
+export function dedupeKey(labels = {}) {
+  return JSON.stringify(Object.keys(labels).filter((k) => !HOST_META_LABELS.includes(k)).sort().map((k) => [k, String(labels[k])]));
+}
+export function dedupeOpenEpisodes(rows) {
+  const best = new Map();
+  const t = (x) => (x ? new Date(x).getTime() : 0);
+  const better = (a, b) => (t(a.last_seen) - t(b.last_seen)) || (a.state === 'firing') - (b.state === 'firing') || (t(a.active_at) - t(b.active_at)) || (Object.keys(a.labels || {}).length - Object.keys(b.labels || {}).length);
+  for (const e of rows) {
+    if (e.resolved_at) continue;
+    const k = dedupeKey(e.labels);
+    const cur = best.get(k);
+    if (!cur || better(e, cur) > 0) best.set(k, e);
+  }
+  const keep = new Set(best.values());
+  return rows.filter((e) => e.resolved_at || keep.has(e));
 }
 
 // ---------------- diagnosis: WHY an agent looks the way it does ----------------

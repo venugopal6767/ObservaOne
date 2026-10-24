@@ -98,7 +98,7 @@ function Overview({ title, sub }: { title: string; sub: string }) {
   const active = rows.filter((a) => a.state !== 'resolved');
   const firing = rows.filter((a) => a.state === 'firing');
   const crit = firing.filter((a) => a.severity === 'critical').length;
-  const muted = active.filter((a) => a.silenced || a.inhibited).length;
+  const muted = firing.filter((a) => a.silenced || a.inhibited).length; // same rule as /alerts/count (the bell, Overview)
   const noisy = useMemo(() => {
     const m = new Map<string, { n: number; hosts: Set<string>; sev: string }>();
     for (const a of rows) { const x = m.get(a.name) || { n: 0, hosts: new Set(), sev: a.severity }; x.n++; if (a.host) x.hosts.add(a.host); m.set(a.name, x); }
@@ -118,10 +118,10 @@ function Overview({ title, sub }: { title: string; sub: string }) {
       <PageHead title={title} sub={sub} actions={<CreateButton />} />
       {list.isError && <ErrorState error={list.error} what="Alerts" />}
       <div className="grid cards-4" style={{ marginBottom: 16 }}>
-        <StatCard label="Firing now" value={n(firing.length)} tone={firing.length ? 'red' : 'green'} extra={crit ? `${crit} critical` : 'none critical'} onClick={() => navigate('/alerting/active?tab=firing')} />
+        <StatCard label="Firing alerts" value={n(firing.length)} tone={firing.length ? 'red' : 'green'} extra={crit ? `${crit} critical` : 'none critical'} onClick={() => navigate('/alerting/active?tab=firing')} />
         <StatCard label="Pending" value={n(active.length - firing.length)} tone={active.length - firing.length ? 'orange' : undefined} extra="true, not yet for their whole duration" onClick={() => navigate('/alerting/active?tab=pending')} />
         <StatCard label="Resolved (time range)" value={n(list.data?.counts.resolved ?? 0)} extra="ended inside the time range at the top" onClick={() => navigate('/alerting/active?tab=resolved')} />
-        <StatCard label="Muted now" value={n(muted)} extra="silenced or inhibited: no notification" onClick={() => navigate('/alerting/silences')} />
+        <StatCard label="Muted" value={n(muted)} extra="firing, but silenced or inhibited: no notification" onClick={() => navigate('/alerting/silences')} />
       </div>
       <div className="ov-grid">
         <Panel title="Firing now" right={<Link to="/alerting/active?tab=firing" className="dim" style={{ fontSize: 12.5 }}>All active alerts <ChevronRight size={13} /></Link>}>

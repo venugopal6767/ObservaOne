@@ -9,6 +9,7 @@ import {
 import type { ApiError } from '@/lib/api';
 import { dateTime, timeTitle } from '@/lib/format';
 import type { IconName } from '@/app/routes';
+import { STATUS_META } from '@/lib/status';
 
 export const NAV_ICONS: Record<IconName, LucideIcon> = {
   overview: LayoutGrid, dashboards: LayoutDashboard, metrics: LineChart, logs: FileText, traces: Waypoints,
@@ -21,13 +22,12 @@ export function Pill({ tone = 'muted', children, title }: { tone?: Tone; childre
   return <span className={`pill pill-${tone}`} title={title}>{children}</span>;
 }
 
-/** Health of one thing (host, target, service). "unknown"-like states never look green or red. */
+/** Health of one thing (host, target, service). "unknown"-like states never look green or red.
+ *  Hosts and agents use the one vocabulary of lib/status.ts: Up · Down · Not reporting · Offline · Disabled. */
 const HEALTH: Record<string, [string, Tone, string]> = {
-  up: ['UP', 'solid-green', 'Answering normally'],
+  ...Object.fromEntries(Object.entries(STATUS_META).map(([k, m]) => [k, [m.label, m.tone, m.hint]])),
   healthy: ['Healthy', 'solid-green', ''],
   degraded: ['Degraded', 'solid-orange', ''],
-  down: ['DOWN', 'solid-red', ''],
-  not_reporting: ['Not reporting', 'stale', 'No data received recently. The host may be fine; the agent or network may have stopped.'],
   no_traffic: ['No traffic', 'muted', 'No requests in this period, so there is no error rate or latency to judge.'],
   unknown: ['Unknown', 'muted', 'Not checked yet.'],
 };

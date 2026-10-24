@@ -7,9 +7,10 @@ import { Bell, FileText, Waypoints, Terminal, Monitor } from 'lucide-react';
 import { color } from '@/lib/theme';
 import { api, type PromMatrix, type PromVector } from '@/lib/api';
 import { buildQuery, type Filters } from '@/lib/catalog';
-import { ago, dateTime, escapeLabel, fmt, legendName, timeHM } from '@/lib/format';
+import { ago, changeOf, changeText, dateTime, escapeLabel, fmt, legendName, timeHM } from '@/lib/format';
 import { palette, toneClass } from '@/lib/theme';
 import { useApp, usePlainQuery, useRangeQuery } from '@/app/AppContext';
+import { STATUS_META, asStatus, type HostStatus } from '@/lib/status';
 import { ErrorState, HealthPill, PageHead, Panel, Pill, Select, StateView, Tabs, TableWrap, Time, useDialogs, type Tone } from '@/components/ui';
 import { Sparkline, TimeChart, LegendRow } from '@/components/charts';
 import { AlertWizard } from '@/components/AlertWizard';
@@ -50,7 +51,7 @@ export default function HostView() {
     <>
       <nav className="crumbs" aria-label="Breadcrumb">{canOpen('/infrastructure') ? <Link to="/infrastructure">Infrastructure</Link> : <Link to="/metrics">Metrics</Link>} › {t ? (win ? 'Windows servers' : 'Linux servers') : 'Servers'} › <span>{host}</span></nav>
       <PageHead
-        title={<>{win ? <Monitor size={22} /> : <Terminal size={22} />}{host}{t && <HealthPill health={t.health} detail={t.lastError || undefined} />}</>}
+        title={<>{win ? <Monitor size={22} /> : <Terminal size={22} />}{host}{t && <HealthPill health={asStatus(t.health)} detail={t.lastError || undefined} />}</>}
         sub={t ? [win ? 'Windows server' : 'Linux server', t.env, t.role, t.source === 'agent' ? 'via ObservaOne Agent' : t.instance, upSec ? `Uptime ${fmt(upSec, 's')}` : '', t.lastScrape ? `last data ${ago(t.lastScrape)}` : ''].filter(Boolean).join(' · ') : targets.isPending ? 'Loading…' : 'This host is not in the target list (it may only send logs or traces).'}
         actions={<>
           {canOpen('/logs') && <button className="btn" onClick={() => navigate(`/logs?q=${encodeURIComponent(`{${h}}`)}`)}><FileText size={14} />View logs</button>}
@@ -188,14 +189,14 @@ function CpuTab({ f, onAlert }: { f: Filters; onAlert: () => void }) {
   const old = (before.data?.result[0]?.values || []).map(([t, v]) => [t + shift, v] as [number, string]);
   const cur = pts.length ? Number(pts[pts.length - 1][1]) : null;
   const prev = old.length ? Number(old[old.length - 1][1]) : null;
-  const delta = cur !== null && prev ? ((cur - prev) / prev) * 100 : null;
+  const delta = changeOf(cur, prev, 'percent'); // CPU is a percentage: compare in points, not "+2400%" from a near-idle base
   const thr = 80;
   const label = cmp === '1d' ? 'yesterday' : 'last week';
   return (
     <Panel title="CPU usage" right={<><Select className="select select-sm" label="Compare" value={cmp} onChange={setCmp} options={[['1d', 'Compare: yesterday'], ['1w', 'Compare: last week'], ['', 'No comparison']]} /><button className="btn btn-sm" onClick={onAlert}><Bell size={13} />Alert…</button></>}>
       <div className="big-now">
         <span className={`big-num ${toneClass(cur)}`}>{cur === null ? '-' : `${cur.toFixed(0)}%`}</span>
-        {delta !== null && Number.isFinite(delta) && <span className={`trend ${delta > 0 ? 'bad' : 'up'}`}>{delta > 0 ? '▲' : '▼'} {Math.abs(delta).toFixed(0)}% vs {label}</span>}
+        {delta && <span className={`trend ${Math.abs(delta.value) < 0.5 ? 'flat' : delta.value > 0 ? 'bad' : 'up'}`} title="Change in percentage points">{changeText(delta, 0)} vs {label}</span>}
         <span className="dim" style={{ fontSize: 12 }}>Threshold {thr}%{cur !== null && cur >= thr ? <b className="c-red"> · above the threshold</b> : ''}</span>
       </div>
       {now.isPending ? <StateView kind="loading" skeleton="chart" /> : now.isError ? <ErrorState error={now.error} what="CPU" /> : !pts.length ? <StateView kind="empty" title="No CPU data for this host" /> : (
@@ -273,8 +274,11 @@ function HealthStrip({ host, scrape }: { host: string; scrape?: Target }) {
   const ping = ev('ping');
   const data = ev('metric uploads') || ev('Prometheus scrape');
   const sevTone: Record<string, Tone> = { ok: 'green', info: 'blue', warning: 'orange', critical: 'red' };
-  const statusTone: Record<string, Tone> = { online: 'green', attention: 'orange', not_reporting: 'orange', offline: 'red', pending: 'muted', blocked: 'muted' };
-  const statusLabel: Record<string, string> = { online: 'Online', attention: 'Needs attention', not_reporting: 'Not reporting', offline: 'Offline', pending: 'Waiting', blocked: 'Blocked' };
+  // same words as Infrastructure and Agents (lib/status.ts)
+  const HOST_OF: Record<string, HostStatus> = { online: 'up', attention: 'up', not_reporting: 'not_reporting', offline: 'offline', pending: 'not_reporting', blocked: 'disabled' };
+  const hs = (s: string) => STATUS_META[asStatus(HOST_OF[s])];
+  const statusTone: Record<string, Tone> = Object.fromEntries(Object.keys(HOST_OF).map((k) => [k, hs(k).tone]));
+  const statusLabel: Record<string, string> = Object.fromEntries(Object.keys(HOST_OF).map((k) => [k, hs(k).label]));
   const last = a?.lastData || a?.lastHeartbeat || scrape?.lastScrape || null;
   const cells: [string, ReactNode][] = a ? [
     ['Overall', a.diagnosis ? <Pill tone={sevTone[a.diagnosis.severity]}>{a.diagnosis.title}</Pill> : <Pill tone={statusTone[a.status] || 'muted'}>{statusLabel[a.status] || a.status}</Pill>],
@@ -284,7 +288,7 @@ function HealthStrip({ host, scrape }: { host: string; scrape?: Target }) {
     ['Last metric', last ? <Time ms={Date.parse(last)} text={ago(last)} /> : <span className="dim">never</span>],
     ['Agent version', <span>{a.version || '-'} {a.outdated ? <Pill tone="orange">update: {agents.data?.latest}</Pill> : <span className="dim">(latest)</span>}</span>],
   ] : [
-    ['Overall', <HealthPill health={scrape!.health} detail={scrape!.lastError || undefined} />],
+    ['Overall', <HealthPill health={asStatus(scrape!.health)} detail={scrape!.lastError || undefined} />],
     ['Collected by', <span>Prometheus scrape</span>],
     ['Last metric', last ? <Time ms={Date.parse(last)} text={ago(last)} /> : <span className="dim">never</span>],
   ];

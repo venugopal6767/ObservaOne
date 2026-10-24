@@ -6,10 +6,20 @@ groups:
   - name: observaone-agent
     rules:
       - alert: AgentNotReporting
+        # One alert per server: env comes from the server's NEWEST label set. Grouping by env directly opened
+        # the alert twice after env was edited ("vm" and "vm · lab"), because the old series stay for 24 h.
         expr: |
-          max by (host, job, env, tenant) (max_over_time(up{agent="observaone", job=~"linux|windows"}[24h]))
-          unless on (host, job)
-          max by (host, job) (max_over_time(up{agent="observaone", job=~"linux|windows"}[3m]))
+          (
+            max by (host, job, tenant) (max_over_time(up{agent="observaone", job=~"linux|windows"}[24h]))
+            unless on (host, job)
+            max by (host, job) (max_over_time(up{agent="observaone", job=~"linux|windows"}[3m]))
+          )
+          * on (host, job, tenant) group_left (env)
+          (
+            topk by (host, job, tenant) (1,
+              max by (host, job, tenant, env) (max_over_time(timestamp(up{agent="observaone", job=~"linux|windows"})[24h:1m]))
+            ) * 0 + 1
+          )
         for: 2m
         labels:
           severity: critical

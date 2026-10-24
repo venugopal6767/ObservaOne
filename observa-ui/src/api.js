@@ -17,8 +17,9 @@ import { ssoRouter } from './sso.js';
 import { accessRouter } from './routes/access.js';
 import { extraRouters } from './routes/index.js';
 import { getDatasources, ds, requireConfigured, updateDatasource, testDatasource, prom, promInstant, am, fetchJson } from './datasources.js';
-import { cpuByHost, memByHost, diskFreeByHost, SERVERS_UP } from './queries.js';
-import { classifyService, summarizeServices, agentHostHealth } from './health.js';
+import { cpuByHost, memByHost, diskFreeByHost } from './queries.js';
+import { classifyService, summarizeServices, agentHostHealth, hostStatusOfAgent, hostStatusOfScrape, countServers } from './health.js';
+import { alertCounts } from './routes/alerting.js';
 import { MODULES, enabledModules, moduleSettings, setEnabledModules, requireModule } from './modules.js';
 import { describeAgent } from './routes/agent-control.js';
 import { currentTenant, isScoped, scopePromQL } from './tenancy.js';
@@ -178,12 +179,14 @@ api.get('/prom/label-values', wrap(async (req, res) => {
   res.json(values);
 }));
 
-api.get('/prom/targets', wrap(async (req, res) => {
+// Every server, one row each, whatever collects it. Infrastructure, Overview and Metrics all count THIS list,
+// so they show the same numbers. health is one of up / down / not_reporting / offline / disabled (health.js).
+async function serverInventory(req) {
   const d = await prom('/api/v1/targets', { state: 'active' });
   const pulled = d.activeTargets.map((t) => ({
     job: t.labels.job, instance: t.labels.instance, host: t.labels.host || t.labels.instance,
     os: t.labels.os || '', env: t.labels.env || '', role: t.labels.role || '',
-    health: t.health, lastScrape: t.lastScrape, durationMs: Math.round((t.lastScrapeDuration || 0) * 1000),
+    health: isServerJob(t.labels.job) ? hostStatusOfScrape(t.health) : t.health, lastScrape: t.lastScrape, durationMs: Math.round((t.lastScrapeDuration || 0) * 1000),
     lastError: t.lastError, source: 'scrape',
   }));
   // Servers that push through the ObservaOne Agent (they are not Prometheus scrape targets).
@@ -206,7 +209,7 @@ api.get('/prom/targets', wrap(async (req, res) => {
     const now = Date.now() / 1000;
     for (const { m, up, last } of best.values()) {
       // silent agent = "not_reporting", never "down" (rules in health.js)
-      const hh = agentHostHealth({ nowSec: now, lastSeenSec: last, upValue: up, onlineSeconds: config.agent.onlineSeconds });
+      const hh = agentHostHealth({ nowSec: now, lastSeenSec: last, upValue: up, onlineSeconds: config.agent.onlineSeconds, offlineSeconds: config.agent.offlineSeconds });
       pushed.push({
         job: m.job, instance: 'agent', host: m.host || m.instance, os: m.os || '', env: m.env || '', role: m.role || '',
         health: hh.health, lastScrape: last ? new Date(last * 1000).toISOString() : null, durationMs: 0,
@@ -227,7 +230,7 @@ api.get('/prom/targets', wrap(async (req, res) => {
   } catch { /* database problem: show what Prometheus knows */ }
   const now = Date.now();
   const servers = new Map(); // host (lower case) -> merged row
-  const isServer = (t) => t.job === 'linux' || t.job === 'windows';
+  const isServer = (t) => isServerJob(t.job);
   const merge = (t) => {
     const k = String(t.host).toLowerCase();
     const cur = servers.get(k);
@@ -242,7 +245,7 @@ api.get('/prom/targets', wrap(async (req, res) => {
   for (const a of enrolled) {
     const k = a.host.toLowerCase();
     const d = describeAgent(a, now);
-    const health = { online: 'up', attention: 'up', not_reporting: 'not_reporting', offline: 'not_reporting', pending: 'unknown', blocked: 'unknown' }[d.status] || 'unknown';
+    const health = hostStatusOfAgent(d.status);
     const agentInfo = { agentId: a.id, agentStatus: d.status, agentReason: d.reason || d.problems.join(' '), lastHeartbeat: a.last_heartbeat };
     const cur = servers.get(k);
     if (cur) {
@@ -264,7 +267,13 @@ api.get('/prom/targets', wrap(async (req, res) => {
   }
   // blackbox probes of agent hosts feed the Agents page diagnosis; they are not monitored components
   const probe = (t) => /^observaone-agent-(ping|port)$/.test(t.job);
-  res.json([...servers.values(), ...pulled.filter((t) => !isServer(t) && !probe(t))]);
+  return { servers: [...servers.values()], others: pulled.filter((t) => !isServer(t) && !probe(t)) };
+}
+const isServerJob = (job) => job === 'linux' || job === 'windows';
+
+api.get('/prom/targets', wrap(async (req, res) => {
+  const { servers, others } = await serverInventory(req);
+  res.json([...servers, ...others]);
 }));
 
 // ---------------- Overview (one call for the whole page) ----------------
@@ -283,9 +292,9 @@ api.get('/overview', wrap(async (req, res) => {
     infra ? promInstant(`avg(${memByHost('1h')})`) : off,
     infra ? promInstant(cpuByHost()) : off,
     infra ? prom('/api/v1/query_range', { query: memByHost(), start, end, step }) : off,
-    infra ? promInstant(`count(${SERVERS_UP})`) : off,
-    infra ? promInstant(`count(${SERVERS_UP} == 0)`) : off,
-    alerting ? am('/api/v2/alerts?active=true&silenced=false&inhibited=false') : off,
+    infra ? serverInventory(req) : off,
+    off, // (was: servers down; now part of the inventory above)
+    alerting ? alertCounts() : off,
     services ? servicesNow() : off,
     services ? servicesSeries('rps', start, end, step) : off,
     services ? servicesSeries('p95', start, end, step) : off,
@@ -302,8 +311,9 @@ api.get('/overview', wrap(async (req, res) => {
     memSeries: v(5)?.result || [],
     memError: err(5),
     // null = unknown (query failed); a real count of 0 stays 0
-    servers: { total: v(6) ? (scalar(v(6)) ?? 0) : null, down: v(7) ? (scalar(v(7)) ?? 0) : null, error: err(6) },
-    alerts: { active: v(8) ? v(8).length : null, critical: v(8) ? v(8).filter((a) => a.labels.severity === 'critical').length : null, error: err(8) },
+    // same list and rules as Infrastructure (serverInventory) and the same counts as Alerting (alertCounts)
+    servers: v(6) ? { ...countServers(v(6).servers), error: null } : { total: null, up: null, down: null, notReporting: null, offline: null, disabled: null, error: err(6) },
+    alerts: v(8) ? { ...v(8), error: null } : { firing: null, active: null, critical: null, warning: null, muted: null, pending: null, error: err(8) },
     services: svc,
     servicesError: err(9),
     rpsSeries: v(10),
@@ -477,9 +487,9 @@ api.get('/alerts', wrap(async (req, res) => {
   });
 }));
 
+// the bell, Overview and Metrics all show these numbers (rules in routes/alerting.js alertCounts)
 api.get('/alerts/count', wrap(async (req, res) => {
-  const a = (await am('/api/v2/alerts?active=true&silenced=false&inhibited=false')).filter(mineAlert);
-  res.json({ active: a.length, critical: a.filter((x) => x.labels.severity === 'critical').length, warning: a.filter((x) => x.labels.severity === 'warning').length });
+  res.json(await alertCounts());
 }));
 
 api.get('/rules', wrap(async (req, res) => {

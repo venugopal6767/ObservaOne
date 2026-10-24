@@ -8,7 +8,8 @@ import { useQuery } from '@tanstack/react-query';
 import { Server, Monitor, Terminal, Network, Boxes, Cpu, MemoryStick, HardDrive, Activity, Bell, Search, Layers } from 'lucide-react';
 import { api, type PromMatrix, type PromVector } from '@/lib/api';
 import { buildQuery, matchers, metricById, type Filters } from '@/lib/catalog';
-import { ago, fmt, short } from '@/lib/format';
+import { ago, changeOf, changeText, fmt, short, type Change } from '@/lib/format';
+import { STATUS_META, countStatuses, statusParts } from '@/lib/status';
 import { statusColor, palette, toneClass } from '@/lib/theme';
 import { rangeParams, useApp, usePlainQuery, useRangeQuery } from '@/app/AppContext';
 import { ErrorState, HealthPill, PageHead, Panel, Pill, Select, StateView } from '@/components/ui';
@@ -44,7 +45,7 @@ function OverviewBody() {
   const disk = useSeries('ov-disk', avgOf('disk', f));
   const net = useSeries('ov-net', `sum(${buildQuery({ metric: 'network', filters: f, fn: 'sum' })})`);
   const targets = usePlainQuery(['ov-targets'], () => api<Target[]>('/prom/targets'), { enabled: moduleOn('infrastructure') });
-  const alerts = usePlainQuery(['ov-alerts'], () => api<{ active: number; critical: number; warning?: number }>('/alerts/count'), { enabled: moduleOn('alerting') });
+  const alerts = usePlainQuery(['ov-alerts'], () => api<{ firing?: number; active: number; critical: number; warning?: number; muted?: number | null }>('/alerts/count'), { enabled: moduleOn('alerting') });
   const hostNow = useRangeQuery(['ov-hostnow', JSON.stringify(f)], async () => {
     const q = (m: string) => api<{ result: PromVector }>('/prom/query', { query: { query: buildQuery({ metric: m, filters: f }) } }).then((r) => new Map(r.result.map((x) => [x.metric.host, Number(x.value[1])])));  // a failure is an error, never "all healthy"
     const [c, m, d] = await Promise.all([q('cpu'), q('memory'), q('disk')]);
@@ -53,8 +54,7 @@ function OverviewBody() {
 
   const servers = (targets.data || []).filter((t) => (t.job === 'linux' || t.job === 'windows') && (!f.env || t.env === f.env) && (!f.host || t.host === f.host)
     && (!f.platform || f.platform === 'kubernetes' ? true : (f.platform === 'windows') === (t.job === 'windows')));
-  const up = servers.filter((s) => s.health === 'up').length;
-  const down = servers.filter((s) => s.health === 'down').length;
+  const sc = countStatuses(servers); // same words and rules as Infrastructure (lib/status.ts)
 
   // health: critical = down or any value past its critical line; warning = past warn; unknown = not reporting
   const health = { healthy: 0, warning: 0, critical: 0, unknown: 0 };
@@ -69,7 +69,8 @@ function OverviewBody() {
   }
   const topCpu = [...(hostNow.data?.c || new Map<string, number>())].sort((a, b) => b[1] - a[1]).slice(0, 5);
 
-  const trend = (q: { data?: { result: PromMatrix } }) => { const a = first(q.data?.result), b = last(q.data?.result); return a && b !== null ? ((b - a) / Math.abs(a)) * 100 : null; };
+  // change over the time range: percentage points for % metrics; no badge when it would be meaningless (format.ts)
+  const trend = (q: { data?: { result: PromMatrix } }, unit: string) => changeOf(last(q.data?.result), first(q.data?.result), unit);
   const Kpi = ({ icon, label, value, unit, sub, spark, tone, to, color }: { icon: React.ReactNode; label: string; value: string; unit?: string; sub?: React.ReactNode; spark?: [number, string][]; tone?: string; to?: string; color?: string }) => {
     const body = (
       <>
@@ -84,7 +85,7 @@ function OverviewBody() {
   const pal = palette();
   const pctTone = (v: number | null, id: string) => { const d = metricById(id)!; return v === null ? '' : v >= d.crit! ? 'red' : v >= d.warn! ? 'orange' : ''; };
   // "up" is bad for resource use: an increase shows red, a decrease green
-  const Trend = ({ v }: { v: number | null }) => (v === null || !Number.isFinite(v) ? null : <span className={`trend ${Math.abs(v) < 0.5 ? 'flat' : v > 0 ? 'bad' : 'up'}`} title="Change from the start of the time range">{v > 0 ? '▲' : '▼'} {Math.abs(v).toFixed(1)}%</span>);
+  const Trend = ({ v }: { v: Change | null }) => (!v ? null : <span className={`trend ${Math.abs(v.value) < 0.5 ? 'flat' : v.value > 0 ? 'bad' : 'up'}`} title={v.unit === 'pts' ? 'Change in percentage points since the start of the time range' : 'Change since the start of the time range'}>{changeText(v)}</span>);
   const explore = (metric: string, extra = '') => `/metrics/explore?m=${metric}${extra}`;
 
   const c = last(cpu.data?.result), m = last(mem.data?.result), d = last(disk.data?.result), n = last(net.data?.result);
@@ -96,15 +97,15 @@ function OverviewBody() {
       <AskBar compact />
       <FilterBar />
       <div className="kpi-row">
-        <Kpi icon={<Server size={16} />} label="Total servers" value={targets.isPending ? '…' : String(servers.length)} color={pal[3]}
-          sub={<><span className="c-green">{up} up</span>{down > 0 && <span className="c-red"> · {down} down</span>}{servers.length - up - down > 0 && <span className="dim"> · {servers.length - up - down} not reporting</span>}</>}
+        <Kpi icon={<Server size={16} />} label="Servers" value={targets.isPending ? '…' : String(servers.length)} color={pal[3]}
+          sub={<>{statusParts(sc).map(([k, v], i) => <span key={k} className={k === 'up' ? 'c-green' : k === 'down' || k === 'offline' ? 'c-red' : 'dim'}>{i ? ' · ' : ''}{v} {STATUS_META[k].label.toLowerCase()}</span>)}</>}
           to={canOpen('/infrastructure') ? '/infrastructure' : undefined} />
-        <Kpi icon={<Cpu size={16} />} label="CPU usage" value={c === null ? '-' : c.toFixed(1)} unit={c === null ? '' : '%'} tone={pctTone(c, 'cpu')} sub={<Trend v={trend(cpu)} />} spark={cpu.data?.result[0]?.values} color={pal[0]} to={explore('cpu')} />
-        <Kpi icon={<MemoryStick size={16} />} label="Memory usage" value={m === null ? '-' : m.toFixed(1)} unit={m === null ? '' : '%'} tone={pctTone(m, 'memory')} sub={<Trend v={trend(mem)} />} spark={mem.data?.result[0]?.values} color={pal[1]} to={explore('memory')} />
-        <Kpi icon={<HardDrive size={16} />} label="Disk usage" value={d === null ? '-' : d.toFixed(1)} unit={d === null ? '' : '%'} tone={pctTone(d, 'disk')} sub={<Trend v={trend(disk)} />} spark={disk.data?.result[0]?.values} color={pal[2]} to={explore('disk', '&fn=max')} />
-        <Kpi icon={<Activity size={16} />} label="Network I/O" value={n === null ? '-' : fmt(n, 'Bps')} sub={<Trend v={trend(net)} />} spark={net.data?.result[0]?.values} color={pal[5]} to={explore('network')} />
-        {moduleOn('alerting') && <Kpi icon={<Bell size={16} />} label="Active alerts" value={alerts.data ? String(alerts.data.active) : '-'} tone={alerts.data?.active ? 'red' : alerts.data ? 'green' : ''} color={statusColor('crit')}
-          sub={alerts.data ? <span><span className="c-red">{alerts.data.critical} critical</span> · <span className="c-orange">{warnAlerts} warning</span></span> : alerts.isError ? 'Alertmanager unavailable' : null} to={canOpen('/alerting') ? '/alerting' : undefined} />}
+        <Kpi icon={<Cpu size={16} />} label="CPU usage" value={c === null ? '-' : c.toFixed(1)} unit={c === null ? '' : '%'} tone={pctTone(c, 'cpu')} sub={<Trend v={trend(cpu, 'percent')} />} spark={cpu.data?.result[0]?.values} color={pal[0]} to={explore('cpu')} />
+        <Kpi icon={<MemoryStick size={16} />} label="Memory usage" value={m === null ? '-' : m.toFixed(1)} unit={m === null ? '' : '%'} tone={pctTone(m, 'memory')} sub={<Trend v={trend(mem, 'percent')} />} spark={mem.data?.result[0]?.values} color={pal[1]} to={explore('memory')} />
+        <Kpi icon={<HardDrive size={16} />} label="Disk usage" value={d === null ? '-' : d.toFixed(1)} unit={d === null ? '' : '%'} tone={pctTone(d, 'disk')} sub={<Trend v={trend(disk, 'percent')} />} spark={disk.data?.result[0]?.values} color={pal[2]} to={explore('disk', '&fn=max')} />
+        <Kpi icon={<Activity size={16} />} label="Network I/O" value={n === null ? '-' : fmt(n, 'Bps')} sub={<Trend v={trend(net, 'Bps')} />} spark={net.data?.result[0]?.values} color={pal[5]} to={explore('network')} />
+        {moduleOn('alerting') && <Kpi icon={<Bell size={16} />} label="Firing alerts" value={alerts.data ? String(alerts.data.firing ?? alerts.data.active) : '-'} tone={(alerts.data?.firing ?? alerts.data?.active) ? 'red' : alerts.data ? 'green' : ''} color={statusColor('crit')}
+          sub={alerts.data ? <span><span className="c-red">{alerts.data.critical} critical</span> · <span className="c-orange">{warnAlerts} warning</span>{alerts.data.muted ? <span className="dim"> · {alerts.data.muted} muted</span> : null}</span> : alerts.isError ? 'Alertmanager unavailable' : null} to={canOpen('/alerting') ? '/alerting' : undefined} />}
       </div>
 
       <div className="grid ov-top" style={{ marginTop: 14 }}>

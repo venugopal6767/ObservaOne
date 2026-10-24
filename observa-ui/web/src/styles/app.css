@@ -619,3 +619,8 @@ a.list-row:hover, button.list-row:hover { background: var(--accent-soft); text-d
 .ca-labels { display: flex; flex-direction: column; gap: 6px; margin-bottom: 4px; }
 .ca-label-row { display: grid; grid-template-columns: 1fr 1.3fr auto; gap: 6px; }
 .ca-route { margin-top: 2px; padding: 9px 12px; border-radius: 8px; border: 1px dashed var(--border-2); font-size: 13px; display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* one line of server counts by status (Infrastructure, Agents): same words as the status pills */
+.status-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px; margin: 0 0 12px; font-size: 13px; color: var(--muted-text); }
+.status-summary b { color: var(--text); font-weight: 600; }
+.status-summary span { display: inline-flex; align-items: center; gap: 6px; }

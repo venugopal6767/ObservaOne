@@ -233,15 +233,19 @@ has about 200 series.
 
 Every time is the **server's** time of receipt; the agent's clock is never used. Thresholds are set on the server in `.env`.
 
-| Status | Rule | Meaning |
-|---|---|---|
-| **Waiting for first heartbeat** | enrolled, no heartbeat yet | just installed, or it never started |
-| **Online** | heartbeat within `AGENT_ONLINE_SECONDS` (150 s) and no problem | |
-| **Needs attention** | online, but a real problem: a collector failing, uploads failing, an unsupported version (`AGENT_MIN_VERSION`), heartbeats arriving but no metrics | the agent runs; something needs a look |
-| **Not reporting** | no heartbeat for more than 150 s | the agent or the network stopped. **The host may still be up.** Last-seen time shown. |
-| **Offline** | no heartbeat for more than `AGENT_OFFLINE_SECONDS` (900 s) | |
-| **Blocked** | blocked by an admin | heartbeats and uploads refused (403) |
-| (no row) | never enrolled | nothing is invented |
+The UI shows one vocabulary for agents and servers, on Agents, Infrastructure, Overview and Metrics:
+**Up · Down · Not reporting · Offline · Disabled**. "Needs attention" is a flag next to the status, not a status.
+Only an agent that is **Up** shows live CPU / memory / disk; any other status shows "—" and its last-seen time.
+
+| Shown as | Internal status | Rule | Meaning |
+|---|---|---|---|
+| **Not reporting** (waiting for first heartbeat) | `pending` | enrolled, no heartbeat yet | just installed, or it never started |
+| **Up** | `online` | heartbeat within `AGENT_ONLINE_SECONDS` (150 s) and no problem | |
+| **Up** + Needs attention | `attention` | online, but a real problem: a collector failing, uploads failing, an unsupported version (`AGENT_MIN_VERSION`), heartbeats arriving but no metrics | the agent runs; something needs a look |
+| **Not reporting** | `not_reporting` | no heartbeat for more than 150 s | the agent or the network stopped. **The host may still be up.** Last-seen time shown. |
+| **Offline** | `offline` | no heartbeat for more than `AGENT_OFFLINE_SECONDS` (900 s) | |
+| **Disabled** | `blocked` | blocked by an admin | heartbeats and uploads refused (403) |
+| (no row) | | never enrolled | nothing is invented |
 
 One missed heartbeat never changes the status: 150 s is 5 heartbeats. Previous-generation agents have no heartbeat
 and are judged by their last upload.

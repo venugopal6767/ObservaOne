@@ -3,7 +3,8 @@
 // Linux uses the ObservaOne Go agent (enrollment token -> own credential, heartbeats, status rules on the
 // server); Windows, Docker and Kubernetes still use the previous-generation agent (token sent with every upload).
 // Every number comes from /api/agents (the database + Prometheus). A value the agent has not reported shows
-// "-"; an agent that stopped sending heartbeats shows "Not reporting" (the host may still be up).
+// "-". Statuses use the same five words as Infrastructure (lib/status.ts): Up · Down · Not reporting · Offline ·
+// Disabled; "Needs attention" is a flag next to the status. Only an agent that is up shows live CPU / memory / disk.
 import { useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
@@ -15,6 +16,7 @@ import { toneClass } from '@/lib/theme';
 import { useApp, usePlainQuery } from '@/app/AppContext';
 import { ErrorState, Field, InfoBox, Modal, PageHead, Pill, Select, StateBanner, StateView, TableFoot, TableWrap, Tabs, Time, copyText, toast, useDialogs, usePager, type Tone } from '@/components/ui';
 import { StatCard } from '@/components/StatCard';
+import { STATUS_META, asStatus, showsLive, type HostStatus } from '@/lib/status';
 import { AgentManagePanel, FleetSettings, GatewaysPanel } from '@/components/AgentManage';
 
 type Platform = 'linux' | 'windows' | 'docker' | 'kubernetes';
@@ -22,7 +24,7 @@ type Status = 'online' | 'attention' | 'not_reporting' | 'offline' | 'pending' |
 interface Agent {
   id: string; host: string; platform: Platform; os: string; arch: string; version: string; env: string; role: string; cluster: string; ip: string;
   kernel: string; labels: Record<string, string>; token: string | null; enrolled: boolean; enrolledAt: string | null; lastHeartbeat: string | null;
-  lastData: string | null; lastSeen: string | null; bootTime: string | null; status: Status; statusReason: string; problems: string[];
+  lastData: string | null; lastSeen: string | null; bootTime: string | null; status: Status; hostStatus?: HostStatus; needsAttention?: boolean; statusReason: string; problems: string[];
   outdated: boolean; cpu: number | null; mem: number | null; diskFree: number | null;
   mode: 'push' | 'pull' | null; address: string | null; addresses: string[]; gatewayId?: string | null; tenant?: string;
   pull: { port: number | null; ips: string[]; dns: string[]; listening: boolean | null; scrapes: number | null; lastScrapeAgoSeconds: number | null; certNotAfter: string | null; refused: number | null; error: string } | null;
@@ -51,10 +53,10 @@ const PLATFORMS: Record<Platform, { label: string; Icon: typeof Server; support:
   kubernetes: { label: 'Kubernetes', Icon: Boxes, support: 'previous', desc: 'Every node, pod and cluster event; also OpenShift, EKS, AKS, GKE. Uses the previous-generation agent for now.' },
 };
 const PLATFORM_KEYS = Object.keys(PLATFORMS) as Platform[];
-const STATUS: Record<Status, [string, Tone]> = {
-  online: ['Online', 'solid-green'], attention: ['Needs attention', 'solid-orange'], not_reporting: ['Not reporting', 'stale'],
-  offline: ['Offline', 'solid-red'], pending: ['Waiting for first heartbeat', 'muted'], blocked: ['Blocked', 'muted'],
-};
+// agent status (server, health.js agentStatus) -> the shared host status; the server sends it as hostStatus
+const HOST_OF: Record<Status, HostStatus> = { online: 'up', attention: 'up', not_reporting: 'not_reporting', offline: 'offline', pending: 'not_reporting', blocked: 'disabled' };
+const hostStatusOf = (a: Pick<Agent, 'status' | 'hostStatus'>): HostStatus => asStatus(a.hostStatus ?? HOST_OF[a.status]);
+const needsAttention = (a: Agent) => a.needsAttention ?? (a.status === 'attention' || a.outdated);
 const DISTROS: Record<string, [string, string]> = {
   debian: ['Ubuntu / Debian', 'sudo apt-get update && sudo apt-get install -y curl'],
   rhel: ['RHEL / Rocky / AlmaLinux / CentOS Stream', 'sudo dnf install -y curl'],
@@ -62,21 +64,25 @@ const DISTROS: Record<string, [string, string]> = {
   suse: ['SUSE / openSUSE', 'sudo zypper install -y curl'],
 };
 type TabKey = 'overview' | Platform | 'settings' | 'gateways' | 'tokens';
-type StatusFilter = 'all' | Status;
+type StatusFilter = 'all' | HostStatus | 'attention';
 
-const counts = (list: Agent[]) => ({
-  total: list.length,
-  online: list.filter((a) => a.status === 'online' || a.status === 'attention').length,
-  attention: list.filter((a) => a.status === 'attention' || a.status === 'blocked' || a.outdated).length,
-  notReporting: list.filter((a) => a.status === 'not_reporting').length,
-  offline: list.filter((a) => a.status === 'offline').length,
-  pending: list.filter((a) => a.status === 'pending').length,
-});
-const secs = (s?: number) => (!s ? '-' : s < 120 ? `${s} s` : `${Math.round(s / 60)} min`);
-const StatusPill = ({ a }: { a: Pick<Agent, 'status' | 'statusReason'> }) => {
-  const [label, tone] = STATUS[a.status] || [a.status, 'muted'];
-  return <Pill tone={tone} title={a.statusReason || label}>{label}</Pill>;
+const counts = (list: Agent[]) => {
+  const n = (s: HostStatus) => list.filter((a) => hostStatusOf(a) === s).length;
+  return {
+    total: list.length, up: n('up'), down: n('down'), notReporting: n('not_reporting'), offline: n('offline'), disabled: n('disabled'),
+    attention: list.filter(needsAttention).length,
+    pending: list.filter((a) => a.status === 'pending').length,
+  };
 };
+const secs = (s?: number) => (!s ? '-' : s < 120 ? `${s} s` : `${Math.round(s / 60)} min`);
+const StatusPill = ({ a }: { a: Pick<Agent, 'status' | 'hostStatus' | 'statusReason'> }) => {
+  const m = STATUS_META[hostStatusOf(a)];
+  return <Pill tone={m.tone} title={a.statusReason || m.hint}>{m.label}</Pill>;
+};
+/** CPU / memory / disk cell: live only while the agent is up, otherwise "—" (last seen is in its own column) */
+const LiveCell = ({ a, v, higherIsWorse = true }: { a: Agent; v: number | null; higherIsWorse?: boolean }) => (showsLive(hostStatusOf(a))
+  ? <td className={`num ${toneClass(v, higherIsWorse)}`}>{fmt(v, 'percent')}</td>
+  : <td className="num dim" title={`${STATUS_META[hostStatusOf(a)].label}${a.lastSeen ? `, last seen ${ago(a.lastSeen)}` : ''}: no live value`}>—</td>);
 
 export default function Agents() {
   const { can } = useApp();
@@ -121,12 +127,13 @@ export default function Agents() {
 function StatCards({ list, data, onFilter, sub }: { list: Agent[]; data: AgentsData; onFilter: (f: StatusFilter) => void; sub?: string }) {
   const c = counts(list), t = data.thresholds || {} as AgentsData['thresholds'];
   return (
-    <div className="grid cards-5" style={{ marginBottom: 16 }}>
-      <StatCard label="Agents" value={c.total} onClick={() => onFilter('all')} extra={<div className="dim tile-sub">{sub || (c.pending ? `${c.pending} waiting for first heartbeat` : 'enrolled')}</div>} />
-      <StatCard label="Online" value={c.online} tone={c.online ? 'green' : ''} onClick={() => onFilter('online')} extra={<div className="dim tile-sub">heartbeat in the last {secs(t.onlineSeconds)}</div>} />
-      <StatCard label="Not reporting" value={c.notReporting} tone={c.notReporting ? 'orange' : ''} onClick={() => onFilter('not_reporting')} extra={<div className="dim tile-sub">{c.notReporting ? 'silent; the host may still be up' : 'none'}</div>} />
+    <div className="grid cards-6" style={{ marginBottom: 16 }}>
+      <StatCard label="Agents" value={c.total} onClick={() => onFilter('all')} extra={<div className="dim tile-sub">{sub || 'enrolled'}</div>} />
+      <StatCard label="Up" value={c.up} tone={c.up ? 'green' : ''} onClick={() => onFilter('up')} extra={<div className="dim tile-sub">heartbeat in the last {secs(t.onlineSeconds)}</div>} />
+      <StatCard label="Not reporting" value={c.notReporting} tone={c.notReporting ? 'orange' : ''} onClick={() => onFilter('not_reporting')} extra={<div className="dim tile-sub">{c.pending ? `${c.pending} waiting for first heartbeat` : c.notReporting ? 'silent; the host may still be up' : 'none'}</div>} />
       <StatCard label="Offline" value={c.offline} tone={c.offline ? 'red' : ''} onClick={() => onFilter('offline')} extra={<div className="dim tile-sub">silent for more than {secs(t.offlineSeconds)}</div>} />
-      <StatCard label="Needs attention" value={c.attention} tone={c.attention ? 'orange' : ''} onClick={() => onFilter('attention')} extra={<div className="dim tile-sub">problems, outdated or blocked</div>} />
+      <StatCard label="Disabled" value={c.disabled} onClick={() => onFilter('disabled')} extra={<div className="dim tile-sub">blocked: data refused</div>} />
+      <StatCard label="Needs attention" value={c.attention} tone={c.attention ? 'orange' : ''} onClick={() => onFilter('attention')} extra={<div className="dim tile-sub">problems or outdated</div>} />
     </div>
   );
 }
@@ -143,7 +150,7 @@ function Overview({ data, canManage, go }: { data: AgentsData; canManage: boolea
             <button key={p} className="panel platform-card" onClick={() => go(p, c.total ? 'agents' : canManage ? 'install' : 'agents')}>
               <div className="platform-card-head"><m.Icon size={18} /><b>{m.label}</b><span className="grow" /><Pill tone={SUPPORT[m.support][1]} title={SUPPORT[m.support][2]}>{SUPPORT[m.support][0]}</Pill></div>
               {c.total ? (
-                <div className="platform-card-counts"><span className="c-green">{c.online} online</span>{c.notReporting > 0 && <span className="c-orange">{c.notReporting} not reporting</span>}{c.offline > 0 && <span className="c-red">{c.offline} offline</span>}<span className="dim">of {c.total}</span></div>
+                <div className="platform-card-counts"><span className="c-green">{c.up} up</span>{c.down > 0 && <span className="c-red">{c.down} down</span>}{c.notReporting > 0 && <span className="c-orange">{c.notReporting} not reporting</span>}{c.offline > 0 && <span className="c-red">{c.offline} offline</span>}{c.disabled > 0 && <span className="dim">{c.disabled} disabled</span>}<span className="dim">of {c.total}</span></div>
               ) : <div className="dim">{canManage ? 'No agents yet. Install one.' : 'No agents yet.'}</div>}
             </button>
           );
@@ -193,7 +200,7 @@ function Fleet({ agents, data, canManage, showPlatform, platform, status, setSta
   };
   const list = useMemo(() => {
     const f = filter.toLowerCase();
-    const match = (a: Agent) => status === 'all' || a.status === status || (status === 'online' && a.status === 'attention') || (status === 'attention' && (a.status === 'blocked' || a.outdated));
+    const match = (a: Agent) => status === 'all' || (status === 'attention' ? needsAttention(a) : hostStatusOf(a) === status);
     return agents.filter((a) => match(a) && (!f || [a.host, a.os, a.env, a.role, a.ip, a.cluster, a.version, a.id, ...Object.entries(a.labels || {}).map(([k, v]) => `${k}=${v}`)].join(' ').toLowerCase().includes(f)));
   }, [agents, filter, status]);
   const pager = usePager(list, 50, `${filter}|${status}`);
@@ -209,7 +216,7 @@ function Fleet({ agents, data, canManage, showPlatform, platform, status, setSta
       <div className="toolbar" style={{ marginBottom: 12 }}>
         <input className="input" type="search" placeholder="Filter: host, env, label, version, IP..." aria-label="Filter agents" style={{ width: 300, maxWidth: '100%' }} value={filter} onChange={(e) => setFilter(e.target.value)} />
         <Select className="select" label="Filter by status" style={{ width: 190 }} value={status} onChange={setStatus}
-          options={[['all', 'All statuses'], ['online', 'Online'], ['attention', 'Needs attention'], ['not_reporting', 'Not reporting'], ['offline', 'Offline'], ['pending', 'Waiting'], ['blocked', 'Blocked']]} />
+          options={[['all', 'All statuses'], ...(['up', 'down', 'not_reporting', 'offline', 'disabled'] as HostStatus[]).map((k) => [k, STATUS_META[k].label] as [StatusFilter, string]), ['attention', 'Needs attention']]} />
         <div className="grow" />
         <span className="dim" style={{ fontSize: 12 }}>Latest agent: {data.latest}</span>
       </div>
@@ -217,7 +224,7 @@ function Fleet({ agents, data, canManage, showPlatform, platform, status, setSta
         <table className="tbl">
           <thead><tr>
             <th>Host</th>{showPlatform && <th>Platform</th>}<th>Status</th><th>Labels</th><th>Version</th>
-            <th className="num">CPU</th><th className="num">Memory</th><th className="num">Disk free</th><th>Last heartbeat</th><th />
+            <th className="num">CPU</th><th className="num">Memory</th><th className="num">Disk free</th><th>Last seen</th><th />
           </tr></thead>
           <tbody>
             {pager.rows.length ? pager.rows.map((a) => (
@@ -226,12 +233,12 @@ function Fleet({ agents, data, canManage, showPlatform, platform, status, setSta
                 {showPlatform && <td>{PLATFORMS[a.platform]?.label || a.platform}</td>}
                 <td><StatusPill a={a} />{a.diagnosis && a.diagnosis.severity !== 'ok' && a.diagnosis.code !== 'rebooted'
                   ? <div className={a.diagnosis.severity === 'critical' ? 'c-red' : a.diagnosis.severity === 'warning' ? 'c-orange' : 'dim'} style={{ fontSize: 11, marginTop: 3, maxWidth: 260 }} title={a.diagnosis.detail}>{a.diagnosis.title}</div>
-                  : a.problems?.length > 0 && a.status !== 'not_reporting' && a.status !== 'offline' && <div className="c-orange" style={{ fontSize: 11, marginTop: 3, maxWidth: 260 }}>{a.problems[0]}</div>}</td>
+                  : a.problems?.length > 0 && showsLive(hostStatusOf(a)) ? <div className="c-orange" style={{ fontSize: 11, marginTop: 3, maxWidth: 260 }}>{a.problems[0]}</div>
+                  : a.status === 'pending' ? <div className="dim" style={{ fontSize: 11, marginTop: 3 }}>waiting for first heartbeat</div>
+                  : !showsLive(hostStatusOf(a)) && a.lastSeen ? <div className="dim" style={{ fontSize: 11, marginTop: 3 }}>last seen {ago(a.lastSeen)}</div> : null}</td>
                 <td>{labelsOf(a).length ? <div className="label-chips">{labelsOf(a).slice(0, 4).map((l) => <span key={l} className="chip">{l}</span>)}</div> : <span className="dim">-</span>}</td>
                 <td>{a.version ? (a.outdated ? <Pill tone="orange" title={`Latest is ${a.platform === 'linux' ? data.latest : data.latestPrevious}. Run the installer again to update.`}>{a.version} ↑</Pill> : a.version) : '-'}</td>
-                <td className={`num ${toneClass(a.cpu)}`}>{fmt(a.cpu, 'percent')}</td>
-                <td className={`num ${toneClass(a.mem)}`}>{fmt(a.mem, 'percent')}</td>
-                <td className={`num ${toneClass(a.diskFree, false)}`}>{fmt(a.diskFree, 'percent')}</td>
+                <LiveCell a={a} v={a.cpu} /><LiveCell a={a} v={a.mem} /><LiveCell a={a} v={a.diskFree} higherIsWorse={false} />
                 <td className="dim">{a.lastSeen ? <Time ms={Date.parse(a.lastSeen)} text={ago(a.lastSeen)} /> : 'never'}</td>
                 <td className="num" style={{ whiteSpace: 'nowrap' }}>
                   {canManage && (a.status === 'blocked'
@@ -239,7 +246,7 @@ function Fleet({ agents, data, canManage, showPlatform, platform, status, setSta
                     : <button className="btn btn-sm" title="Refuse everything this agent sends" onClick={async () => {
                       if (await confirm(`Block ${a.host}?`, 'The agent keeps running but ObservaOne refuses its heartbeats and data until you allow it again.', 'Block')) act(`/agents/${encodeURIComponent(a.id)}/block`, 'POST', `${a.host} blocked`);
                     }}>Block</button>)}
-                  {canManage && (a.enrolled || (a.status !== 'online' && a.status !== 'attention')) && <button className="icon-btn" title="Remove this agent" aria-label={`Remove ${a.host}`} style={{ marginLeft: 4 }} onClick={async () => {
+                  {canManage && (a.enrolled || !showsLive(hostStatusOf(a))) && <button className="icon-btn" title="Remove this agent" aria-label={`Remove ${a.host}`} style={{ marginLeft: 4 }} onClick={async () => {
                     if (a.enrolled) { open((close) => <RemoveAgentDialog a={a} onClose={close} onDone={() => qc.invalidateQueries({ queryKey: ['agents'] })} />); return; }
                     if (await confirm(`Remove ${a.host}?`, 'Removes it from this list. A previous-generation agent that still has a valid token comes back when it next sends data.', 'Remove')) act(`/agents/${encodeURIComponent(a.id)}`, 'DELETE', `${a.host} removed`);
                   }}><Trash2 size={15} /></button>}
@@ -323,7 +330,9 @@ function AgentDetail({ id, host, canManage, onClose }: { id: string; host: strin
               <dl className="kv">
                 {row('Last heartbeat', d.enrolled ? when(d.lastHeartbeat) : <span className="dim">Not sent by the previous-generation agent; status comes from its last data</span>)}
                 {row('Last data', when(d.lastData))}{d.enrolled && row('Host booted', when(d.bootTime))}
-                {row('CPU', fmt(d.cpu, 'percent'))}{row('Memory', fmt(d.mem, 'percent'))}{row('Lowest disk free', fmt(d.diskFree, 'percent'))}
+                {showsLive(hostStatusOf(d))
+                  ? <>{row('CPU', fmt(d.cpu, 'percent'))}{row('Memory', fmt(d.mem, 'percent'))}{row('Lowest disk free', fmt(d.diskFree, 'percent'))}</>
+                  : row('Live values', <span className="dim">— ({STATUS_META[hostStatusOf(d)].label.toLowerCase()}{d.lastSeen ? `, last seen ${ago(d.lastSeen)}` : ''})</span>)}
                 {d.enrolled && row('Upload failures', d.diag?.uploadFailures != null ? String(d.diag.uploadFailures) : null)}
                 {d.enrolled && (d.diag?.diskBuffered ?? 0) > 0 && row('Disk buffer', `${d.diag!.diskBuffered} collections waiting`)}
                 {d.enrolled && row('Agent error', d.diag?.lastError || null)}

@@ -14,6 +14,7 @@ import { requirePerm, httpError } from '../auth.js';
 import { prom, am } from '../datasources.js';
 import { currentTenant } from '../tenancy.js';
 import { alertKey, splitThreshold, unitOf, resourceOf, tenantSql, episodeRows } from '../alerting.js';
+import { dedupeOpenEpisodes } from '../health.js';
 
 const thresholdCache = new Map(); // rule expression -> has a numeric threshold (a value worth showing)
 const hasThreshold = (expr) => { if (!thresholdCache.has(expr)) { if (thresholdCache.size > 2000) thresholdCache.clear(); thresholdCache.set(expr, !!splitThreshold(expr)); } return thresholdCache.get(expr); };
@@ -63,16 +64,46 @@ alertingRouter.get('/alerts/list', wrap(async (req, res) => {
   if (req.query.severity) { params.push(String(req.query.severity)); where += ` AND severity = $${params.length}`; }
   if (req.query.env) { params.push(String(req.query.env)); where += ` AND labels->>'env' = $${params.length}`; }
   if (req.query.q) { params.push(`%${String(req.query.q).toLowerCase()}%`); where += ` AND (lower(alertname) LIKE $${params.length} OR lower(host) LIKE $${params.length} OR lower(labels::text) LIKE $${params.length})`; }
-  const [rows, amMap] = await Promise.all([episodeRows(where, params), amStatus()]);
+  const [rows0, amMap] = await Promise.all([episodeRows(where, params), amStatus()]);
+  const rows = dedupeOpenEpisodes(rows0); // one row per alert (rules in health.js)
   const list = rows.map((e) => toRow(e, amMap));
   const rank = { firing: 0, pending: 1, resolved: 2 }, sev = { critical: 0, warning: 1, info: 2 };
   list.sort((a, b) => rank[a.state] - rank[b.state] || (sev[a.severity] ?? 3) - (sev[b.severity] ?? 3) || b.activeAt.localeCompare(a.activeAt));
   // counts for the tabs (active ones + resolved in the range), tenant-scoped like the list
-  const inRange = await episodeRows(`${tenantSql(1)} AND (resolved_at IS NULL OR resolved_at BETWEEN $2 AND $3)`, params.slice(0, 3), 5000);
+  const inRange = dedupeOpenEpisodes(await episodeRows(`${tenantSql(1)} AND (resolved_at IS NULL OR resolved_at BETWEEN $2 AND $3)`, params.slice(0, 3), 5000));
   const c = inRange.reduce((acc, e) => { acc[e.resolved_at ? 'resolved' : e.state]++; return acc; }, { firing: 0, pending: 0, resolved: 0 });
   const envs = [...new Set(inRange.map((e) => e.labels?.env).filter(Boolean))].sort(); // the Environment filter's choices
   res.json({ alerts: list, counts: { ...c, all: c.firing + c.pending + c.resolved }, envs, alertmanager: amMap !== null });
 }));
+
+// The alert counts every page shows (Overview, Metrics, the bell, Alerting): open episodes from the tracker,
+// tenant-scoped and de-duplicated exactly like /alerts/list, so the numbers match the list.
+//   firing   firing now (muted ones included: they are still firing)   critical / warning: of the firing ones
+//   muted    firing but silenced or inhibited (no notification)         pending: true, not yet for their duration
+// "active" = firing, kept for older clients. Database down: Alertmanager's view (firing only) is used instead.
+export async function alertCounts() {
+  const t = currentTenant();
+  try {
+    const [rows, amMap] = await Promise.all([episodeRows(`${tenantSql(1)} AND resolved_at IS NULL`, [t], 5000), amStatus()]);
+    const list = dedupeOpenEpisodes(rows).map((e) => toRow(e, amMap));
+    return countAlerts(list, amMap !== null);
+  } catch {
+    const mine = (a) => t === 't_default' || a.labels?.tenant === t;
+    const all = (await am('/api/v2/alerts?active=true')).filter(mine);
+    const list = all.map((a) => ({ state: 'firing', severity: a.labels.severity || 'none', silenced: a.status.silencedBy?.length > 0, inhibited: a.status.inhibitedBy?.length > 0 }));
+    return countAlerts(list, true);
+  }
+}
+export function countAlerts(list, alertmanager = true) {
+  const firing = list.filter((a) => a.state === 'firing');
+  const n = firing.length;
+  return {
+    firing: n, active: n, pending: list.filter((a) => a.state === 'pending').length,
+    critical: firing.filter((a) => a.severity === 'critical').length,
+    warning: firing.filter((a) => a.severity === 'warning').length,
+    muted: alertmanager ? firing.filter((a) => a.silenced || a.inhibited).length : null,
+  };
+}
 
 // Links in Slack / Teams / email point here: Alertmanager knows the alert's labels and start time, not our id.
 alertingRouter.get('/alerts/find', wrap(async (req, res) => {

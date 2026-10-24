@@ -7,6 +7,7 @@ import { thresholdColor, statusColor } from '@/lib/theme';
 import { useApp, useRangeQuery } from '@/app/AppContext';
 import { ErrorState, PageHead, Panel, Pill, Skeleton, StateView } from '@/components/ui';
 import { StatCard, Reason } from '@/components/StatCard';
+import { STATUS_META, statusParts, type StatusCounts } from '@/lib/status';
 import { BarChart, Doughnut, LegendRow, TimeChart } from '@/components/charts';
 
 interface SvcSummary { total: number; healthy: number; degraded: number; down: number; noTraffic: number; totalRps: number; errorRate: number | null }
@@ -16,8 +17,10 @@ interface OverviewData {
   mem: { now: number | null; before: number | null; error: string | null };
   cpuByHost: { host: string; value: number }[]; cpuByHostError: string | null;
   memSeries: PromMatrix; memError: string | null;
-  servers: { total: number | null; down: number | null; error: string | null };
-  alerts: { active: number | null; critical: number | null; error: string | null };
+  // same list as Infrastructure and same words (lib/status.ts); null = unknown (the query failed)
+  servers: ({ [K in keyof StatusCounts]: number | null }) & { error: string | null };
+  // same counts as the bell and Alerting (server: routes/alerting.js alertCounts)
+  alerts: { firing: number | null; active: number | null; critical: number | null; warning: number | null; muted: number | null; error: string | null };
   services: { summary: SvcSummary } | null; servicesError: string | null;
   rpsSeries: { result: PromMatrix } | null; rpsError: string | null;
   latSeries: { result: PromMatrix } | null; latError: string | null;
@@ -58,10 +61,14 @@ export default function Overview() {
 
   const tiles: React.ReactNode[] = [];
   if (M.services) tiles.push(
-    <StatCard key="svc" label="Total Services" value={s ? String(s.total) : '-'} onClick={canOpen('/services') ? () => navigate('/services') : undefined}
-      extra={svcReason || (!M.infrastructure ? null : d.servers.total === null
-        ? <Reason text={`Servers: ${d.servers.error || 'unknown'}`} />
-        : <div className="muted tile-sub">{d.servers.total} servers monitored{d.servers.down ? <span className="c-red"> · {d.servers.down} down</span> : null}</div>)} />,
+    <StatCard key="svc" label="Services" value={s ? String(s.total) : '-'} onClick={canOpen('/services') ? () => navigate('/services') : undefined}
+      extra={svcReason} />,
+  );
+  const sv = d.servers;
+  if (M.infrastructure) tiles.push(
+    <StatCard key="srv" label="Servers" value={sv.total === null ? '-' : String(sv.total)} tone={sv.down ? 'red' : ''} onClick={canOpen('/infrastructure') ? () => navigate('/infrastructure') : undefined}
+      extra={sv.total === null ? <Reason text={`Unavailable: ${sv.error || 'unknown'}`} />
+        : <div className="muted tile-sub">{statusParts(sv as StatusCounts).map(([k, n], i) => <span key={k} className={k === 'down' || k === 'offline' ? 'c-red' : undefined}>{i ? ' · ' : ''}{n} {STATUS_META[k].label.toLowerCase()}</span>)}</div>} />,
   );
   if (M.infrastructure) tiles.push(
     <StatCard key="cpu" label="CPU Usage" value={d.cpu.now === null ? '-' : d.cpu.now.toFixed(1)} unit={d.cpu.now === null ? '' : '%'} trend={pts(d.cpu.now, d.cpu.before)} trendUnit="pts" trendTitle="Change in percentage points vs 1 hour ago"
@@ -79,9 +86,9 @@ export default function Overview() {
   );
   if (M.alerting) tiles.push(
     // grey when unknown: an unreachable Alertmanager must not look like "no alerts"
-    <StatCard key="al" label="Active Alerts" value={d.alerts.active === null ? '-' : String(d.alerts.active)} bell
-      tone={d.alerts.active === null ? '' : d.alerts.active ? 'red' : 'green'} onClick={canOpen('/alerting') ? () => navigate('/alerting') : undefined}
-      extra={d.alerts.error ? <Reason text={`Alertmanager unavailable: ${d.alerts.error}`} /> : <div className="muted tile-sub">{d.alerts.critical} critical</div>} />,
+    <StatCard key="al" label="Firing alerts" value={d.alerts.firing === null ? '-' : String(d.alerts.firing)} bell
+      tone={d.alerts.firing === null ? '' : d.alerts.firing ? 'red' : 'green'} onClick={canOpen('/alerting') ? () => navigate('/alerting/active?tab=firing') : undefined}
+      extra={d.alerts.error ? <Reason text={`Alerts unavailable: ${d.alerts.error}`} /> : <div className="muted tile-sub">{d.alerts.critical} critical{d.alerts.muted ? ` · ${d.alerts.muted} muted` : ''}</div>} />,
   );
 
   const seriesPanel = (title: string, s2: { result: PromMatrix } | null, errMsg: string | null, unit: string) => {

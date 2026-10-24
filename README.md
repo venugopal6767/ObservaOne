@@ -151,7 +151,7 @@ The Linux agent is documented in full in **[docs/agent/LINUX-AGENT.md](docs/agen
 **Install (Linux)**
 1. ObservaOne → **Agents → Linux → Install**, then **Create a token** (choose how long it is valid and how many servers may use it).
 2. Run the two lines shown on the page on the server. The one-use token is already in the command (it expires and is worthless once used); for automation use `--token-file` instead.
-3. The server shows up under **Agents → Linux** within a minute (status **Online**), and in Infrastructure, Overview and Dashboards.
+3. The server shows up under **Agents → Linux** within a minute (status **Up**), and in Infrastructure, Overview and Dashboards.
 
 ```bash
 curl -fsSL https://monitor.example.local/agent/install.sh -o observaone-install.sh

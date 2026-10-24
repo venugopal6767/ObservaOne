@@ -6,7 +6,7 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { Copy, Search } from 'lucide-react';
 import { api, type PromMatrix } from '@/lib/api';
 import { buildQuery, metricById } from '@/lib/catalog';
-import { dateTimeZ, escapeLabel, fmt, timeHM } from '@/lib/format';
+import { changeOf, changeText, dateTimeZ, escapeLabel, fmt, timeHM } from '@/lib/format';
 import { color, toneClass } from '@/lib/theme';
 import { useApp } from '@/app/AppContext';
 import { useQuery } from '@tanstack/react-query';
@@ -57,7 +57,7 @@ export default function InvestigatePage() {
   const pts = cur?.values || [];
   const oldPts = (old?.values || []).map(([x, v]) => [x + 86400, v] as [number, string]);
   const value = near(pts, t), before = near(oldPts, t);
-  const delta = value !== null && before ? ((value - before) / Math.abs(before)) * 100 : null;
+  const delta = changeOf(value, before, unit); // points for percentages; none when meaningless (format.ts)
   const level = def && value !== null ? (def.lowerIsWorse ? (value <= def.crit! ? 2 : value <= def.warn! ? 1 : 0) : (def.crit !== undefined && value >= def.crit ? 2 : def.warn !== undefined && value >= def.warn ? 1 : 0)) : 0;
   const target = host || service || line || 'all';
   const ctx: InvestigateCtx = { t: t * 1000, values: [{ label: target, color: '', value }], unit, query, metric: def?.id, filters: host ? { host } : service ? { service } : {}, hint: { host, service } };
@@ -93,7 +93,7 @@ export default function InvestigatePage() {
               </div>
               <div className="inv-facts">
                 <div><div className="field-label">Value</div><div className={`big-num ${level === 2 ? 'c-red' : level === 1 ? 'c-orange' : toneClass(null)}`}>{fmt(value, unit)}</div>
-                  {delta !== null && Number.isFinite(delta) && <span className={`trend ${delta > 0 ? 'bad' : 'up'}`}>{delta > 0 ? '▲' : '▼'} {Math.abs(delta).toFixed(1)}% vs yesterday</span>}</div>
+                  {delta && <span className={`trend ${Math.abs(delta.value) < 0.5 ? 'flat' : delta.value > 0 ? 'bad' : 'up'}`}>{changeText(delta)} vs yesterday</span>}</div>
                 <div><div className="field-label">Status</div>{level === 2 ? <span className="sev critical"><i />Critical</span> : level === 1 ? <span className="sev warning"><i />Warning</span> : <span className="sev ok"><i />Normal</span>}</div>
                 <div><div className="field-label">Threshold</div>{def?.warn !== undefined ? <span>{fmt(def.warn, unit)} warning{def.crit !== undefined && def.crit !== def.warn ? ` · ${fmt(def.crit, unit)} critical` : ''}</span> : <span className="dim">none set</span>}</div>
                 <div><div className="field-label">Time</div><span>{dateTimeZ(t * 1000).slice(0, 19)}</span></div>

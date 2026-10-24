@@ -87,9 +87,27 @@ export function shortLabel(l: string): string {
   const m = /\{(.*)\}/.exec(l);
   return m ? m[1].split(', ').map((x) => x.split('=')[1]?.replace(/"/g, '')).join(' / ') : l;
 }
+// ---------------- change badges ----------------
+// A badge is shown only when it means something:
+//   - a value that is already a percentage (CPU, memory, disk) changes in percentage points: 27% vs 1.6% = +25.4 pts
+//   - anything else changes relatively, but only from a base that is not ~0 and only up to ±MAX_REL_CHANGE:
+//     "▲ 24770.3%" (traffic that started from almost nothing) says nothing, so no badge is drawn.
+export const MAX_REL_CHANGE = 500;
+export interface Change { value: number; unit: 'pts' | '%' }
+export function changeOf(now: number | null | undefined, before: number | null | undefined, unit: Unit | string = 'none'): Change | null {
+  if (now === null || now === undefined || before === null || before === undefined || !Number.isFinite(now) || !Number.isFinite(before)) return null;
+  if (unit === 'percent') return { value: now - before, unit: 'pts' };
+  if (Math.abs(before) < 1e-9) return null;
+  const value = ((now - before) / Math.abs(before)) * 100;
+  return Math.abs(value) > MAX_REL_CHANGE ? null : { value, unit: '%' };
+}
+export function changeText(c: Change, d = 1): string {
+  return `${c.value > 0 ? '▲' : c.value < 0 ? '▼' : ''} ${Math.abs(c.value).toFixed(d)}${c.unit === 'pts' ? ' pts' : '%'}`.trim();
+}
+/** relative change in %, or null when it would be meaningless (see changeOf) */
 export function pctChange(now: number | null, before: number | null): number | null {
-  if (now === null || before === null || before === undefined || !Number.isFinite(before) || before === 0) return null;
-  return ((now - before) / Math.abs(before)) * 100;
+  const c = changeOf(now, before, 'none');
+  return c ? c.value : null;
 }
 export function browserName(ua = ''): string {
   const b = /Edg\//.test(ua) ? 'Edge' : /Chrome\//.test(ua) ? 'Chrome' : /Firefox\//.test(ua) ? 'Firefox' : /Safari\//.test(ua) ? 'Safari' : (ua.split(' ')[0] || 'Unknown');

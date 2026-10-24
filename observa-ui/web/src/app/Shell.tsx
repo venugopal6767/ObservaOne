@@ -60,7 +60,7 @@ export function Shell({ children }: { children: ReactNode }) {
   // ---- alert bell (Alerting module only), polled every 30 s ----
   const bell = useQuery({
     queryKey: ['alerts-count'],
-    queryFn: () => api<{ active: number; critical: number }>('/alerts/count'),
+    queryFn: () => api<{ firing?: number; active: number; critical: number }>('/alerts/count'),
     enabled: moduleOn('alerting'),
     refetchInterval: 30_000,
     retry: false,
@@ -93,7 +93,7 @@ export function Shell({ children }: { children: ReactNode }) {
             options={REFRESH.map(([ms, l]) => [ms, ms ? `↻ ${l}` : '↻ Off'] as [number, string])} onChange={setRefreshMs} disabled={range.kind === 'absolute'} />
         </div>
         {moduleOn('alerting') && (
-          <button className="icon-btn" title={bell.data ? `${bell.data.active} active alert(s), ${bell.data.critical} critical` : 'Active alerts'} aria-label="Active alerts" onClick={() => navigate('/alerting/active?tab=firing')}>
+          <button className="icon-btn" title={bell.data ? `${bell.data.firing ?? bell.data.active} firing alert(s), ${bell.data.critical} critical` : 'Firing alerts'} aria-label="Firing alerts" onClick={() => navigate('/alerting/active?tab=firing')}>
             <Bell size={17} />
             {!!bell.data?.active && <span className={`count ${bell.data.critical ? '' : 'warn'}`}>{bell.data.active > 99 ? '99+' : bell.data.active}</span>}
           </button>

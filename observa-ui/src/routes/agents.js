@@ -4,7 +4,7 @@ import express from 'express';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
 import { config } from '../config.js';
-import { compareVersions } from '../health.js';
+import { compareVersions, hostStatusOfAgent, showsLiveValues } from '../health.js';
 import { q, one, tx } from '../db.js';
 import { audit } from '../store.js';
 import { sha256, randomToken } from '../secrets.js';
@@ -153,14 +153,18 @@ function toAgent(a, now, m) {
   const d = describeAgent(a, now);
   const enrolled = !!a.credential_hash;
   const lastData = a.last_seen && (!a.enrolled_at || new Date(a.last_seen) - new Date(a.enrolled_at) > 1000) ? a.last_seen : null;
-  const get = (map) => (map && map.get(a.host)) ?? null;
+  // live values only while the agent is up: an offline / silent agent shows "—" and its last-seen time
+  const hostStatus = hostStatusOfAgent(d.status);
+  const live = showsLiveValues(hostStatus);
+  const get = (map) => (live && map && map.get(a.host)) ?? null;
   return {
     id: a.id, host: a.host, platform: a.platform, os: a.os, arch: a.arch, version: a.version, env: a.env, role: a.role,
     cluster: a.cluster, ip: a.ip, kernel: a.kernel || '', labels: a.labels || {}, token: a.token_name || null,
     enrolled, enrolledAt: a.enrolled_at || null, firstSeen: a.first_seen,
     lastHeartbeat: a.last_heartbeat || null, lastData, lastSeen: a.last_heartbeat || lastData || null,
     bootTime: a.boot_time || null,
-    status: d.status, statusReason: d.reason, problems: d.problems, secondsAgo: d.ageSeconds,
+    status: d.status, hostStatus, needsAttention: d.status === 'attention' || (!!a.version && compareVersions(a.version, a.platform === 'linux' ? AGENT_VERSIONS.agent : AGENT_VERSIONS.previous) < 0),
+    statusReason: d.reason, problems: d.problems, secondsAgo: d.ageSeconds,
     // the Go agent (Linux) is compared with its latest release; previous-generation agents (Windows, Docker,
     // Kubernetes) have their own version line (1.0.x), so 1.0.0 there is current, not outdated
     outdated: !!a.version && compareVersions(a.version, a.platform === 'linux' ? AGENT_VERSIONS.agent : AGENT_VERSIONS.previous) < 0,
@@ -211,6 +215,8 @@ agentsRouter.get('/agents', requirePerm('view'), wrap(async (req, res) => {
     agents,
     summary: {
       total: agents.length,
+      up: agents.filter((a) => a.hostStatus === 'up').length, // same words as Infrastructure (health.js)
+      disabled: agents.filter((a) => a.hostStatus === 'disabled').length,
       online: count('online') + count('attention'),      // sending heartbeats (attention = online with a problem)
       attention: count('attention'),
       notReporting: count('not_reporting'),
