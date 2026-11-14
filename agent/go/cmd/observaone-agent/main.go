@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"observaone/agent/internal/agent"
+	"observaone/agent/internal/collector/database"
 	"observaone/agent/internal/collector/linux"
 	"observaone/agent/internal/core"
 )
@@ -151,7 +152,7 @@ func checkCredential(cfgPath string) int {
 }
 
 func diagnostics(cfgPath string, log *slog.Logger) error {
-	a := &agent.Agent{Version: version, ConfigPath: cfgPath, Collectors: linux.All(), Log: log}
+	a := &agent.Agent{Version: version, ConfigPath: cfgPath, Collectors: append(linux.All(), database.New()), Log: log}
 	if err := a.Load(); err != nil {
 		return err
 	}
@@ -163,7 +164,7 @@ func diagnostics(cfgPath string, log *slog.Logger) error {
 }
 
 func run(cfgPath string, log *slog.Logger, ring *core.LogRing) error {
-	a := &agent.Agent{Version: version, ConfigPath: cfgPath, Collectors: linux.All(), Log: log, LogRing: ring}
+	a := &agent.Agent{Version: version, ConfigPath: cfgPath, Collectors: append(linux.All(), database.New()), Log: log, LogRing: ring}
 	if err := a.Load(); err != nil {
 		return err
 	}

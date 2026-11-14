@@ -81,6 +81,7 @@ type Config struct {
 	NginxURL      string            // stub_status URL, e.g. http://127.0.0.1/nginx_status (empty = off)
 	Jolokia       map[string]string // service name -> Jolokia URL (JVM metrics)
 	Exporters     map[string]string // name -> URL of a local Prometheus exporter to read and forward
+	Databases     map[string]string // name -> "engine|exporterURL" (engine: postgres|mysql|mssql|oracle)
 
 	// Disk buffer (push mode): collections that do not fit the memory buffer, or are still waiting when the agent
 	// stops, are kept in <state_dir>/buffer (gzip), bounded by size and age, and sent oldest first. Host-only.
@@ -99,7 +100,7 @@ func Defaults() *Config {
 		CollectInterval: 15 * time.Second, HeartbeatInterval: 30 * time.Second, BufferPayloads: 40, Version: 1,
 		ProcPath: "/proc", SysPath: "/sys", RootPath: "/", Sources: map[string]string{},
 		Mode: "push", PullListen: DefaultPullListen,
-		ProcessesTop: 10, DockerSocket: "/var/run/docker.sock", Jolokia: map[string]string{}, Exporters: map[string]string{},
+		ProcessesTop: 10, DockerSocket: "/var/run/docker.sock", Jolokia: map[string]string{}, Exporters: map[string]string{}, Databases: map[string]string{},
 		DiskBufferMB: 100, DiskBufferTTL: 2 * time.Hour}
 }
 
@@ -274,6 +275,8 @@ func (c *Config) set(k, v, src string) error {
 		c.Jolokia[strings.TrimPrefix(k, "jolokia.")] = v
 	case strings.HasPrefix(k, "exporters."):
 		c.Exporters[strings.TrimPrefix(k, "exporters.")] = v
+	case strings.HasPrefix(k, "databases."):
+		c.Databases[strings.TrimPrefix(k, "databases.")] = v
 	case k == "pull" && v == "":
 		return nil // "pull:" with nothing under it
 	case k == "pull.listen":
