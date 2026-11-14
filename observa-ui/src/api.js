@@ -360,6 +360,18 @@ api.get('/services', wrap(async (req, res) => {
   res.json(await servicesNow());
 }));
 
+// Per-service trend for the Services table sparklines. Additive: the /services
+// contract is unchanged. Returns one short series per named service over the range.
+api.get('/services/series', wrap(async (req, res) => {
+  const { start, end, step } = timeRange(req);
+  const metric = ['rps', 'p95', 'errorRate'].includes(String(req.query.metric)) ? String(req.query.metric) : 'rps';
+  const names = String(req.query.names || '').split(',').map((s) => s.trim()).filter(Boolean).slice(0, 200);
+  const s = names.length ? await servicesSeries(metric, start, end, step, names) : { result: [] };
+  const series = {};
+  for (const r of s.result) if (r.metric.service) series[r.metric.service] = r.values;
+  res.json({ metric, start, end, step, series });
+}));
+
 // ---------------- Logs ----------------
 function normLevel(labels, line) {
   const l = (labels.level || labels.detected_level || labels.severity || '').toUpperCase();

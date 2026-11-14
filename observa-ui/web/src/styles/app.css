@@ -624,3 +624,5 @@ a.list-row:hover, button.list-row:hover { background: var(--accent-soft); text-d
 .status-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px; margin: 0 0 12px; font-size: 13px; color: var(--muted-text); }
 .status-summary b { color: var(--text); font-weight: 600; }
 .status-summary span { display: inline-flex; align-items: center; gap: 6px; }
+
+.svc-spark { position: relative; width: 108px; height: 26px; margin-left: auto; }

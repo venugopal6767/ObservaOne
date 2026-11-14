@@ -1,12 +1,16 @@
 // Services: request rate, P95 latency and error rate per application (rules in src/health.js).
 // Each row links to that service's logs and traces.
 import { useMemo, useState } from 'react';
+import { useQuery, keepPreviousData } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import { Boxes, HeartPulse, AlertTriangle, CircleX, Activity, FileText, Waypoints } from 'lucide-react';
 import { api } from '@/lib/api';
 import { fmt, short, escapeLabel } from '@/lib/format';
-import { useApp, usePlainQuery } from '@/app/AppContext';
+import { useApp, usePlainQuery, rangeKey, rangeParams } from '@/app/AppContext';
 import { ErrorState, HealthPill, PageHead, StateView, TableFoot, TableWrap, usePager } from '@/components/ui';
+import { Sparkline } from '@/components/charts';
+import { statusColor } from '@/lib/theme';
+import { trendPoints, sparkTone } from '@/lib/services';
 
 interface Svc { name: string; namespace: string; rps: number | null; errorRate: number | null; p95: number | null; status: 'healthy' | 'degraded' | 'down' | 'no_traffic' }
 interface SvcData { list: Svc[]; summary: { total: number; healthy: number; degraded: number; down: number; noTraffic: number } }
@@ -14,9 +18,17 @@ type SortKey = 'status' | 'name' | 'rps' | 'p95' | 'errorRate';
 const ORDER = { down: 0, degraded: 1, healthy: 2, no_traffic: 3 };
 
 export default function Services() {
-  const { canOpen } = useApp();
+  const { canOpen, range } = useApp();
   const navigate = useNavigate();
   const q = usePlainQuery(['services'], () => api<SvcData>('/services'));
+  const svcNames = useMemo(() => (q.data?.list || []).map((x) => x.name), [q.data]);
+  const trends = useQuery({
+    queryKey: ['services-series', rangeKey(range), svcNames.join(',')],
+    queryFn: () => api<{ series: Record<string, [number, string][]> }>('/services/series', { query: { metric: 'rps', ...rangeParams(range), names: svcNames.join(',') } }),
+    enabled: svcNames.length > 0,
+    placeholderData: keepPreviousData,
+  });
+  const series = trends.data?.series || {};
   const [search, setSearch] = useState('');
   const [status, setStatus] = useState('');
   const [sortKey, setSortKey] = useState<SortKey>('status');
@@ -64,7 +76,7 @@ export default function Services() {
         ) : (
           <TableWrap label="Services">
             <table className="tbl">
-              <thead><tr><Th label="Service" k="name" /><Th label="Status" k="status" /><Th label="Requests/s" k="rps" num /><Th label="Latency (P95)" k="p95" num /><Th label="Error Rate" k="errorRate" num /><th className="num">Jump to</th></tr></thead>
+              <thead><tr><Th label="Service" k="name" /><Th label="Status" k="status" /><Th label="Requests/s" k="rps" num /><Th label="Latency (P95)" k="p95" num /><Th label="Error Rate" k="errorRate" num /><th className="num">Trend (req/s)</th><th className="num">Jump to</th></tr></thead>
               <tbody>
                 {pager.rows.map((x) => {
                   // null = not reported / not meaningful (e.g. no traffic): "-", never 0 or 100%
@@ -78,6 +90,7 @@ export default function Services() {
                       <td className="num">{short(x.rps)}</td>
                       <td className={`num ${latCls}`}>{x.p95 === null ? '-' : fmt(x.p95, 'ms')}</td>
                       <td className={`num ${errCls}`}>{x.errorRate === null ? '-' : `${x.errorRate.toFixed(1)}%`}</td>
+                      <td>{(() => { const pts = trendPoints(series, x.name); return pts ? <div className="svc-spark"><Sparkline points={pts} lineColor={statusColor(sparkTone(x.status))} /></div> : <span className="dim">—</span>; })()}</td>
                       <td>
                         <div className="row-actions">
                           {canOpen('/logs') && <button className="icon-btn" title="Logs" aria-label={`Logs for ${x.name}`} onClick={() => navigate(`/logs?q=${encodeURIComponent(sel)}`)}><FileText size={15} /></button>}
