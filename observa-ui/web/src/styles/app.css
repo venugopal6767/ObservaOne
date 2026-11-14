@@ -634,3 +634,8 @@ a.list-row:hover, button.list-row:hover { background: var(--accent-soft); text-d
 .otlp-snippet-wrap { position: relative; margin-top: 10px; }
 .otlp-snippet { background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 12px; overflow: auto; max-height: 340px; font-size: 12px; white-space: pre; }
 .otlp-copy { position: absolute; top: 8px; right: 8px; }
+
+/* Traces: active filter chips */
+.trace-chips { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0; }
+.filter-chip { display: inline-flex; gap: 6px; align-items: center; background: var(--accent-soft); border: 1px solid rgba(59,130,246,.35); color: var(--text); padding: 4px 10px; border-radius: 999px; font-size: 12px; cursor: pointer; }
+.filter-chip:hover { border-color: var(--accent); }

@@ -430,6 +430,16 @@ function attr(attrs, key) {
   return v.stringValue ?? v.intValue ?? v.boolValue ?? v.doubleValue;
 }
 
+// Best-effort: pull a resource attribute from a Tempo search result's matched span sets.
+function traceAttr(t, key) {
+  const sets = t.spanSets || (t.spanSet ? [t.spanSet] : []);
+  for (const ss of sets) {
+    for (const sp of ss.spans || []) for (const a of sp.attributes || []) if (a.key === key) return a.value?.stringValue ?? null;
+    for (const a of ss.attributes || []) if (a.key === key) return a.value?.stringValue ?? null;
+  }
+  return null;
+}
+
 api.get('/traces', wrap(async (req, res) => {
   const { start, end } = timeRange(req);
   const tags = parseTraceQuery(req.query.query);
@@ -446,6 +456,7 @@ api.get('/traces', wrap(async (req, res) => {
       traceId: t.traceID, rootService: t.rootServiceName, rootName: t.rootTraceName,
       startMs: Math.floor(Number(t.startTimeUnixNano) / 1e6), durationMs: t.durationMs ?? 0, error: null,
       spanCount: t.spanSet?.matched ?? null,
+      namespace: traceAttr(t, 'k8s.namespace.name'), env: traceAttr(t, 'deployment.environment'),
     })),
   });
 }));
