@@ -4,13 +4,18 @@ import { useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Database, LineChart } from 'lucide-react';
 import { api, type PromVector } from '@/lib/api';
-import { useApp, usePlainQuery } from '@/app/AppContext';
+import { usePlainQuery } from '@/app/AppContext';
 import { ErrorState, PageHead, Pill, StateView, TableWrap } from '@/components/ui';
 import { groupTargets, summarize } from '@/lib/datastores';
 
 export default function Databases() {
-  const { canOpen } = useApp();
   const navigate = useNavigate();
+  // Each engine has a native, user-customisable system dashboard (config/dashboards/db-<engine>.json).
+  // Preselect the instance via the dashboard variable's sessionStorage key, then open it.
+  const openDash = (engine: string, instance: string) => {
+    sessionStorage.setItem(`oo.var.${engine}.db_instance`, instance);
+    navigate(`/dashboards/${engine}`);
+  };
   const q = usePlainQuery(['datastores'], () => api<{ result: PromVector }>('/prom/query', { query: { query: 'observaone_db_up' } }).then((r) => r.result));
 
   const groups = useMemo(() => groupTargets(q.data || []), [q.data]);
@@ -38,15 +43,15 @@ export default function Databases() {
           <TableWrap label={g.label}>
             <div style={{ padding: '10px 14px', fontWeight: 600 }}>{g.label} <span className="dim" style={{ fontSize: 12 }}>· {g.targets.length}</span></div>
             <table className="tbl">
-              <thead><tr><th>Instance</th><th>Status</th><th className="num">Metrics</th></tr></thead>
+              <thead><tr><th>Instance</th><th>Status</th><th className="num">Dashboard</th></tr></thead>
               <tbody>
                 {g.targets.map((t) => (
                   <tr key={t.instance}>
-                    <td><button className="linkish" style={{ background: 'none', border: 0, color: 'inherit', font: 'inherit', cursor: 'pointer', fontWeight: 600, padding: 0 }} onClick={() => navigate(`/databases/${g.engine}/${encodeURIComponent(t.instance)}`)}>{t.instance}</button></td>
+                    <td><button className="linkish" style={{ background: 'none', border: 0, color: 'inherit', font: 'inherit', cursor: 'pointer', fontWeight: 600, padding: 0 }} onClick={() => openDash(g.engine, t.instance)}>{t.instance}</button></td>
                     <td>{t.up ? <Pill tone="green">Up</Pill> : <Pill tone="red">Down</Pill>}</td>
                     <td className="num">
-                      {canOpen('/metrics') && <button className="icon-btn" title="Explore metrics" aria-label={`Explore metrics for ${t.instance}`}
-                        onClick={() => navigate(`/databases/${g.engine}/${encodeURIComponent(t.instance)}`)}><LineChart size={15} /></button>}
+                      <button className="icon-btn" title="Open dashboard" aria-label={`Open ${g.label} dashboard for ${t.instance}`}
+                        onClick={() => openDash(g.engine, t.instance)}><LineChart size={15} /></button>
                     </td>
                   </tr>
                 ))}

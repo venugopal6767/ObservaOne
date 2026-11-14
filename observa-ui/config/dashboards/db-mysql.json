@@ -1,0 +1,83 @@
+{
+  "id": "mysql",
+  "title": "MySQL",
+  "description": "MySQL metrics per instance (ObservaOne DB agent). Clone to customise.",
+  "tags": [
+    "system",
+    "database"
+  ],
+  "variables": [
+    {
+      "name": "db_instance",
+      "label": "Instance",
+      "label_name": "db_instance",
+      "match": "observaone_db_up{db_engine=\"mysql\"}"
+    }
+  ],
+  "panels": [
+    {
+      "title": "Status",
+      "type": "stat",
+      "query": "max(mysql_up{db_instance=\"$db_instance\"})",
+      "unit": "none",
+      "legend": "",
+      "w": 3
+    },
+    {
+      "title": "Threads connected",
+      "type": "stat",
+      "query": "max(mysql_global_status_threads_connected{db_instance=\"$db_instance\"})",
+      "unit": "none",
+      "legend": "",
+      "w": 3
+    },
+    {
+      "title": "Open tables",
+      "type": "stat",
+      "query": "max(mysql_global_status_open_tables{db_instance=\"$db_instance\"})",
+      "unit": "none",
+      "legend": "",
+      "w": 3
+    },
+    {
+      "title": "Replication lag (s)",
+      "type": "stat",
+      "query": "max(mysql_slave_status_seconds_behind_master{db_instance=\"$db_instance\"})",
+      "unit": "s",
+      "legend": "",
+      "w": 3
+    },
+    {
+      "title": "Queries / s",
+      "type": "line",
+      "query": "rate(mysql_global_status_queries{db_instance=\"$db_instance\"}[5m])",
+      "unit": "none",
+      "legend": "",
+      "w": 6
+    },
+    {
+      "title": "Slow queries / s",
+      "type": "line",
+      "query": "rate(mysql_global_status_slow_queries{db_instance=\"$db_instance\"}[5m])",
+      "unit": "none",
+      "legend": "",
+      "w": 6
+    },
+    {
+      "title": "InnoDB buffer hit %",
+      "type": "line",
+      "query": "100*(1-rate(mysql_global_status_innodb_buffer_pool_reads{db_instance=\"$db_instance\"}[5m])/clamp_min(rate(mysql_global_status_innodb_buffer_pool_read_requests{db_instance=\"$db_instance\"}[5m]),1))",
+      "unit": "percent",
+      "legend": "",
+      "w": 6
+    },
+    {
+      "title": "Bytes received / s",
+      "type": "line",
+      "query": "rate(mysql_global_status_bytes_received{db_instance=\"$db_instance\"}[5m])",
+      "unit": "bytes",
+      "legend": "",
+      "w": 6
+    }
+  ]
+}

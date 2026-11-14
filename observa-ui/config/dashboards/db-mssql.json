@@ -1,0 +1,67 @@
+{
+  "id": "mssql",
+  "title": "SQL Server",
+  "description": "SQL Server metrics per instance (ObservaOne DB agent). Clone to customise.",
+  "tags": [
+    "system",
+    "database"
+  ],
+  "variables": [
+    {
+      "name": "db_instance",
+      "label": "Instance",
+      "label_name": "db_instance",
+      "match": "observaone_db_up{db_engine=\"mssql\"}"
+    }
+  ],
+  "panels": [
+    {
+      "title": "Status",
+      "type": "stat",
+      "query": "max(mssql_up{db_instance=\"$db_instance\"})",
+      "unit": "none",
+      "legend": "",
+      "w": 3
+    },
+    {
+      "title": "Connections",
+      "type": "stat",
+      "query": "max(mssql_connections{db_instance=\"$db_instance\"})",
+      "unit": "none",
+      "legend": "",
+      "w": 3
+    },
+    {
+      "title": "Page life expectancy (s)",
+      "type": "stat",
+      "query": "max(mssql_page_life_expectancy{db_instance=\"$db_instance\"})",
+      "unit": "s",
+      "legend": "",
+      "w": 3
+    },
+    {
+      "title": "Batch requests / s",
+      "type": "line",
+      "query": "rate(mssql_batch_requests{db_instance=\"$db_instance\"}[5m])",
+      "unit": "none",
+      "legend": "",
+      "w": 6
+    },
+    {
+      "title": "Transactions / s",
+      "type": "line",
+      "query": "rate(mssql_transactions{db_instance=\"$db_instance\"}[5m])",
+      "unit": "none",
+      "legend": "",
+      "w": 6
+    },
+    {
+      "title": "Deadlocks / s",
+      "type": "line",
+      "query": "rate(mssql_deadlocks{db_instance=\"$db_instance\"}[5m])",
+      "unit": "none",
+      "legend": "",
+      "w": 6
+    }
+  ]
+}

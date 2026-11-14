@@ -1,0 +1,83 @@
+{
+  "id": "redis",
+  "title": "Redis",
+  "description": "Redis metrics per instance (ObservaOne DB agent). Clone to customise.",
+  "tags": [
+    "system",
+    "database"
+  ],
+  "variables": [
+    {
+      "name": "db_instance",
+      "label": "Instance",
+      "label_name": "db_instance",
+      "match": "observaone_db_up{db_engine=\"redis\"}"
+    }
+  ],
+  "panels": [
+    {
+      "title": "Status",
+      "type": "stat",
+      "query": "max(redis_up{db_instance=\"$db_instance\"})",
+      "unit": "none",
+      "legend": "",
+      "w": 3
+    },
+    {
+      "title": "Connected clients",
+      "type": "stat",
+      "query": "max(redis_connected_clients{db_instance=\"$db_instance\"})",
+      "unit": "none",
+      "legend": "",
+      "w": 3
+    },
+    {
+      "title": "Keys",
+      "type": "stat",
+      "query": "sum(redis_db_keys{db_instance=\"$db_instance\"})",
+      "unit": "none",
+      "legend": "",
+      "w": 3
+    },
+    {
+      "title": "Used memory",
+      "type": "stat",
+      "query": "max(redis_memory_used_bytes{db_instance=\"$db_instance\"})",
+      "unit": "bytes",
+      "legend": "",
+      "w": 3
+    },
+    {
+      "title": "Commands / s",
+      "type": "line",
+      "query": "rate(redis_commands_processed_total{db_instance=\"$db_instance\"}[5m])",
+      "unit": "none",
+      "legend": "",
+      "w": 6
+    },
+    {
+      "title": "Keyspace hit rate %",
+      "type": "line",
+      "query": "100*rate(redis_keyspace_hits_total{db_instance=\"$db_instance\"}[5m])/clamp_min(rate(redis_keyspace_hits_total{db_instance=\"$db_instance\"}[5m])+rate(redis_keyspace_misses_total{db_instance=\"$db_instance\"}[5m]),1)",
+      "unit": "percent",
+      "legend": "",
+      "w": 6
+    },
+    {
+      "title": "Used memory",
+      "type": "line",
+      "query": "max(redis_memory_used_bytes{db_instance=\"$db_instance\"})",
+      "unit": "bytes",
+      "legend": "",
+      "w": 6
+    },
+    {
+      "title": "Evicted keys / s",
+      "type": "line",
+      "query": "rate(redis_evicted_keys_total{db_instance=\"$db_instance\"}[5m])",
+      "unit": "none",
+      "legend": "",
+      "w": 6
+    }
+  ]
+}

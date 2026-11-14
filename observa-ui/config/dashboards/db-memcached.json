@@ -1,0 +1,51 @@
+{
+  "id": "memcached",
+  "title": "Memcached",
+  "description": "Memcached metrics per instance (ObservaOne DB agent). Clone to customise.",
+  "tags": [
+    "system",
+    "database"
+  ],
+  "variables": [
+    {
+      "name": "db_instance",
+      "label": "Instance",
+      "label_name": "db_instance",
+      "match": "observaone_db_up{db_engine=\"memcached\"}"
+    }
+  ],
+  "panels": [
+    {
+      "title": "Status",
+      "type": "stat",
+      "query": "max(memcached_up{db_instance=\"$db_instance\"})",
+      "unit": "none",
+      "legend": "",
+      "w": 3
+    },
+    {
+      "title": "Current connections",
+      "type": "stat",
+      "query": "max(memcached_current_connections{db_instance=\"$db_instance\"})",
+      "unit": "none",
+      "legend": "",
+      "w": 3
+    },
+    {
+      "title": "Bytes used",
+      "type": "stat",
+      "query": "max(memcached_current_bytes{db_instance=\"$db_instance\"})",
+      "unit": "bytes",
+      "legend": "",
+      "w": 3
+    },
+    {
+      "title": "Evictions / s",
+      "type": "line",
+      "query": "rate(memcached_items_evicted_total{db_instance=\"$db_instance\"}[5m])",
+      "unit": "none",
+      "legend": "",
+      "w": 6
+    }
+  ]
+}

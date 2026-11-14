@@ -1,0 +1,51 @@
+{
+  "id": "oracle",
+  "title": "Oracle",
+  "description": "Oracle metrics per instance (ObservaOne DB agent). Clone to customise.",
+  "tags": [
+    "system",
+    "database"
+  ],
+  "variables": [
+    {
+      "name": "db_instance",
+      "label": "Instance",
+      "label_name": "db_instance",
+      "match": "observaone_db_up{db_engine=\"oracle\"}"
+    }
+  ],
+  "panels": [
+    {
+      "title": "Status",
+      "type": "stat",
+      "query": "max(oracledb_up{db_instance=\"$db_instance\"})",
+      "unit": "none",
+      "legend": "",
+      "w": 3
+    },
+    {
+      "title": "Sessions",
+      "type": "stat",
+      "query": "sum(oracledb_sessions_value{db_instance=\"$db_instance\"})",
+      "unit": "none",
+      "legend": "",
+      "w": 3
+    },
+    {
+      "title": "Executions / s",
+      "type": "line",
+      "query": "rate(oracledb_activity_execute_count{db_instance=\"$db_instance\"}[5m])",
+      "unit": "none",
+      "legend": "",
+      "w": 6
+    },
+    {
+      "title": "User commits / s",
+      "type": "line",
+      "query": "rate(oracledb_activity_user_commits{db_instance=\"$db_instance\"}[5m])",
+      "unit": "none",
+      "legend": "",
+      "w": 6
+    }
+  ]
+}

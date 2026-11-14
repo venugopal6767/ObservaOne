@@ -1,0 +1,51 @@
+{
+  "id": "kafka",
+  "title": "Kafka",
+  "description": "Kafka metrics per instance (ObservaOne DB agent). Clone to customise.",
+  "tags": [
+    "system",
+    "database"
+  ],
+  "variables": [
+    {
+      "name": "db_instance",
+      "label": "Instance",
+      "label_name": "db_instance",
+      "match": "observaone_db_up{db_engine=\"kafka\"}"
+    }
+  ],
+  "panels": [
+    {
+      "title": "Brokers",
+      "type": "stat",
+      "query": "max(kafka_brokers{db_instance=\"$db_instance\"})",
+      "unit": "none",
+      "legend": "",
+      "w": 3
+    },
+    {
+      "title": "Under-replicated partitions",
+      "type": "stat",
+      "query": "sum(kafka_topic_partition_under_replicated_partition{db_instance=\"$db_instance\"})",
+      "unit": "none",
+      "legend": "",
+      "w": 3
+    },
+    {
+      "title": "Consumer group lag",
+      "type": "line",
+      "query": "sum(kafka_consumergroup_lag{db_instance=\"$db_instance\"})",
+      "unit": "none",
+      "legend": "",
+      "w": 6
+    },
+    {
+      "title": "Messages in / s",
+      "type": "line",
+      "query": "sum(rate(kafka_topic_partition_current_offset{db_instance=\"$db_instance\"}[5m]))",
+      "unit": "none",
+      "legend": "",
+      "w": 6
+    }
+  ]
+}

@@ -1,0 +1,83 @@
+{
+  "id": "postgres",
+  "title": "PostgreSQL",
+  "description": "PostgreSQL metrics per instance (ObservaOne DB agent). Clone to customise.",
+  "tags": [
+    "system",
+    "database"
+  ],
+  "variables": [
+    {
+      "name": "db_instance",
+      "label": "Instance",
+      "label_name": "db_instance",
+      "match": "observaone_db_up{db_engine=\"postgres\"}"
+    }
+  ],
+  "panels": [
+    {
+      "title": "Status",
+      "type": "stat",
+      "query": "max(pg_up{db_instance=\"$db_instance\"})",
+      "unit": "none",
+      "legend": "",
+      "w": 3
+    },
+    {
+      "title": "Connections",
+      "type": "stat",
+      "query": "sum(pg_stat_activity_count{db_instance=\"$db_instance\"})",
+      "unit": "none",
+      "legend": "",
+      "w": 3
+    },
+    {
+      "title": "Database size",
+      "type": "stat",
+      "query": "sum(pg_database_size_bytes{db_instance=\"$db_instance\"})",
+      "unit": "bytes",
+      "legend": "",
+      "w": 3
+    },
+    {
+      "title": "Cache hit %",
+      "type": "stat",
+      "query": "100*sum(pg_stat_database_blks_hit{db_instance=\"$db_instance\"})/clamp_min(sum(pg_stat_database_blks_hit{db_instance=\"$db_instance\"})+sum(pg_stat_database_blks_read{db_instance=\"$db_instance\"}),1)",
+      "unit": "percent",
+      "legend": "",
+      "w": 3
+    },
+    {
+      "title": "Commits / s",
+      "type": "line",
+      "query": "sum(rate(pg_stat_database_xact_commit{db_instance=\"$db_instance\"}[5m]))",
+      "unit": "none",
+      "legend": "",
+      "w": 6
+    },
+    {
+      "title": "Rollbacks / s",
+      "type": "line",
+      "query": "sum(rate(pg_stat_database_xact_rollback{db_instance=\"$db_instance\"}[5m]))",
+      "unit": "none",
+      "legend": "",
+      "w": 6
+    },
+    {
+      "title": "Tuples fetched / s",
+      "type": "line",
+      "query": "sum(rate(pg_stat_database_tup_fetched{db_instance=\"$db_instance\"}[5m]))",
+      "unit": "none",
+      "legend": "",
+      "w": 6
+    },
+    {
+      "title": "Replication lag (s)",
+      "type": "line",
+      "query": "max(pg_replication_lag{db_instance=\"$db_instance\"})",
+      "unit": "s",
+      "legend": "",
+      "w": 6
+    }
+  ]
+}

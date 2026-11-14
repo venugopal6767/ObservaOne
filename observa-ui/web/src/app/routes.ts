@@ -51,7 +51,6 @@ export const NAV_SECTIONS: NavSection[] = [
 
 /** Routes that are not menu items (detail pages): they belong to a menu item */
 const DETAIL_ROUTES: { match: RegExp; navPath: string }[] = [
-  { match: /^\/databases\/[^/]+\/[^/]+$/, navPath: '/databases' },
   { match: /^\/dashboards\/[^/]+$/, navPath: '/dashboards' },
   { match: /^\/metrics\/(explore|kubernetes|investigate|host\/[^/]+)$/, navPath: '/metrics' },
   { match: /^\/infrastructure\/add$/, navPath: '/infrastructure' },
