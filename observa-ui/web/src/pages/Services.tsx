@@ -7,10 +7,10 @@ import { Boxes, HeartPulse, AlertTriangle, CircleX, Activity, FileText, Waypoint
 import { api } from '@/lib/api';
 import { fmt, short, escapeLabel } from '@/lib/format';
 import { useApp, usePlainQuery, rangeKey, rangeParams } from '@/app/AppContext';
-import { ErrorState, HealthPill, PageHead, StateView, TableFoot, TableWrap, usePager } from '@/components/ui';
+import { ErrorState, HealthPill, PageHead, Select, StateView, TableFoot, TableWrap, usePager } from '@/components/ui';
 import { Sparkline } from '@/components/charts';
 import { statusColor } from '@/lib/theme';
-import { trendPoints, sparkTone } from '@/lib/services';
+import { trendPoints, sparkTone, trendLabel, TREND_METRICS, type TrendMetric } from '@/lib/services';
 
 interface Svc { name: string; namespace: string; rps: number | null; errorRate: number | null; p95: number | null; status: 'healthy' | 'degraded' | 'down' | 'no_traffic' }
 interface SvcData { list: Svc[]; summary: { total: number; healthy: number; degraded: number; down: number; noTraffic: number } }
@@ -20,11 +20,12 @@ const ORDER = { down: 0, degraded: 1, healthy: 2, no_traffic: 3 };
 export default function Services() {
   const { canOpen, range } = useApp();
   const navigate = useNavigate();
+  const [trendMetric, setTrendMetric] = useState<TrendMetric>('rps');
   const q = usePlainQuery(['services'], () => api<SvcData>('/services'));
   const svcNames = useMemo(() => (q.data?.list || []).map((x) => x.name), [q.data]);
   const trends = useQuery({
-    queryKey: ['services-series', rangeKey(range), svcNames.join(',')],
-    queryFn: () => api<{ series: Record<string, [number, string][]> }>('/services/series', { query: { metric: 'rps', ...rangeParams(range), names: svcNames.join(',') } }),
+    queryKey: ['services-series', trendMetric, rangeKey(range), svcNames.join(',')],
+    queryFn: () => api<{ series: Record<string, [number, string][]> }>('/services/series', { query: { metric: trendMetric, ...rangeParams(range), names: svcNames.join(',') } }),
     enabled: svcNames.length > 0,
     placeholderData: keepPreviousData,
   });
@@ -42,7 +43,7 @@ export default function Services() {
   }, [q.data, search, status, sortKey, dir]);
   const pager = usePager(rows, 50, `${search}|${status}`);
 
-  const head = <PageHead title="Services" sub="Monitor your application services" actions={<input className="input" placeholder="Filter services..." aria-label="Filter services" style={{ width: 240 }} value={search} onChange={(e) => setSearch(e.target.value)} />} />;
+  const head = <PageHead title="Services" sub="Monitor your application services" actions={<><Select className="select select-sm" label="Trend metric" options={TREND_METRICS} value={trendMetric} onChange={setTrendMetric} /><input className="input" placeholder="Filter services..." aria-label="Filter services" style={{ width: 240 }} value={search} onChange={(e) => setSearch(e.target.value)} /></>} />;
   if (q.isPending) return <>{head}<TableWrap label="Services"><StateView kind="loading" skeleton="table" /></TableWrap></>;
   if (q.isError) return <>{head}<TableWrap label="Services"><ErrorState error={q.error} what="Services" /></TableWrap></>;
   const s = q.data.summary;
@@ -76,7 +77,7 @@ export default function Services() {
         ) : (
           <TableWrap label="Services">
             <table className="tbl">
-              <thead><tr><Th label="Service" k="name" /><Th label="Status" k="status" /><Th label="Requests/s" k="rps" num /><Th label="Latency (P95)" k="p95" num /><Th label="Error Rate" k="errorRate" num /><th className="num">Trend (req/s)</th><th className="num">Jump to</th></tr></thead>
+              <thead><tr><Th label="Service" k="name" /><Th label="Status" k="status" /><Th label="Requests/s" k="rps" num /><Th label="Latency (P95)" k="p95" num /><Th label="Error Rate" k="errorRate" num /><th className="num">Trend ({trendLabel(trendMetric)})</th><th className="num">Jump to</th></tr></thead>
               <tbody>
                 {pager.rows.map((x) => {
                   // null = not reported / not meaningful (e.g. no traffic): "-", never 0 or 100%

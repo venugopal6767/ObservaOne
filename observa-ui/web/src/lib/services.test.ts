@@ -21,3 +21,12 @@ describe('trendPoints', () => {
     expect(trendPoints(undefined, 'api')).toBeNull();
   });
 });
+
+import { trendLabel } from './services';
+describe('trendLabel', () => {
+  it('labels each metric', () => {
+    expect(trendLabel('rps')).toBe('req/s');
+    expect(trendLabel('p95')).toBe('P95');
+    expect(trendLabel('errorRate')).toBe('Error %');
+  });
+});

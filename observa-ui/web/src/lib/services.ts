@@ -14,3 +14,11 @@ export function trendPoints(
   const v = series?.[name];
   return v && v.length > 1 ? v : null;
 }
+
+export type TrendMetric = 'rps' | 'p95' | 'errorRate';
+export const TREND_METRICS: [TrendMetric, string][] = [['rps', 'req/s'], ['p95', 'P95'], ['errorRate', 'Error %']];
+
+/** Short label for a trend metric (falls back to req/s). */
+export function trendLabel(m: TrendMetric): string {
+  return (TREND_METRICS.find(([v]) => v === m) ?? ['rps', 'req/s'])[1];
+}
