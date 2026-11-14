@@ -6,7 +6,7 @@ import { Database, LineChart } from 'lucide-react';
 import { api, type PromVector } from '@/lib/api';
 import { useApp, usePlainQuery } from '@/app/AppContext';
 import { ErrorState, PageHead, Pill, StateView, TableWrap } from '@/components/ui';
-import { groupTargets, summarize, exploreQuery } from '@/lib/datastores';
+import { groupTargets, summarize } from '@/lib/datastores';
 
 export default function Databases() {
   const { canOpen } = useApp();
@@ -42,11 +42,11 @@ export default function Databases() {
               <tbody>
                 {g.targets.map((t) => (
                   <tr key={t.instance}>
-                    <td><b style={{ fontWeight: 600 }}>{t.instance}</b></td>
+                    <td><button className="linkish" style={{ background: 'none', border: 0, color: 'inherit', font: 'inherit', cursor: 'pointer', fontWeight: 600, padding: 0 }} onClick={() => navigate(`/databases/${g.engine}/${encodeURIComponent(t.instance)}`)}>{t.instance}</button></td>
                     <td>{t.up ? <Pill tone="green">Up</Pill> : <Pill tone="red">Down</Pill>}</td>
                     <td className="num">
                       {canOpen('/metrics') && <button className="icon-btn" title="Explore metrics" aria-label={`Explore metrics for ${t.instance}`}
-                        onClick={() => navigate(`/metrics/explore?q=${encodeURIComponent(exploreQuery(g.engine, t.instance))}`)}><LineChart size={15} /></button>}
+                        onClick={() => navigate(`/databases/${g.engine}/${encodeURIComponent(t.instance)}`)}><LineChart size={15} /></button>}
                     </td>
                   </tr>
                 ))}
