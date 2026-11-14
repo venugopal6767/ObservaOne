@@ -626,3 +626,11 @@ a.list-row:hover, button.list-row:hover { background: var(--accent-soft); text-d
 .status-summary span { display: inline-flex; align-items: center; gap: 6px; }
 
 .svc-spark { position: relative; width: 108px; height: 26px; margin-left: auto; }
+
+/* Traces: "send traces" setup panel */
+.otlp-setup .otlp-fields { display: flex; gap: 12px; flex-wrap: wrap; margin: 10px 0; }
+.otlp-setup .otlp-fields label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.otlp-setup .otlp-fields .input { min-width: 240px; }
+.otlp-snippet-wrap { position: relative; margin-top: 10px; }
+.otlp-snippet { background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 12px; overflow: auto; max-height: 340px; font-size: 12px; white-space: pre; }
+.otlp-copy { position: absolute; top: 8px; right: 8px; }

@@ -8,7 +8,8 @@ import { api } from '@/lib/api';
 import { fmt, dateTime, timeHeader, escapeLabel } from '@/lib/format';
 import { color, palette, readableOn } from '@/lib/theme';
 import { useApp, useRangeQuery, windowQuery } from '@/app/AppContext';
-import { ErrorState, PageHead, Pill, Select, StateView, Tabs, Time, TableWrap, copyText } from '@/components/ui';
+import { ErrorState, Modal, PageHead, Pill, Select, StateView, Tabs, Time, TableWrap, copyText } from '@/components/ui';
+import { TraceSetup } from './TraceSetup';
 
 interface TraceRow { traceId: string; rootService: string; rootName: string; startMs: number; durationMs: number; error: boolean | null; spanCount: number | null }
 interface Span { spanId: string; parentId: string | null; service: string; name: string; startMs: number; durationMs: number; error: boolean; statusMessage?: string }
@@ -22,6 +23,7 @@ export default function Traces() {
   const [query, setQuery] = useState(initial);
   const [minDur, setMinDur] = useState(0);
   const [selected, setSelected] = useState<string | null>(params.get('id'));
+  const [setup, setSetup] = useState(false);
 
   useEffect(() => {
     const q = params.get('q'); const id = params.get('id');
@@ -58,7 +60,7 @@ export default function Traces() {
   const traces = list.data?.traces || [];
   return (
     <>
-      <PageHead title="Traces Explorer" sub="Search and analyze distributed traces" />
+      <PageHead title="Traces Explorer" sub="Search and analyze distributed traces" actions={<button className="btn btn-sm" onClick={() => setSetup(true)}>Send traces</button>} />
       <div className="query-bar">
         <div className="query-input"><input value={text} spellCheck={false} placeholder="All services, or e.g. service.name=checkout http.status_code=500" aria-label="Trace search" onChange={(e) => setText(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && run()} /></div>
         <Select className="select" label="Minimum duration" value={minDur} onChange={setMinDur} options={[[0, 'Any duration'], [100, '≥ 100 ms'], [500, '≥ 500 ms'], [1000, '≥ 1 s'], [5000, '≥ 5 s']]} style={{ height: 40 }} />
@@ -90,6 +92,7 @@ export default function Traces() {
         </div>
         <section className="panel">{selected ? <TraceDetail id={selected} /> : <StateView kind="empty" title="No trace selected" />}</section>
       </div>
+      {setup && <Modal title="Send traces to ObservaOne" wide onClose={() => setSetup(false)}><TraceSetup /></Modal>}
     </>
   );
 }
