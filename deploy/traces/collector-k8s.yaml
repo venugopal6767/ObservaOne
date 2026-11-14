@@ -1,0 +1,119 @@
+# ObservaOne traces collector for Kubernetes.
+# Deploys an OpenTelemetry Collector (one per node) that receives OTLP from apps,
+# tags spans with k8s metadata, KEEPS only traces from selected namespaces OR carrying
+# the opt-in annotation, and forwards them to ObservaOne's Tempo OTLP endpoint.
+#
+# Prereqs:
+#   kubectl -n observaone create secret generic observaone-traces \
+#     --from-literal=OBSERVAONE_OTLP_TRACES=https://SERVER/otlp/v1/traces \
+#     --from-literal=OBSERVAONE_INGEST_AUTH="Basic <base64 of INGEST_USER:INGEST_PASSWORD>"
+#   kubectl apply -f collector-k8s.yaml
+# Apps then send OTLP to  $(NODE_IP):4317 (gRPC) / :4318 (HTTP)  — or use auto-instrumentation
+# (see instrumentation.yaml) so this is wired for you.
+---
+apiVersion: v1
+kind: Namespace
+metadata: { name: observaone }
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: observaone-traces, namespace: observaone }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: { name: observaone-traces }
+rules:
+  - apiGroups: [""]
+    resources: [pods, namespaces]
+    verbs: [get, list, watch]
+  - apiGroups: [apps]
+    resources: [replicasets, deployments]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: { name: observaone-traces }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: observaone-traces }
+subjects:
+  - { kind: ServiceAccount, name: observaone-traces, namespace: observaone }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: observaone-traces-config, namespace: observaone }
+data:
+  config.yaml: |
+    extensions:
+      health_check: { endpoint: 0.0.0.0:13133 }
+    receivers:
+      otlp:
+        protocols:
+          grpc: { endpoint: 0.0.0.0:4317 }
+          http: { endpoint: 0.0.0.0:4318 }
+    processors:
+      k8sattributes:
+        auth_type: serviceAccount
+        passthrough: false
+        extract:
+          metadata: [k8s.namespace.name, k8s.pod.name, k8s.deployment.name, k8s.node.name]
+          annotations:
+            - { key: observaone.io/traces, from: pod, tag_name: observaone.traces }
+        pod_association:
+          - sources: [{ from: resource_attribute, name: k8s.pod.ip }]
+          - sources: [{ from: connection }]
+      # SELECTION: drop spans that are NOT in an allowed namespace AND not opted-in by annotation.
+      # Edit the namespace regex (prod|staging) to your requirement; VM/non-k8s spans pass through.
+      filter/select:
+        error_mode: ignore
+        traces:
+          span:
+            - 'resource.attributes["k8s.namespace.name"] != nil and not IsMatch(resource.attributes["k8s.namespace.name"], "^(prod|staging)$") and resource.attributes["observaone.traces"] != "true"'
+      resourcedetection: { detectors: [env, system], timeout: 5s }
+      batch: {}
+    exporters:
+      otlphttp/observaone:
+        traces_endpoint: ${env:OBSERVAONE_OTLP_TRACES}
+        headers:
+          Authorization: ${env:OBSERVAONE_INGEST_AUTH}
+    service:
+      extensions: [health_check]
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [k8sattributes, resourcedetection, filter/select, batch]
+          exporters: [otlphttp/observaone]
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata: { name: observaone-traces, namespace: observaone }
+spec:
+  selector: { matchLabels: { app: observaone-traces } }
+  template:
+    metadata: { labels: { app: observaone-traces } }
+    spec:
+      serviceAccountName: observaone-traces
+      containers:
+        - name: otel-collector
+          image: otel/opentelemetry-collector-contrib:0.116.0
+          args: ["--config=/conf/config.yaml"]
+          envFrom:
+            - secretRef: { name: observaone-traces }
+          ports:
+            - { name: otlp-grpc, containerPort: 4317, hostPort: 4317 }
+            - { name: otlp-http, containerPort: 4318, hostPort: 4318 }
+          readinessProbe: { httpGet: { path: /, port: 13133 } }
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { memory: 512Mi }
+          volumeMounts: [{ name: conf, mountPath: /conf }]
+      volumes:
+        - name: conf
+          configMap: { name: observaone-traces-config }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: observaone-traces, namespace: observaone }
+spec:
+  selector: { app: observaone-traces }
+  ports:
+    - { name: otlp-grpc, port: 4317, targetPort: 4317 }
+    - { name: otlp-http, port: 4318, targetPort: 4318 }

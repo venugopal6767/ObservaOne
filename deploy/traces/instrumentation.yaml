@@ -1,0 +1,35 @@
+# Auto-instrumentation via the OpenTelemetry Operator (recommended over a custom webhook).
+#
+# 1) Install cert-manager (operator webhook needs it):
+#    kubectl apply -f https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.yaml
+# 2) Install the OpenTelemetry Operator:
+#    kubectl apply -f https://github.com/open-telemetry/opentelemetry-operator/releases/latest/download/opentelemetry-operator.yaml
+# 3) Apply this Instrumentation CR, then annotate workloads/namespaces (see below).
+#
+# Annotate to auto-instrument (no code change) — this is the "namespace/annotation" behaviour:
+#    # whole namespace:
+#    kubectl annotate namespace prod instrumentation.opentelemetry.io/inject-java=observaone/observaone
+#    # or a single deployment (pod template):
+#    kubectl patch deployment payments -n prod --type merge \
+#      -p '{"spec":{"template":{"metadata":{"annotations":{"instrumentation.opentelemetry.io/inject-java":"observaone/observaone"}}}}}'
+# Supported: inject-java (great for MuleSoft/Spring), inject-nodejs, inject-python, inject-dotnet.
+---
+apiVersion: opentelemetry.io/v1alpha1
+kind: Instrumentation
+metadata:
+  name: observaone
+  namespace: observaone
+spec:
+  exporter:
+    # send to the node collector above (DaemonSet, hostPort 4318)
+    endpoint: http://$(NODE_IP):4318
+  propagators: [tracecontext, baggage, b3]
+  sampler:
+    type: parentbased_traceidratio
+    argument: "1.0"
+  env:
+    - name: NODE_IP
+      valueFrom: { fieldRef: { fieldPath: status.hostIP } }
+  java: {}
+  nodejs: {}
+  python: {}

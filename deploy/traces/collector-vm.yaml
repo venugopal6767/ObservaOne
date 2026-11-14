@@ -1,0 +1,38 @@
+# ObservaOne traces collector for a VM / bare host (run as a service; see the .service unit).
+# Apps on the host send OTLP to 127.0.0.1:4317/4318; this forwards to ObservaOne, tagging
+# by env/role so traces are attributable (there is no k8s namespace on a VM).
+# Set via /etc/observaone-traces/collector.env:
+#   OBSERVAONE_OTLP_TRACES=https://SERVER/otlp/v1/traces
+#   OBSERVAONE_INGEST_AUTH=Basic <base64 of INGEST_USER:INGEST_PASSWORD>
+#   OBSERVAONE_ENV=prod
+#   OBSERVAONE_ROLE=app
+extensions:
+  health_check: { endpoint: 127.0.0.1:13133 }
+receivers:
+  otlp:
+    protocols:
+      grpc: { endpoint: 127.0.0.1:4317 }
+      http: { endpoint: 127.0.0.1:4318 }
+processors:
+  resource:
+    attributes:
+      - key: deployment.environment
+        value: "${env:OBSERVAONE_ENV}"
+        action: upsert
+      - key: host.role
+        value: "${env:OBSERVAONE_ROLE}"
+        action: upsert
+  resourcedetection: { detectors: [env, system], timeout: 5s }
+  batch: {}
+exporters:
+  otlphttp/observaone:
+    traces_endpoint: ${env:OBSERVAONE_OTLP_TRACES}
+    headers:
+      Authorization: ${env:OBSERVAONE_INGEST_AUTH}
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [resourcedetection, resource, batch]
+      exporters: [otlphttp/observaone]
