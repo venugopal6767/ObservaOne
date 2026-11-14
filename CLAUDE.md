@@ -17,6 +17,15 @@ context: treat auth, secrets, tenancy and audit as first-class.
 - Agent: `cd agent/go && go build ./... && go test ./...`; scenarios in `agent/test/`.
 - Stack: `docker compose up -d --build` · inspect with `docker compose config|ps`.
 
+## Testing & local checks
+Run per lane (also wrapped in the root `Makefile` — `make help`):
+- **Frontend** (`observa-ui/web`): `npm test` (Vitest component/unit), `npm run typecheck` (tsc -b), `npm run test:e2e` (Playwright — needs a running stack; `E2E_BASE_URL` to target it). First-time e2e: `npx playwright install chromium`.
+- **Backend** (`observa-ui`): `npm test` (native `node --test`). Integration tests run only with `OBSERVA_TEST_*` set (see `.env.example`), else skip.
+- **Go agent** (`agent/go`): `./scripts/test-go.sh` (vet + `go test ./...`) or `make test-go`.
+- **Security**: `./scripts/security-scan.sh` (`npm audit` + `govulncheck` + `semgrep` when installed) or `make scan`.
+- **Stack**: `./scripts/validate-stack.sh` (compose config, non-destructive) or `make stack-check`.
+- **Migrations**: forward-only, transactional — safety & recovery in `docs/DATABASE.md`.
+
 ## Conventions
 - ESM imports everywhere in the server; TypeScript strict in the UI.
 - One metric definition drives screens AND alerts (see METRICS.md); keep counts/status wording consistent across pages.
@@ -41,7 +50,7 @@ Use the slash commands; they route to the right agent/skill:
 ### Skills (`.claude/skills/`, 23 installed)
 Workflow: brainstorming, writing-plans, executing-plans, test-driven-development,
 systematic-debugging, root-cause-tracing, requesting/receiving-code-review, verification-before-completion.
-Frontend/UX: frontend-design, react-best-practices, composition-patterns, web-design-guidelines, ui-ux-pro-max (explore ideas; **extend** the existing `web/src/lib/theme.ts` tokens, don't override). Testing: webapp-testing.
+Frontend/UX: frontend-design, react-best-practices, composition-patterns, web-design-guidelines, ui-ux-pro-max (explore ideas; **extend** the existing `web/src/lib/theme.ts` tokens, don't override). Its helper scripts are at `.claude/skills/ui-ux-pro-max/scripts/search.py` (run with `python3`); ignore the SKILL.md `${CLAUDE_PLUGIN_ROOT}` path — that var is unset for project skills. Testing: webapp-testing.
 Security: supply-chain-risk-auditor, semgrep, codeql, sarif-parsing, differential-review, variant-analysis, cvss-scoring. Meta: skill-creator.
 Provenance & licenses: `.claude/skills/THIRD_PARTY_SKILLS.md`.
 
