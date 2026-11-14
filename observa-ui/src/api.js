@@ -718,6 +718,24 @@ api.post('/dashboards', requirePerm('dashboards.edit'), wrap(async (req, res) =>
   res.json(rowToDash(r));
 }));
 
+// Clone any dashboard (system file or custom) into a new, editable custom dashboard for this tenant,
+// copying its variables and panels so it works immediately and can then be customised.
+api.post('/dashboards/:id/clone', requirePerm('dashboards.edit'), wrap(async (req, res) => {
+  const src = await findDashboard(req.params.id);
+  if (!src) throw httpError(404, 'Dashboard not found');
+  const title = String((req.body && req.body.title) || `${src.title} (copy)`).slice(0, 60);
+  const id = `c-${crypto.randomBytes(5).toString('hex')}`;
+  const panels = (src.panels || []).map(cleanPanel);
+  const variables = Array.isArray(src.variables) ? src.variables : [];
+  const r = await one(
+    `INSERT INTO dashboards (id, title, description, owner, tenant_id, variables, panels)
+     VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb) RETURNING *`,
+    [id, title, String(src.description || '').slice(0, 200), req.user.username, currentTenant(),
+      JSON.stringify(variables), JSON.stringify(panels)]);
+  audit(req, 'dashboard.clone', { from: src.id, id, title: r.title });
+  res.json(rowToDash(r));
+}));
+
 api.post('/dashboards/:id/panels', requirePerm('dashboards.edit'), wrap(async (req, res) => {
   const panel = cleanPanel(req.body);
   const r = await one(`UPDATE dashboards SET panels = panels || $2::jsonb, updated_at = now() WHERE id = $1 AND ${dashScope(3)} RETURNING *`,
@@ -832,6 +850,7 @@ const DOCS = {
   'GET /logs': 'Search logs. ?query=<LogQL>&start=&end=&limit=',
   'GET /traces': 'Search traces. ?query=service.name=x',
   'GET /dashboards': 'List dashboards',
+  'POST /dashboards/:id/clone': 'Clone a dashboard into an editable custom copy',
 };
 function collectRoutes(router, out = []) {
   for (const layer of router.stack || []) {
