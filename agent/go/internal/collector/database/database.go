@@ -22,7 +22,7 @@ import (
 	"observaone/agent/internal/core"
 )
 
-var engines = map[string]bool{"postgres": true, "mysql": true, "mssql": true, "oracle": true}
+var engines = map[string]bool{"postgres": true, "mysql": true, "mssql": true, "oracle": true, "redis": true, "kafka": true, "mongodb": true, "memcached": true}
 
 var httpClient = &http.Client{
 	Timeout:       6 * time.Second,

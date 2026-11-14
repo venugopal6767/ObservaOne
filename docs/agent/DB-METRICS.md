@@ -1,4 +1,4 @@
-# Database metrics agent (Go + exporters)
+# Database & cache metrics agent (Go + exporters)
 
 A DB-monitoring path built the **same way as the Linux agent**: a Go collector
 (`internal/collector/database`) that plugs into the agent core (enrol/heartbeat/config/
@@ -18,6 +18,10 @@ multi-target (the exporter connects to the DBs; the agent just scrapes + forward
 | mysql    | `prometheus/mysqld_exporter` |
 | mssql    | `burningalchemist/sql_exporter` (MSSQL config) |
 | oracle   | `oracle/oracle-db-exporter` (oracledb_exporter) |
+| redis    | `oliver006/redis_exporter` (multi-target) |
+| kafka    | JMX exporter (broker) + `danielqsj/kafka_exporter` (consumer lag) |
+| mongodb  | `percona/mongodb_exporter` |
+| memcached| `prometheus/memcached_exporter` |
 
 Give each exporter a **read-only** DB user. In multi-target mode one exporter can scrape
 many instances (your team's preference over sidecars).

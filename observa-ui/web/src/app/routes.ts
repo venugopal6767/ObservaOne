@@ -5,7 +5,7 @@
 
 export type IconName =
   | 'overview' | 'dashboards' | 'metrics' | 'logs' | 'traces' | 'services' | 'infrastructure'
-  | 'alerting' | 'agents' | 'datasources' | 'settings';
+  | 'alerting' | 'agents' | 'datasources' | 'settings' | 'databases';
 
 export interface SubItem { path: string; label: string; perm?: string; keywords?: string }
 export interface NavItem { path: string; label: string; icon: IconName; perm?: string; module?: string; keywords?: string; children?: SubItem[] }
@@ -34,7 +34,10 @@ export const NAV_SECTIONS: NavSection[] = [
     ],
   },
   { title: 'Applications', items: [{ path: '/services', label: 'Services', icon: 'services', module: 'services', keywords: 'apm red latency errors' }] },
-  { title: 'Infrastructure', items: [{ path: '/infrastructure', label: 'Infrastructure', icon: 'infrastructure', module: 'infrastructure', keywords: 'hosts servers nodes' }] },
+  { title: 'Infrastructure', items: [
+    { path: '/infrastructure', label: 'Infrastructure', icon: 'infrastructure', module: 'infrastructure', keywords: 'hosts servers nodes' },
+    { path: '/databases', label: 'Databases', icon: 'databases', keywords: 'postgres mysql mssql oracle redis kafka mongodb cache datastore' },
+  ] },
   { title: 'Respond', items: [{ path: '/alerting', label: 'Alerts', icon: 'alerting', module: 'alerting', keywords: 'alerting alerts rules silences notifications', children: ALERT_PAGES }] },
   {
     title: 'Platform',

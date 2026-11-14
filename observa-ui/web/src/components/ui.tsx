@@ -2,7 +2,7 @@
 import { createContext, useCallback, useContext, useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import {
-  LayoutGrid, LayoutDashboard, LineChart, FileText, Waypoints, Layers, Server, Bell, Cpu, Database, Settings,
+  LayoutGrid, LayoutDashboard, LineChart, FileText, Waypoints, Layers, Server, Bell, Cpu, Database, DatabaseZap, Settings,
   Activity, AlertTriangle, Clock, CircleSlash, X, Check, Info, type LucideIcon,
   MoreVertical,
 } from 'lucide-react';
@@ -13,7 +13,7 @@ import { STATUS_META } from '@/lib/status';
 
 export const NAV_ICONS: Record<IconName, LucideIcon> = {
   overview: LayoutGrid, dashboards: LayoutDashboard, metrics: LineChart, logs: FileText, traces: Waypoints,
-  services: Layers, infrastructure: Server, alerting: Bell, agents: Cpu, datasources: Database, settings: Settings,
+  services: Layers, infrastructure: Server, alerting: Bell, agents: Cpu, datasources: Database, settings: Settings, databases: DatabaseZap,
 };
 
 // ---------------- pills ----------------
