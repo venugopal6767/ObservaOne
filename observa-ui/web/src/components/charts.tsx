@@ -8,12 +8,13 @@ import {
 import { color, palette, hexA, statusColor } from '@/lib/theme';
 import { fmt, timeHM, dateTimeZ, type Unit } from '@/lib/format';
 import { useTheme } from '@/app/AppContext';
-import { CorrelateMenu } from './CorrelateMenu';
+import { InvestigatePanel, type InvestigateCtx } from './Investigate';
+import type { Filters } from '@/lib/catalog';
 
 Chart.register(LineController, BarController, DoughnutController, LineElement, PointElement, BarElement, ArcElement,
   LinearScale, CategoryScale, Filler, Tooltip, Legend);
 
-export type Series = { label: string; points: [number, string | number | null][]; color?: string };
+export type Series = { label: string; points: [number, string | number | null][]; color?: string; dashed?: boolean };
 
 function baseOptions(unit: Unit | string, { stacked = false, min, max, showLegend = false }: { stacked?: boolean; min?: number; max?: number; showLegend?: boolean } = {}): ChartOptions<any> {
   const GRID = color('chart-grid'), TICK = color('chart-tick');
@@ -68,13 +69,15 @@ export function ChartCanvas({ build, deps, className = 'chart-box', style, label
  * Time series. With `correlate`, clicking the chart opens a menu to jump to logs / traces around that
  * moment (the metric -> logs -> traces path). The menu only offers modules this user may open.
  */
-export function TimeChart({ series, unit = 'none', area = false, stacked = false, legend = false, min, max, className, style, correlate, correlateHint }: {
+export function TimeChart({ series, unit = 'none', area = false, stacked = false, legend = false, min, max, className, style, correlate, correlateHint, query, metric, filters }: {
   series: Series[]; unit?: Unit | string; area?: boolean; stacked?: boolean; legend?: boolean; min?: number; max?: number;
   className?: string; style?: React.CSSProperties; correlate?: boolean;
   /** extra context for the jump, e.g. { service: 'checkout' } so logs/traces are pre-filtered */
   correlateHint?: { service?: string; host?: string };
+  /** shown in the Investigate panel and used for "create alert" */
+  query?: string; metric?: string; filters?: Filters;
 }) {
-  const [menu, setMenu] = useState<{ x: number; y: number; t: number } | null>(null);
+  const [inv, setInv] = useState<InvestigateCtx | null>(null);
   const key = JSON.stringify(series.map((s) => [s.label, s.points.length, s.points[s.points.length - 1]]));
   return (
     <div style={{ position: 'relative' }}>
@@ -82,7 +85,7 @@ export function TimeChart({ series, unit = 'none', area = false, stacked = false
         className={className}
         style={{ ...style, cursor: correlate ? 'crosshair' : undefined }}
         label={`Time series chart: ${series.map((s) => s.label).slice(0, 5).join(', ')}`}
-        deps={[key, unit, area, stacked, legend, min, max, !!correlate]}
+        deps={[key, unit, area, stacked, legend, min, max, !!correlate, query]}
         build={() => {
           const pal = palette();
           const datasets = series.map((s, i) => {
@@ -93,7 +96,7 @@ export function TimeChart({ series, unit = 'none', area = false, stacked = false
               borderColor: c,
               backgroundColor: area ? hexA(c, stacked ? 0.55 : 0.18) : c,
               fill: area ? (stacked ? (i === 0 ? 'origin' : '-1') : 'origin') : false,
-              borderWidth: 1.6, pointRadius: 0, tension: 0.3, spanGaps: true,
+              borderWidth: s.dashed ? 1.3 : 1.6, borderDash: s.dashed ? [5, 4] : undefined, pointRadius: 0, tension: 0.3, spanGaps: true,
             };
           });
           const opts: any = baseOptions(unit, { stacked, min, max, showLegend: legend });
@@ -104,13 +107,23 @@ export function TimeChart({ series, unit = 'none', area = false, stacked = false
           if (correlate) {
             opts.onClick = (evt: any, _els: unknown, chart: Chart) => {
               const t = chart.scales.x.getValueForPixel(evt.x);
-              if (typeof t === 'number' && Number.isFinite(t)) setMenu({ x: evt.x, y: evt.y, t });
+              if (typeof t !== 'number' || !Number.isFinite(t)) return;
+              // each series' value at the nearest point to the click, biggest first
+              const values = datasets.map((d) => {
+                let best: { x: number; y: number | null } | null = null;
+                for (const p of d.data) if (!best || Math.abs(p.x - t) < Math.abs(best.x - t)) best = p;
+                // a line with no point near the click (stopped reporting, or starts later) has no value there
+                const step = d.data.length > 1 ? Math.abs(d.data[1].x - d.data[0].x) : Infinity;
+                const close = best && Math.abs(best.x - t) <= 2.5 * step;
+                return { label: d.label, color: d.borderColor as string, value: close ? best!.y ?? null : null };
+              }).filter((v) => !/^Threshold/.test(v.label)).sort((a, b) => (b.value ?? -Infinity) - (a.value ?? -Infinity));
+              setInv({ t, values, unit: String(unit), query, metric, filters, hint: correlateHint });
             };
           }
           return { type: 'line', data: { datasets }, options: opts };
         }}
       />
-      {menu && <CorrelateMenu at={menu} hint={correlateHint} onClose={() => setMenu(null)} />}
+      {inv && <InvestigatePanel ctx={inv} onClose={() => setInv(null)} />}
     </div>
   );
 }
@@ -180,12 +193,12 @@ export function Sparkline({ points, lineColor }: { points: [number, string][]; l
   );
 }
 
-export function LegendRow({ labels }: { labels: string[] }) {
+export function LegendRow({ labels, colors }: { labels: string[]; colors?: (string | undefined)[] }) {
   useTheme(); // re-render with the new colours when the theme changes
   const pal = palette();
   return (
     <div className="legend-row">
-      {labels.map((l, i) => <span key={`${l}-${i}`} className="legend-item"><i style={{ background: pal[i % pal.length] }} />{l}</span>)}
+      {labels.map((l, i) => <span key={`${l}-${i}`} className="legend-item"><i style={{ background: colors?.[i] || pal[i % pal.length] }} />{l}</span>)}
     </div>
   );
 }

@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Read(//**)",
+      "Grep(//**)",
+      "Glob(//**)",
+      "Bash(npm test:*)",
+      "Bash(npm run build:*)",
+      "Bash(npm run typecheck:*)",
+      "Bash(npm run dev:*)",
+      "Bash(npm ci:*)",
+      "Bash(npm install:*)",
+      "Bash(go build:*)",
+      "Bash(go test:*)",
+      "Bash(go vet:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git add:*)",
+      "Bash(git branch:*)",
+      "Bash(docker compose config:*)",
+      "Bash(docker compose ps:*)"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(./**/.env)",
+      "Read(./nginx/certs/**)",
+      "Read(./.agent-keys/**)",
+      "Read(./**/*.key)",
+      "Read(./**/*.pem)",
+      "Edit(./.env)",
+      "Edit(./**/.env)",
+      "Edit(./nginx/certs/**)",
+      "Edit(./.agent-keys/**)",
+      "Write(./.env)",
+      "Write(./nginx/certs/**)",
+      "Write(./.agent-keys/**)",
+      "Bash(rm -rf /:*)",
+      "Bash(docker compose down -v:*)",
+      "Bash(docker volume rm:*)",
+      "Bash(docker volume prune:*)",
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Edit|Write|MultiEdit",
+        "hooks": [
+          { "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard.sh\"" }
+        ]
+      }
+    ]
+  }
+}

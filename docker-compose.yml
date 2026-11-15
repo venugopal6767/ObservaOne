@@ -23,6 +23,24 @@ services:
       - ./nginx/certs:/certs
     restart: "no"
 
+  # Pull mode: creates the ObservaOne agent CA, the Prometheus client certificate and the discovery token once,
+  # before Prometheus starts (its observaone-agents job reads them). The observa service renews them later.
+  agent-pki-init:
+    build: ./observa-ui
+    image: observa-ui:2.0.0
+    command: ["pki-init"]
+    environment:
+      AGENT_PROMETHEUS_DIR: /etc/prometheus-agents
+      # also creates Alertmanager's config file from the base on the first start (notification channels)
+      AM_CONFIG_FILE: /etc/alertmanager-ui/alertmanager.yml
+      AM_BASE_CONFIG: /etc/alertmanager-base/alertmanager.yml
+    volumes:
+      - observa-data:/data
+      - agent-pull:/etc/prometheus-agents
+      - am-config:/etc/alertmanager-ui
+      - ./alertmanager:/etc/alertmanager-base:ro
+    restart: "no"
+
   auth-init:
     image: httpd:2.4-alpine
     entrypoint: ["/bin/sh", "/scripts/make-htpasswd.sh"]
@@ -54,6 +72,23 @@ services:
         condition: service_healthy
     restart: "no"
 
+  # Builds the ObservaOne Go agent (Linux amd64 + arm64) into ./agent/files/ with SHA256SUMS.
+  # Nginx serves them at https://SERVER/agent/files/ for agent/install.sh. Runs once per "up"; takes ~1 min the first time.
+  agent-build:
+    image: golang:1.24-alpine
+    working_dir: /src
+    entrypoint: ["/bin/sh", "/src/scripts/build-agent.sh"]
+    volumes:
+      - ./agent:/src/agent
+      - ./scripts:/src/scripts:ro
+      - agent-signing:/keys            # release signing key (created on first build; never served)
+    environment:
+      GOTOOLCHAIN: local
+      GOCACHE: /tmp/gocache
+      GOFLAGS: -mod=mod
+      RELEASE_KEY: /keys/release-signing.key
+    restart: "no"
+
   # ---- Long-running services ---------------------------------------------
   nginx:
     image: nginx:1.30-alpine
@@ -69,6 +104,8 @@ services:
       certs-init:
         condition: service_completed_successfully
       auth-init:
+        condition: service_completed_successfully
+      agent-build:
         condition: service_completed_successfully
       observa:
         condition: service_healthy
@@ -98,7 +135,21 @@ services:
       GRAFANA_URL: http://grafana:3000
       GRAFANA_PUBLIC_URL: /grafana/
       UI_RULES_FILE: /etc/prometheus-ui/ui-rules.yml
+      # Notification channels (Alerting -> Notifications): ObservaOne writes Alertmanager's config = the base file
+      # (alertmanager/alertmanager.yml: routes, grouping, inhibition) + the channels and email server from the UI
+      AM_CONFIG_FILE: /etc/alertmanager-ui/alertmanager.yml
+      AM_BASE_CONFIG: /etc/alertmanager-base/alertmanager.yml
+      NOTIFY_TIMEZONE: ${NOTIFY_TIMEZONE:-UTC}       # times in Teams messages (Slack shows each reader's own), e.g. Asia/Kolkata
       AUDIT_RETENTION_DAYS: ${AUDIT_RETENTION_DAYS:-365}
+      # ObservaOne Agent: status thresholds and enrollment limits (docs/agent/LINUX-AGENT.md)
+      AGENT_ONLINE_SECONDS: ${AGENT_ONLINE_SECONDS:-150}
+      AGENT_OFFLINE_SECONDS: ${AGENT_OFFLINE_SECONDS:-900}
+      AGENT_HEARTBEAT_SECONDS: ${AGENT_HEARTBEAT_SECONDS:-30}
+      AGENT_MIN_VERSION: ${AGENT_MIN_VERSION:-1.0.0}
+      AGENT_ENROLL_FAILURES: ${AGENT_ENROLL_FAILURES:-10}
+      AGENT_ENROLL_RATE: ${AGENT_ENROLL_RATE:-300}
+      AGENT_TOKEN_PURGE_MINUTES: ${AGENT_TOKEN_PURGE_MINUTES:-5}   # revoked/expired tokens deleted after this; 0 = keep
+      AGENT_PROMETHEUS_DIR: /etc/prometheus-agents                  # pull mode: CA + client cert + SD token for Prometheus
       DB_HOST: observa-db
       DB_NAME: observa
       DB_USER: observa
@@ -147,6 +198,9 @@ services:
       - ./observa-ui/config:/app/config:ro
       - ./nginx/certs/server.crt:/certs/server.crt:ro   # fingerprint for agent install commands
       - ui-rules:/etc/prometheus-ui
+      - agent-pull:/etc/prometheus-agents              # pull mode: files Prometheus needs to scrape agents
+      - am-config:/etc/alertmanager-ui                 # Alertmanager config written by ObservaOne
+      - ./alertmanager:/etc/alertmanager-base:ro        # the base it starts from
     depends_on:
       certs-init:
         condition: service_completed_successfully
@@ -170,7 +224,9 @@ services:
     volumes:
       - observa-db-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U observa -d observa"]
+      # over TCP: on the first start the init server only listens on the socket, so a socket check said "ready"
+      # while PostgreSQL was about to restart, and observa started too early
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U observa -d observa"]
       interval: 5s
       timeout: 5s
       retries: 30
@@ -223,10 +279,14 @@ services:
     volumes:
       - ./prometheus:/etc/prometheus:ro
       - ui-rules:/etc/prometheus-ui:ro
+      - agent-pull:/etc/prometheus-agents:ro   # agent CA, client certificate, SD token (written by observa)
       - prometheus-data:/prometheus
     extra_hosts:
       # lets the lab scrape windows_exporter on the Docker host itself
       - "host.docker.internal:host-gateway"
+    depends_on:
+      agent-pki-init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:9090/prometheus/-/healthy"]
       interval: 10s
@@ -238,12 +298,16 @@ services:
   alertmanager:
     image: prom/alertmanager:v0.34.1
     command:
-      - --config.file=/etc/alertmanager/alertmanager.yml
+      # written by ObservaOne from alertmanager/alertmanager.yml + the channels set in Alerting -> Notifications
+      - --config.file=/etc/alertmanager-ui/alertmanager.yml
       - --storage.path=/alertmanager
       - --web.external-url=https://${SERVER_NAME:-localhost}/alertmanager/
     volumes:
-      - ./alertmanager:/etc/alertmanager:ro
+      - am-config:/etc/alertmanager-ui:ro
       - alertmanager-data:/alertmanager
+    depends_on:
+      agent-pki-init:
+        condition: service_completed_successfully   # creates the config file on the first start
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:9093/alertmanager/-/healthy"]
       interval: 10s
@@ -283,9 +347,25 @@ services:
     restart: unless-stopped
     logging: *logging
 
+  # ---- Blackbox exporter: can ObservaOne reach each agent's host (ping) and pull port (TCP)? ----
+  # Feeds the "why" on the Agents page: host down vs agent stopped vs firewall. ICMP needs NET_RAW.
+  blackbox:
+    image: prom/blackbox-exporter:v0.27.0
+    command: ["--config.file=/etc/blackbox/blackbox.yml"]
+    volumes:
+      - ./blackbox/blackbox.yml:/etc/blackbox/blackbox.yml:ro
+    cap_drop: [ALL]
+    cap_add: [NET_RAW]
+    read_only: true
+    restart: unless-stopped
+    logging: *logging
+
   # Monitors the machine that runs this stack (Linux host, or the Docker Desktop VM on Windows)
+  # Optional: watch the ObservaOne server itself (off by default, so only what you install shows up).
+  #   docker compose --profile self-monitoring up -d   and add "node-exporter:9100" to prometheus/targets/linux.yml
   node-exporter:
     image: prom/node-exporter:v1.12.1
+    profiles: [self-monitoring]
     command:
       - --path.rootfs=/host
     pid: host
@@ -396,6 +476,9 @@ volumes:
   observa-data:
   observa-db-data:
   ui-rules:
+  am-config:
+  agent-pull:
+  agent-signing:
   loki-data:
   tempo-data:
   agent-data:

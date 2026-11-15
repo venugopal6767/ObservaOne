@@ -1,4 +1,5 @@
 // All /api routes.
+import { tenantContext } from './tenancy.js';
 import express from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -16,9 +17,13 @@ import { ssoRouter } from './sso.js';
 import { accessRouter } from './routes/access.js';
 import { extraRouters } from './routes/index.js';
 import { getDatasources, ds, requireConfigured, updateDatasource, testDatasource, prom, promInstant, am, fetchJson } from './datasources.js';
-import { cpuByHost, memByHost, diskFreeByHost, SERVERS_UP } from './queries.js';
-import { classifyService, summarizeServices, agentHostHealth } from './health.js';
+import { cpuByHost, memByHost, diskFreeByHost } from './queries.js';
+import { classifyService, summarizeServices, agentHostHealth, hostStatusOfAgent, hostStatusOfScrape, countServers } from './health.js';
+import { alertCounts } from './routes/alerting.js';
 import { MODULES, enabledModules, moduleSettings, setEnabledModules, requireModule } from './modules.js';
+import { describeAgent } from './routes/agent-control.js';
+import { currentTenant, isScoped, scopePromQL } from './tenancy.js';
+import { buildExpr } from './routes/alerting.js';
 
 export const api = express.Router();
 api.use(express.json({ limit: '200kb' }));
@@ -55,6 +60,7 @@ api.post('/login/mfa', wrap(async (req, res) => {
 api.use(ssoRouter); // /auth/providers, /auth/:provider/login, /auth/:provider/callback
 
 api.use(requireAuth); // ---- everything below needs a session or an API key ----
+api.use(tenantContext); // the user's tenant scopes agent lists and every Prometheus query (tenancy.js)
 
 // ---- module guards: a disabled module's API answers 404, whatever the user's role ----
 // (role permissions are still checked on each route below; both must allow the request)
@@ -65,7 +71,7 @@ api.use('/traces', requireModule('traces'));
 api.use('/services', requireModule('services'));
 for (const p of ['/alerts', '/rules', '/silences', '/notifications']) api.use(p, requireModule('alerting'));
 api.use('/dashboards', requireModule('dashboards'));
-for (const p of ['/agents', '/agent-tokens']) api.use(p, requireModule('agents'));
+for (const p of ['/agents', '/agent-tokens', '/agent-config', '/targets', '/gateways']) api.use(p, requireModule('agents'));
 
 api.post('/logout', wrap(async (req, res) => {
   audit(req, 'logout');
@@ -79,6 +85,7 @@ api.get('/me', wrap(async (req, res) => {
     brand: config.brand,
     sessionIdleMinutes: config.sessionIdleMinutes,
     rulesEditable: !!config.rulesFile,
+    demoData: config.demoData,
     modules: await enabledModules(), // what this deployment shows; the UI also checks permissions
     prefs: await getPrefs(req.userId),
   });
@@ -117,27 +124,69 @@ api.get('/prom/query_range', wrap(async (req, res) => {
   res.json(await prom('/api/v1/query_range', { query: req.query.query, start, end, step }));
 }));
 
-let metricNamesCache = { at: 0, names: [] };
+// Caches are kept per tenant: prom() scopes each tenant's lookup, so one tenant's answer is never served to another.
+const metricNamesCache = new Map(); // tenant -> { at, names }
 api.get('/prom/metric-names', wrap(async (req, res) => {
-  if (Date.now() - metricNamesCache.at > 60_000) {
-    metricNamesCache = { at: Date.now(), names: await prom('/api/v1/label/__name__/values') };
+  const t = currentTenant();
+  let c = metricNamesCache.get(t);
+  if (!c || Date.now() - c.at > 60_000) {
+    c = { at: Date.now(), names: await prom('/api/v1/label/__name__/values') };
+    metricNamesCache.set(t, c);
   }
-  res.json(metricNamesCache.names);
+  res.json(c.names);
+}));
+
+// Every metric seen in the last hour, with its type and description when Prometheus knows them
+// (scraped data has them; pushed data often does not: the type is then guessed from the name).
+const metricCatalogCache = new Map(); // tenant -> { at, list }
+api.get('/prom/metric-catalog', wrap(async (req, res) => {
+  const t = currentTenant();
+  if (!metricCatalogCache.has(t) || Date.now() - metricCatalogCache.get(t).at > 60_000) {
+    const end = nowSec();
+    const [names, meta] = await Promise.all([
+      prom('/api/v1/label/__name__/values', { start: end - 3600, end }),
+      prom('/api/v1/metadata').catch(() => ({})),
+    ]);
+    metricCatalogCache.set(t, {
+      at: Date.now(),
+      list: names.map((name) => {
+        const m = meta?.[name]?.[0] || {};
+        return { name, type: m.type || (/_total$/.test(name) ? 'counter' : /_bucket$/.test(name) ? 'histogram' : 'gauge'), help: m.help || '' };
+      }),
+    });
+  }
+  res.set('Cache-Control', 'no-store');
+  res.json(metricCatalogCache.get(t).list);
 }));
 
 api.get('/prom/label-values', wrap(async (req, res) => {
   const label = String(req.query.label || '');
   if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(label)) throw httpError(400, 'bad label name');
   const match = req.query.match ? [String(req.query.match)] : undefined;
-  res.json(await prom(`/api/v1/label/${label}/values`, { 'match[]': match }));
+  // only values seen recently (Prometheus would otherwise list every value it ever stored)
+  const end = nowSec(), start = end - 3600;
+  let values = await prom(`/api/v1/label/${label}/values`, { 'match[]': match, start, end });
+  if (label === 'host') {
+    // hosts that only exist because of agents removed on the Agents page are not offered any more
+    try {
+      const known = new Set((await q('SELECT id FROM agents')).rows.map((r) => r.id));
+      // a host is offered when a server reported "up" in the last hour (scraped, or an agent that still exists)
+      const series = await prom('/api/v1/series', { 'match[]': ['up{job=~"linux|windows"}'], start, end });
+      const live = new Set(series.filter((s) => !s.agent_id || known.has(s.agent_id)).map((s) => s.host));
+      values = values.filter((h) => live.has(h));
+    } catch { /* keep the unfiltered list */ }
+  }
+  res.json(values);
 }));
 
-api.get('/prom/targets', wrap(async (req, res) => {
+// Every server, one row each, whatever collects it. Infrastructure, Overview and Metrics all count THIS list,
+// so they show the same numbers. health is one of up / down / not_reporting / offline / disabled (health.js).
+async function serverInventory(req) {
   const d = await prom('/api/v1/targets', { state: 'active' });
   const pulled = d.activeTargets.map((t) => ({
     job: t.labels.job, instance: t.labels.instance, host: t.labels.host || t.labels.instance,
     os: t.labels.os || '', env: t.labels.env || '', role: t.labels.role || '',
-    health: t.health, lastScrape: t.lastScrape, durationMs: Math.round((t.lastScrapeDuration || 0) * 1000),
+    health: isServerJob(t.labels.job) ? hostStatusOfScrape(t.health) : t.health, lastScrape: t.lastScrape, durationMs: Math.round((t.lastScrapeDuration || 0) * 1000),
     lastError: t.lastError, source: 'scrape',
   }));
   // Servers that push through the ObservaOne Agent (they are not Prometheus scrape targets).
@@ -160,16 +209,71 @@ api.get('/prom/targets', wrap(async (req, res) => {
     const now = Date.now() / 1000;
     for (const { m, up, last } of best.values()) {
       // silent agent = "not_reporting", never "down" (rules in health.js)
-      const hh = agentHostHealth({ nowSec: now, lastSeenSec: last, upValue: up, onlineSeconds: config.agent.onlineSeconds });
+      const hh = agentHostHealth({ nowSec: now, lastSeenSec: last, upValue: up, onlineSeconds: config.agent.onlineSeconds, offlineSeconds: config.agent.offlineSeconds });
       pushed.push({
         job: m.job, instance: 'agent', host: m.host || m.instance, os: m.os || '', env: m.env || '', role: m.role || '',
         health: hh.health, lastScrape: last ? new Date(last * 1000).toISOString() : null, durationMs: 0,
         lastError: hh.reason,
-        source: 'agent', platform: m.platform || '',
+        source: 'agent', platform: m.platform || '', agentId: m.agent_id || null,
       });
     }
   } catch { /* Prometheus without agent data */ }
-  res.json([...pulled, ...pushed]);
+
+  // One row per server, whatever collects it (Prometheus scrape, ObservaOne Agent, or both).
+  // Enrolled agents also bring their heartbeat state, so "the agent stopped reporting" is told apart
+  // from "Prometheus cannot scrape the host". Agents enrolled but without data yet are listed too.
+  let enrolled = [], known = null;
+  try {
+    const t = req.user?.tenant || 't_default';
+    enrolled = (await q(`SELECT * FROM agents WHERE platform IN ('linux', 'windows') AND ($1 = 't_default' OR tenant_id = $1)`, [t])).rows;
+    known = new Set((await q('SELECT id FROM agents')).rows.map((r) => r.id));
+  } catch { /* database problem: show what Prometheus knows */ }
+  const now = Date.now();
+  const servers = new Map(); // host (lower case) -> merged row
+  const isServer = (t) => isServerJob(t.job);
+  const merge = (t) => {
+    const k = String(t.host).toLowerCase();
+    const cur = servers.get(k);
+    if (!cur) { servers.set(k, { ...t, collection: [t.source] }); return; }
+    if (!cur.collection.includes(t.source)) cur.collection.push(t.source);
+    if (t.source === 'scrape') { cur.scrapeHealth = t.health; cur.scrapeError = t.lastError; cur.instance = t.instance; }
+    else Object.assign(cur, { ...t, collection: cur.collection, scrapeHealth: cur.scrapeHealth ?? (cur.source === 'scrape' ? cur.health : undefined), scrapeError: cur.scrapeError ?? (cur.source === 'scrape' ? cur.lastError : undefined) });
+  };
+  // data from an agent that was removed on the Agents page stays in Prometheus for a while: do not show it
+  const removed = (t) => t.source === 'agent' && t.agentId && known && !known.has(t.agentId);
+  for (const t of [...pulled.filter(isServer), ...pushed]) if (!removed(t)) merge(t);
+  for (const a of enrolled) {
+    const k = a.host.toLowerCase();
+    const d = describeAgent(a, now);
+    const health = hostStatusOfAgent(d.status);
+    const agentInfo = { agentId: a.id, agentStatus: d.status, agentReason: d.reason || d.problems.join(' '), lastHeartbeat: a.last_heartbeat };
+    const cur = servers.get(k);
+    if (cur) {
+      if (!cur.collection.includes('agent')) cur.collection.push('agent');
+      Object.assign(cur, agentInfo);
+      if (a.credential_hash) { // enrolled agent: its heartbeat decides; keep a scrape failure visible separately
+        if (cur.source === 'scrape' && cur.scrapeHealth === undefined) { cur.scrapeHealth = cur.health; cur.scrapeError = cur.lastError; }
+        cur.health = health;
+        cur.lastError = agentInfo.agentReason;
+        cur.source = 'agent';
+      }
+    } else if (a.credential_hash) {
+      servers.set(k, {
+        job: a.platform, instance: 'agent', host: a.host, os: a.platform, env: a.env, role: a.role, platform: a.platform,
+        health, lastScrape: null, durationMs: 0, source: 'agent', collection: ['agent'],
+        lastError: agentInfo.agentReason || 'Enrolled; no metrics received yet.', ...agentInfo,
+      });
+    }
+  }
+  // blackbox probes of agent hosts feed the Agents page diagnosis; they are not monitored components
+  const probe = (t) => /^observaone-agent-(ping|port)$/.test(t.job);
+  return { servers: [...servers.values()], others: pulled.filter((t) => !isServer(t) && !probe(t)) };
+}
+const isServerJob = (job) => job === 'linux' || job === 'windows';
+
+api.get('/prom/targets', wrap(async (req, res) => {
+  const { servers, others } = await serverInventory(req);
+  res.json([...servers, ...others]);
 }));
 
 // ---------------- Overview (one call for the whole page) ----------------
@@ -188,9 +292,9 @@ api.get('/overview', wrap(async (req, res) => {
     infra ? promInstant(`avg(${memByHost('1h')})`) : off,
     infra ? promInstant(cpuByHost()) : off,
     infra ? prom('/api/v1/query_range', { query: memByHost(), start, end, step }) : off,
-    infra ? promInstant(`count(${SERVERS_UP})`) : off,
-    infra ? promInstant(`count(${SERVERS_UP} == 0)`) : off,
-    alerting ? am('/api/v2/alerts?active=true&silenced=false&inhibited=false') : off,
+    infra ? serverInventory(req) : off,
+    off, // (was: servers down; now part of the inventory above)
+    alerting ? alertCounts() : off,
     services ? servicesNow() : off,
     services ? servicesSeries('rps', start, end, step) : off,
     services ? servicesSeries('p95', start, end, step) : off,
@@ -207,8 +311,9 @@ api.get('/overview', wrap(async (req, res) => {
     memSeries: v(5)?.result || [],
     memError: err(5),
     // null = unknown (query failed); a real count of 0 stays 0
-    servers: { total: v(6) ? (scalar(v(6)) ?? 0) : null, down: v(7) ? (scalar(v(7)) ?? 0) : null, error: err(6) },
-    alerts: { active: v(8) ? v(8).length : null, critical: v(8) ? v(8).filter((a) => a.labels.severity === 'critical').length : null, error: err(8) },
+    // same list and rules as Infrastructure (serverInventory) and the same counts as Alerting (alertCounts)
+    servers: v(6) ? { ...countServers(v(6).servers), error: null } : { total: null, up: null, down: null, notReporting: null, offline: null, disabled: null, error: err(6) },
+    alerts: v(8) ? { ...v(8), error: null } : { firing: null, active: null, critical: null, warning: null, muted: null, pending: null, error: err(8) },
     services: svc,
     servicesError: err(9),
     rpsSeries: v(10),
@@ -253,6 +358,18 @@ async function servicesSeries(metric, start, end, step, names) {
 
 api.get('/services', wrap(async (req, res) => {
   res.json(await servicesNow());
+}));
+
+// Per-service trend for the Services table sparklines. Additive: the /services
+// contract is unchanged. Returns one short series per named service over the range.
+api.get('/services/series', wrap(async (req, res) => {
+  const { start, end, step } = timeRange(req);
+  const metric = ['rps', 'p95', 'errorRate'].includes(String(req.query.metric)) ? String(req.query.metric) : 'rps';
+  const names = String(req.query.names || '').split(',').map((s) => s.trim()).filter(Boolean).slice(0, 200);
+  const s = names.length ? await servicesSeries(metric, start, end, step, names) : { result: [] };
+  const series = {};
+  for (const r of s.result) if (r.metric.service) series[r.metric.service] = r.values;
+  res.json({ metric, start, end, step, series });
 }));
 
 // ---------------- Logs ----------------
@@ -313,6 +430,16 @@ function attr(attrs, key) {
   return v.stringValue ?? v.intValue ?? v.boolValue ?? v.doubleValue;
 }
 
+// Best-effort: pull a resource attribute from a Tempo search result's matched span sets.
+function traceAttr(t, key) {
+  const sets = t.spanSets || (t.spanSet ? [t.spanSet] : []);
+  for (const ss of sets) {
+    for (const sp of ss.spans || []) for (const a of sp.attributes || []) if (a.key === key) return a.value?.stringValue ?? null;
+    for (const a of ss.attributes || []) if (a.key === key) return a.value?.stringValue ?? null;
+  }
+  return null;
+}
+
 api.get('/traces', wrap(async (req, res) => {
   const { start, end } = timeRange(req);
   const tags = parseTraceQuery(req.query.query);
@@ -329,6 +456,7 @@ api.get('/traces', wrap(async (req, res) => {
       traceId: t.traceID, rootService: t.rootServiceName, rootName: t.rootTraceName,
       startMs: Math.floor(Number(t.startTimeUnixNano) / 1e6), durationMs: t.durationMs ?? 0, error: null,
       spanCount: t.spanSet?.matched ?? null,
+      namespace: traceAttr(t, 'k8s.namespace.name'), env: traceAttr(t, 'deployment.environment'),
     })),
   });
 }));
@@ -362,8 +490,13 @@ api.get('/traces/:id', wrap(async (req, res) => {
 }));
 
 // ---------------- Alerts ----------------
+// A tenant user sees only alerts on its own series (tenant label set by the server) and its own silences.
+const mineAlert = (a) => !isScoped() || a.labels?.tenant === currentTenant();
+const mineSilence = (s) => !isScoped() || (s.matchers || []).some((m) => m.name === 'tenant' && m.value === currentTenant() && m.isEqual !== false && !m.isRegex);
+
 api.get('/alerts', wrap(async (req, res) => {
-  const [alerts, silences] = await Promise.all([am('/api/v2/alerts'), am('/api/v2/silences')]);
+  const [allAlerts, allSilences] = await Promise.all([am('/api/v2/alerts'), am('/api/v2/silences')]);
+  const alerts = allAlerts.filter(mineAlert), silences = allSilences.filter(mineSilence);
   res.json({
     alerts: alerts.map((a) => ({
       fingerprint: a.fingerprint, name: a.labels.alertname, severity: a.labels.severity || 'none',
@@ -377,9 +510,9 @@ api.get('/alerts', wrap(async (req, res) => {
   });
 }));
 
+// the bell, Overview and Metrics all show these numbers (rules in routes/alerting.js alertCounts)
 api.get('/alerts/count', wrap(async (req, res) => {
-  const a = await am('/api/v2/alerts?active=true&silenced=false&inhibited=false');
-  res.json({ active: a.length, critical: a.filter((x) => x.labels.severity === 'critical').length });
+  res.json(await alertCounts());
 }));
 
 api.get('/rules', wrap(async (req, res) => {
@@ -388,12 +521,14 @@ api.get('/rules', wrap(async (req, res) => {
   const rules = [];
   for (const g of d.groups) {
     for (const r of g.rules) {
+      // a tenant sees the platform's rules (they run on its servers too) and its own, never another tenant's
+      if (isScoped() && r.labels?.tenant && r.labels.tenant !== currentTenant()) continue;
       rules.push({
         group: g.name, name: r.name, query: r.query, duration: r.duration, state: r.state,
         severity: r.labels?.severity || 'none', summary: r.annotations?.summary || '',
         firing: (r.alerts || []).filter((a) => a.state === 'firing').length,
         lastEvaluation: r.lastEvaluation, health: r.health, lastError: r.lastError,
-        custom: g.name === 'ui-rules' && custom.has(r.name),
+        custom: isUiGroup(g.name) && custom.has(r.name), labels: r.labels || {}, runbook: r.annotations?.runbook_url || '',
       });
     }
   }
@@ -405,7 +540,10 @@ api.post('/silences', requirePerm('alerts.silence'), wrap(async (req, res) => {
   if (!Array.isArray(matchers) || !matchers.length) throw httpError(400, 'matchers required');
   const h = Math.min(168, Math.max(0.25, Number(hours) || 2));
   const body = {
-    matchers: matchers.map((m) => ({ name: String(m.name), value: String(m.value), isRegex: false, isEqual: true })),
+    matchers: [
+      ...matchers.filter((m) => !(isScoped() && m.name === 'tenant')).map((m) => ({ name: String(m.name), value: String(m.value), isRegex: false, isEqual: true })),
+      ...(isScoped() ? [{ name: 'tenant', value: currentTenant(), isRegex: false, isEqual: true }] : []),
+    ],
     startsAt: new Date().toISOString(),
     endsAt: new Date(Date.now() + h * 3600_000).toISOString(),
     createdBy: req.user.username,
@@ -419,34 +557,35 @@ api.post('/silences', requirePerm('alerts.silence'), wrap(async (req, res) => {
 api.delete('/silences/:id', requirePerm('alerts.silence'), wrap(async (req, res) => {
   const id = String(req.params.id);
   if (!/^[0-9a-f-]{36}$/.test(id)) throw httpError(400, 'bad id');
+  if (isScoped()) {
+    const s = await am(`/api/v2/silence/${id}`).catch(() => null);
+    if (!s || !mineSilence(s)) throw httpError(404, 'Silence not found.');
+  }
   await am(`/api/v2/silence/${id}`, { method: 'DELETE' });
   audit(req, 'silence.expire', { id });
   res.json({ ok: true });
 }));
 
-api.get('/notifications', wrap(async (req, res) => {
-  const s = await am('/api/v2/status');
-  const cfg = YAML.parse(s.config?.original || '') || {};
-  const receivers = (cfg.receivers || []).map((r) => ({
-    name: r.name,
-    channels: Object.keys(r).filter((k) => k.endsWith('_configs')).map((k) => ({
-      type: k.replace('_configs', ''),
-      targets: (r[k] || []).map((c) => c.to || c.channel || c.url || c.api_url || '(configured)'),
-    })),
-  }));
-  res.json({ receivers, route: { receiver: cfg.route?.receiver, groupBy: cfg.route?.group_by, repeat: cfg.route?.repeat_interval } });
-}));
+// /notifications: routes/notifications.js (channels managed in ObservaOne, written into Alertmanager's config)
 
 // --- alert rules created in the UI (written to a rules file, Prometheus reloads it) ---
+// Rules created in the UI: group "ui-rules" (Prometheus' evaluation interval) or "ui-rules-<interval>" (their own).
+const EVAL_INTERVALS = ['15s', '30s', '1m', '2m', '5m', '10m'];
+const isUiGroup = (name) => name === 'ui-rules' || /^ui-rules-\d+[sm]$/.test(name);
 function readUiRules() {
   if (!config.rulesFile || !fs.existsSync(config.rulesFile)) return [];
   const doc = YAML.parse(fs.readFileSync(config.rulesFile, 'utf8')) || {};
-  return doc.groups?.find((g) => g.name === 'ui-rules')?.rules || [];
+  return (doc.groups || []).filter((g) => isUiGroup(g.name)).flatMap((g) => (g.rules || []).map((r) => (g.interval ? { ...r, _interval: g.interval } : r)));
 }
 
 async function writeUiRulesAndReload(rules) {
   const old = fs.existsSync(config.rulesFile) ? fs.readFileSync(config.rulesFile, 'utf8') : null;
-  const text = '# Managed by ObservaOne UI - edits here may be overwritten\n' + YAML.stringify({ groups: [{ name: 'ui-rules', rules }] });
+  const byInterval = new Map();
+  for (const { _interval, ...r } of rules) { const k = _interval || ''; if (!byInterval.has(k)) byInterval.set(k, []); byInterval.get(k).push(r); }
+  if (!byInterval.size) byInterval.set('', []);
+  const groups = [...byInterval.entries()].sort(([a], [b]) => (a ? 1 : 0) - (b ? 1 : 0) || a.localeCompare(b))
+    .map(([iv, rs]) => ({ name: iv ? `ui-rules-${iv}` : 'ui-rules', ...(iv ? { interval: iv } : {}), rules: rs }));
+  const text = '# Managed by ObservaOne UI - edits here may be overwritten\n' + YAML.stringify({ groups });
   fs.writeFileSync(config.rulesFile, text);
   const reload = async () => {
     const r = await fetch(`${ds('prometheus').url}/-/reload`, { method: 'POST' });
@@ -464,17 +603,36 @@ async function writeUiRulesAndReload(rules) {
 
 api.post('/rules', requirePerm('alerts.rules'), wrap(async (req, res) => {
   if (!config.rulesFile) throw httpError(400, 'Rule editing is off (UI_RULES_FILE not set).');
-  const { name, expr, forMinutes = 5, severity = 'warning', summary = '', description = '' } = req.body || {};
+  const { name, forMinutes = 5, severity = 'warning', summary = '', description = '', runbookUrl = '', interval = '' } = req.body || {};
+  if (interval && !EVAL_INTERVALS.includes(String(interval))) throw httpError(400, `Evaluation interval: one of ${EVAL_INTERVALS.join(', ')}.`);
+  let expr = buildExpr(req.body || {}); // { expr } or { query, op, threshold }
   if (!/^[A-Za-z][A-Za-z0-9_]{2,63}$/.test(name || '')) throw httpError(400, 'Name: 3-64 letters, numbers or _ , starting with a letter (e.g. HighCpuAppServers).');
   if (!['critical', 'warning', 'info'].includes(severity)) throw httpError(400, 'Severity must be critical, warning or info.');
   if (!expr || String(expr).length > 2000) throw httpError(400, 'Query is required.');
   await prom('/api/v1/query', { query: expr }).catch((e) => { throw httpError(400, `Query error: ${e.message}`); });
+  // labels used for routing (Alertmanager routes on team / env / service / severity) and display
+  const labels = { severity, created_by: req.user.username };
+  const extra = req.body?.labels && typeof req.body.labels === 'object' && !Array.isArray(req.body.labels) ? req.body.labels : {};
+  for (const [k, v] of Object.entries({ ...extra, ...(req.body?.team ? { team: req.body.team } : {}) })) {
+    if (!/^[a-z][a-z0-9_]{0,30}$/.test(k) || ['severity', 'created_by', 'tenant', 'alertname', '__name__'].includes(k)) throw httpError(400, `Label "${k}": lower-case a-z 0-9 _, not a reserved name.`);
+    if (!/^[A-Za-z0-9._ -]{1,64}$/.test(String(v))) throw httpError(400, `Label ${k}: letters, digits, space . _ - (max 64).`);
+    if (k === 'observaone_policy' && !/^p\d{1,12}$/.test(String(v))) throw httpError(400, 'Notification policy: choose one from the list.');
+    labels[k] = String(v);
+  }
+  if (Object.keys(labels).length > 12) throw httpError(400, 'At most 10 labels.');
+  if (runbookUrl && !/^https?:\/\/\S{3,500}$/.test(String(runbookUrl))) throw httpError(400, 'Runbook: an http(s) link.');
+  // A tenant's rule only ever sees the tenant's series (Prometheus evaluates it without ObservaOne in between),
+  // and its alerts carry the tenant label, so only that tenant sees them.
+  if (isScoped()) {
+    try { expr = scopePromQL(expr, currentTenant()); } catch (e) { throw httpError(400, `This query cannot be used for your organisation: ${e.message}`); }
+    labels.tenant = currentTenant();
+  }
   const rules = readUiRules();
   if (rules.some((r) => r.alert === name)) throw httpError(409, 'A rule with this name already exists.');
   rules.push({
-    alert: name, expr: String(expr), for: `${Math.max(0, Math.min(1440, Number(forMinutes) || 0))}m`,
-    labels: { severity, created_by: req.user.username },
-    annotations: { summary: String(summary).slice(0, 300) || name, description: String(description).slice(0, 1000) },
+    alert: name, expr: String(expr), for: `${Math.max(0, Math.min(1440, Number(forMinutes) || 0))}m`, ...(interval ? { _interval: String(interval) } : {}),
+    labels,
+    annotations: { summary: String(summary).slice(0, 300) || name, description: String(description).slice(0, 1000), ...(runbookUrl ? { runbook_url: String(runbookUrl) } : {}) },
   });
   await writeUiRulesAndReload(rules);
   audit(req, 'rule.create', { name, expr, severity });
@@ -484,7 +642,8 @@ api.post('/rules', requirePerm('alerts.rules'), wrap(async (req, res) => {
 api.delete('/rules/:name', requirePerm('alerts.rules'), wrap(async (req, res) => {
   if (!config.rulesFile) throw httpError(400, 'Rule editing is off.');
   const rules = readUiRules();
-  const left = rules.filter((r) => r.alert !== req.params.name);
+  const mine = (r) => !isScoped() || r.labels?.tenant === currentTenant(); // another tenant's rule: not found
+  const left = rules.filter((r) => !(r.alert === req.params.name && mine(r)));
   if (left.length === rules.length) throw httpError(404, 'Only rules created in this UI can be deleted here.');
   await writeUiRulesAndReload(left);
   audit(req, 'rule.delete', { name: req.params.name });
@@ -507,15 +666,20 @@ function rowToDash(r) {
   };
 }
 
+// Custom dashboards belong to a tenant: users of the default tenant (the platform) see all of them, users of another
+// tenant only their own; another tenant's dashboard answers 404 for reading, changing and deleting alike.
+const DASH_TENANT = `($T = 't_default' OR tenant_id = $T)`;
+const dashScope = (n) => DASH_TENANT.replaceAll('$T', `$${n}`);
+
 async function customDashboards() {
-  const { rows } = await q('SELECT * FROM dashboards ORDER BY lower(title)');
+  const { rows } = await q(`SELECT * FROM dashboards WHERE ${dashScope(1)} ORDER BY lower(title)`, [currentTenant()]);
   return rows.map(rowToDash);
 }
 
 async function findDashboard(id) {
   const b = builtinDashboards().find((x) => x.id === id);
   if (b) return b;
-  const r = await one('SELECT * FROM dashboards WHERE id = $1', [id]);
+  const r = await one(`SELECT * FROM dashboards WHERE id = $1 AND ${dashScope(2)}`, [id, currentTenant()]);
   return r ? rowToDash(r) : null;
 }
 
@@ -548,16 +712,34 @@ api.post('/dashboards', requirePerm('dashboards.edit'), wrap(async (req, res) =>
   const { title, description = '' } = req.body || {};
   if (!title || String(title).length > 60) throw httpError(400, 'Title is required (max 60 chars).');
   const id = `c-${crypto.randomBytes(5).toString('hex')}`;
-  const r = await one(`INSERT INTO dashboards (id, title, description, owner) VALUES ($1,$2,$3,$4) RETURNING *`,
-    [id, String(title), String(description).slice(0, 200), req.user.username]);
+  const r = await one(`INSERT INTO dashboards (id, title, description, owner, tenant_id) VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+    [id, String(title), String(description).slice(0, 200), req.user.username, currentTenant()]);
   audit(req, 'dashboard.create', { id, title: r.title });
+  res.json(rowToDash(r));
+}));
+
+// Clone any dashboard (system file or custom) into a new, editable custom dashboard for this tenant,
+// copying its variables and panels so it works immediately and can then be customised.
+api.post('/dashboards/:id/clone', requirePerm('dashboards.edit'), wrap(async (req, res) => {
+  const src = await findDashboard(req.params.id);
+  if (!src) throw httpError(404, 'Dashboard not found');
+  const title = String((req.body && req.body.title) || `${src.title} (copy)`).slice(0, 60);
+  const id = `c-${crypto.randomBytes(5).toString('hex')}`;
+  const panels = (src.panels || []).map(cleanPanel);
+  const variables = Array.isArray(src.variables) ? src.variables : [];
+  const r = await one(
+    `INSERT INTO dashboards (id, title, description, owner, tenant_id, variables, panels)
+     VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb) RETURNING *`,
+    [id, title, String(src.description || '').slice(0, 200), req.user.username, currentTenant(),
+      JSON.stringify(variables), JSON.stringify(panels)]);
+  audit(req, 'dashboard.clone', { from: src.id, id, title: r.title });
   res.json(rowToDash(r));
 }));
 
 api.post('/dashboards/:id/panels', requirePerm('dashboards.edit'), wrap(async (req, res) => {
   const panel = cleanPanel(req.body);
-  const r = await one(`UPDATE dashboards SET panels = panels || $2::jsonb, updated_at = now() WHERE id = $1 RETURNING *`,
-    [req.params.id, JSON.stringify([panel])]);
+  const r = await one(`UPDATE dashboards SET panels = panels || $2::jsonb, updated_at = now() WHERE id = $1 AND ${dashScope(3)} RETURNING *`,
+    [req.params.id, JSON.stringify([panel]), currentTenant()]);
   if (!r) throw httpError(404, 'Only custom dashboards can be changed. System dashboards are managed as files.');
   audit(req, 'dashboard.panel.add', { id: r.id, title: panel.title });
   res.json(rowToDash(r));
@@ -566,14 +748,14 @@ api.post('/dashboards/:id/panels', requirePerm('dashboards.edit'), wrap(async (r
 api.delete('/dashboards/:id/panels/:idx', requirePerm('dashboards.edit'), wrap(async (req, res) => {
   const idx = Number(req.params.idx);
   if (!Number.isInteger(idx) || idx < 0) throw httpError(400, 'Bad panel index');
-  const r = await one(`UPDATE dashboards SET panels = panels - $2::int, updated_at = now() WHERE id = $1 RETURNING *`, [req.params.id, idx]);
+  const r = await one(`UPDATE dashboards SET panels = panels - $2::int, updated_at = now() WHERE id = $1 AND ${dashScope(3)} RETURNING *`, [req.params.id, idx, currentTenant()]);
   if (!r) throw httpError(404, 'Dashboard not found');
   audit(req, 'dashboard.panel.delete', { id: r.id, idx });
   res.json(rowToDash(r));
 }));
 
 api.delete('/dashboards/:id', requirePerm('dashboards.edit'), wrap(async (req, res) => {
-  const r = await q('DELETE FROM dashboards WHERE id = $1', [req.params.id]);
+  const r = await q(`DELETE FROM dashboards WHERE id = $1 AND ${dashScope(2)}`, [req.params.id, currentTenant()]);
   if (!r.rowCount) throw httpError(404, 'Only custom dashboards can be deleted.');
   audit(req, 'dashboard.delete', { id: req.params.id });
   res.json({ ok: true });
@@ -668,6 +850,7 @@ const DOCS = {
   'GET /logs': 'Search logs. ?query=<LogQL>&start=&end=&limit=',
   'GET /traces': 'Search traces. ?query=service.name=x',
   'GET /dashboards': 'List dashboards',
+  'POST /dashboards/:id/clone': 'Clone a dashboard into an editable custom copy',
 };
 function collectRoutes(router, out = []) {
   for (const layer of router.stack || []) {

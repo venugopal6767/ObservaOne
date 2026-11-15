@@ -1,0 +1,15 @@
+[Unit]
+Description=ObservaOne traces collector (OpenTelemetry Collector)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=/etc/observaone-traces/collector.env
+ExecStart=/usr/bin/otelcol-contrib --config=/etc/observaone-traces/collector.yaml
+Restart=on-failure
+RestartSec=5
+User=observaone-traces
+DynamicUser=yes
+
+[Install]
+WantedBy=multi-user.target

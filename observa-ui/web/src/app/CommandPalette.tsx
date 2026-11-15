@@ -40,6 +40,10 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
       { id: 'a:logout', label: 'Sign out', kind: 'Action', run: () => { logout(); } },
     ];
     if (canOpen('/agents')) actions.push({ id: 'a:install', label: 'Install an agent', kind: 'Action', run: go('/agents?tab=install') });
+    if (canOpen('/metrics')) {
+      actions.push({ id: 'a:explore', label: 'Explore metrics', kind: 'Action', hint: 'promql builder templates', run: go('/metrics/explore') });
+      actions.push({ id: 'a:k8s', label: 'Kubernetes clusters', kind: 'Page', hint: 'k8s pods nodes namespaces', run: go('/metrics/kubernetes') });
+    }
     if (!term) return [...pages, ...actions.slice(-4)];
     const has = (s: string) => s.toLowerCase().includes(term);
     const out: Item[] = [
@@ -49,9 +53,10 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
         ...(canOpen('/logs') ? [{ id: `sl:${s.name}`, label: `Logs: ${s.name}`, kind: 'Service', run: go(`/logs?q=${encodeURIComponent(`{service_name="${escapeLabel(s.name)}"}`)}`) }] : []),
         ...(canOpen('/traces') ? [{ id: `st:${s.name}`, label: `Traces: ${s.name}`, kind: 'Service', run: go(`/traces?q=${encodeURIComponent(`service.name=${s.name}`)}`) }] : []),
       ]),
-      ...(metrics.data || []).filter((m) => has(m)).slice(0, 8).map((m) => ({ id: `m:${m}`, label: m, kind: 'Metric', run: go(`/metrics?q=${encodeURIComponent(m)}`) })),
+      ...(metrics.data || []).filter((m) => has(m)).slice(0, 8).map((m) => ({ id: `m:${m}`, label: m, kind: 'Metric', run: go(`/metrics/explore?mode=code&q=${encodeURIComponent(m)}`) })),
       ...actions.filter((a) => has(a.label)),
     ];
+    if (canOpen('/metrics')) out.unshift({ id: 'q:ask', label: `Ask: "${raw}"`, kind: 'Metrics', run: go(`/metrics/explore?ask=${encodeURIComponent(raw)}`) });
     if (canOpen('/logs')) out.push({ id: 'q:logs', label: `Search logs for "${raw}"`, kind: 'Logs', run: go(`/logs?q=${encodeURIComponent(`{service_name=~".+"} |= "${raw}"`)}`) });
     if (canOpen('/traces')) {
       if (/^[0-9a-f]{16,32}$/i.test(raw)) out.unshift({ id: 'q:trace', label: `Open trace ${raw}`, kind: 'Trace', run: go(`/traces?id=${raw}`) });

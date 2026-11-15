@@ -59,6 +59,20 @@ One Docker setup that gives you a monitoring website with login:
 
 > **Passwords from `.env` are only used the first time.** After that, users and passwords live in the database. Change them in **Settings → Users**, or each user changes their own in **Settings → My profile**.
 
+## 2b. Try it with demo data (optional, test only)
+
+To check every screen before real servers are connected, turn on the made-up demo company
+(19 servers, 3 Kubernetes clusters, 9 services, databases, VMware, network devices, 8 days of history,
+logs, traces and alerts). Your real Prometheus is not touched; the UI shows a **Demo data** chip.
+
+```bash
+echo 'COMPOSE_FILE=docker-compose.yml:demo/docker-compose.demo.yml' >> .env
+docker compose up -d --build
+```
+
+Turn it off: remove that line from `.env`, run `docker compose up -d --remove-orphans`.
+Details and full removal: [demo/README.md](demo/README.md).
+
 ## 3. Roles
 
 | Role | Can do |
@@ -125,31 +139,38 @@ The UI keeps its data in the `observa-db` container:
 One agent per server collects **metrics, logs and traces** and sends them to ObservaOne over HTTPS.
 Nothing on the server has to be reachable from the monitoring server (no inbound ports, no firewall rule).
 
-| Platform | What the agent collects |
-|---|---|
-| **Linux** (systemd) | CPU, memory, disk, network, systemd services (node_exporter) · syslog/messages/auth logs or the journal · your log files · traces from apps |
-| **Windows** Server 2016+ | windows_exporter metrics · Application + System event logs (Security optional) · your log files · traces |
-| **Docker host** | the host + every container (cAdvisor) · container stdout/stderr · traces |
-| **Kubernetes / OpenShift** | every node, container CPU/memory, pod logs, Kubernetes events, kube-state-metrics · traces on the node IP |
+| Platform | Agent | What it collects |
+|---|---|---|
+| **Linux** (systemd) | **ObservaOne Go agent 1.3** (new) | CPU, memory, filesystems, disk and network I/O, load, uptime, OS info. Logs and traces: not yet (use the previous agent where needed) |
+| **Windows** Server 2016+ | previous agent (OpenTelemetry Collector) | windows_exporter metrics · event logs · your log files · traces |
+| **Docker host** | previous agent | the host + every container (cAdvisor) · container logs · traces |
+| **Kubernetes / OpenShift** | previous agent | nodes, containers, pod logs, events, kube-state-metrics · traces |
 
-**Install**
-1. ObservaOne → **Agents → Install agent**.
-2. Pick the platform, click **New token**, and fill in environment / role / extra log files if you want them.
-3. Copy the command and run it on the server (Linux: as root; Windows: PowerShell **Run as administrator**; Kubernetes: with `kubectl`).
-4. The server shows up on the **Agents** page within a minute, and on Infrastructure, Dashboards and Logs.
+The Linux agent is documented in full in **[docs/agent/LINUX-AGENT.md](docs/agent/LINUX-AGENT.md)**: architecture, network and TLS, configuration, status rules, metrics, troubleshooting, upgrade and rollback, and test results.
 
-Example (Linux):
+**Install (Linux)**
+1. ObservaOne → **Agents → Linux → Install**, then **Create a token** (choose how long it is valid and how many servers may use it).
+2. Run the two lines shown on the page on the server. The one-use token is already in the command (it expires and is worthless once used); for automation use `--token-file` instead.
+3. The server shows up under **Agents → Linux** within a minute (status **Up**), and in Infrastructure, Overview and Dashboards.
+
 ```bash
-curl -fsSL https://monitor.example.local/agent/install.sh | sudo bash -s -- \
-  --server https://monitor.example.local --token oat_xxxxxxxx_xxxx --env prod --role web \
-  --logs "/var/log/nginx/*.log"
+curl -fsSL https://monitor.example.local/agent/install.sh -o observaone-install.sh
+sudo bash observaone-install.sh --server https://monitor.example.local --ca-sha256 <FINGERPRINT> --env prod --role web
 ```
 
+The monitored server needs **outbound HTTPS (443) to ObservaOne** and nothing else. ObservaOne must be reachable at that
+address from the server: a laptop or WSL install is not reachable from cloud VMs.
+
+**Windows / Docker / Kubernetes:** Agents → *platform* → Install shows the command for the previous agent.
+
 **Safety built in**
-- The agent token is checked by ObservaOne on **every** upload. Revoke a token (Agents → Tokens) and every agent using it stops within a minute. **Block** cuts off a single server.
+- Linux agent: the enrollment token is swapped once for the agent's own credential; ObservaOne decides the agent's identity and the `host` label on its metrics. Revoking a token stops new enrollments; **Block** or **Remove** cuts off one server at once.
+- Previous agent (Windows / Docker / Kubernetes): the token is checked on every upload. Revoking it stops every agent using it within a minute.
 - Self-signed certificate? The command pins your server's certificate fingerprint. Agents refuse any other server, so there is no "ignore certificate errors".
 - Every download is checked against a fixed SHA-256 before it is installed.
-- Linux: runs as the user `observaone-agent` with only the right to read log files (`CAP_DAC_READ_SEARCH`). node_exporter listens on 127.0.0.1 only.
+- Linux 1.3: **Infrastructure → Add target** walks you through install and shows when the server is connected; settings per environment / agent, diagnostics, restart and **upgrade with automatic rollback** from the Agents page; top processes, Docker, Nginx, JVM and local exporters; credential rotation and signed releases; optional disk buffer; tenants (Settings → Tenants) and site gateways for networks that cannot reach ObservaOne (`gateway/`).
+- Linux: push (default, outbound 443 only) or **pull** (`--mode pull`: Prometheus scrapes the agent over mutual TLS on port 9110, certificates issued by ObservaOne). The Agents page shows *why* an agent looks the way it does (host down, agent stopped, firewall, certificate), from heartbeats, scrapes and ping/TCP probes (blackbox exporter).
+- Linux: runs as the unprivileged user `observaone-agent` in a hardened systemd unit (read-only system, 128 MB memory cap); its diagnostics page listens on 127.0.0.1 only.
 - Windows: windows_exporter listens on 127.0.0.1 only. The token file is readable by SYSTEM and Administrators only.
 - If ObservaOne is unreachable, logs and traces wait on disk and are sent later. Metrics wait in memory, and Prometheus accepts them up to 30 minutes late.
 
@@ -229,7 +250,7 @@ Data appears on the Logs and Traces pages as soon as it reaches Loki and Tempo. 
 
 - Alert rules are in `prometheus/rules/host-alerts.yml`: server down, CPU above 90%, memory above 90%, disk below 20% (warning) and below 10% (critical). After editing, run `docker compose restart prometheus`.
 - Admins can also create rules in **Alerting → New Alert Rule**. The UI checks the query, writes the rule and reloads Prometheus. If Prometheus rejects the rule, the change is undone.
-- To turn on **email**, fill in the `smtp_*` lines and `email_configs` in `alertmanager/alertmanager.yml`, then run `docker compose restart alertmanager`.
+- To send alerts by **email, Microsoft Teams, Slack, webhook or PagerDuty**: ObservaOne → Alerts → Notification Channels → *Email server* (once, for email) and *Add Channel*, then *Test*; Notification Policies decide which alerts go to which channels. ObservaOne writes Alertmanager's configuration and reloads it (docs/alerting/ALERTING.md). Inhibition stays in `alertmanager/alertmanager.yml` (restart `observa` after editing it).
 - To **silence** an alert (for example during maintenance), switch off **Notify** on it in Alerting. This needs the operator role or higher.
 
 ## 7b. Tests
@@ -321,7 +342,7 @@ docker-compose.yml        all services
 .env.example              settings and passwords (copy to .env)
 nginx/nginx.conf          HTTPS, routing, logins for /prometheus /alertmanager and intake
 prometheus/               prometheus.yml, targets/*.yml (your servers), rules/*.yml (alerts)
-alertmanager/             alertmanager.yml (email etc.)
+alertmanager/             alertmanager.yml (base: routes, grouping, inhibition; channels are added in the UI)
 grafana/                  Grafana data sources and dashboards
 loki/ tempo/              log and trace storage settings
 observa-ui/               the ObservaOne web app (Node.js + PostgreSQL)

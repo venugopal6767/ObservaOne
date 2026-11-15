@@ -31,7 +31,7 @@ export default function Logs() {
   const { range, refreshMs, pref, savePref, setDsChip, canOpen } = useApp();
   const { open } = useDialogs();
   const [params, setParams] = useSearchParams();
-  const initial = params.get('q') || pref<string>('logsQuery') || '{service_name=~".+"} |= "ERROR"';
+  const initial = params.get('q') || pref<string>('logsQuery') || '{service_name=~".+"} |~ "(?i)error"';
   const [text, setText] = useState(initial);
   const [query, setQuery] = useState(initial);
   const [level, setLevel] = useState('ALL');

@@ -1,0 +1,1 @@
+Vercel agent-skills: MIT (declared in repo metadata/README; upstream ships no LICENSE file as of commit 1a2c79d)

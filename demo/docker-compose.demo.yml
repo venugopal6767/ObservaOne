@@ -1,0 +1,75 @@
+# ObservaOne DEMO DATA (test data only) - a made-up company so every screen can be checked.
+#
+#   Turn on : add this line to .env, then run  docker compose up -d --build
+#               COMPOSE_FILE=docker-compose.yml:demo/docker-compose.demo.yml
+#   Turn off: remove that line from .env, then run  docker compose up -d --remove-orphans
+#   Remove  : also delete the demo/ folder and run  docker volume rm monitoring_demo-prom-data monitoring_demo-state
+#
+# What it does: a separate "prometheus-demo" holds the made-up metrics (8 days of history, then live),
+# and the UI is pointed at it instead of the real Prometheus. Your real Prometheus is not touched.
+# Made-up logs and traces are pushed into the real Loki and Tempo (labelled job="k8s-pods",
+# "syslog", "windows-eventlog", "kubernetes-events"); they age out with the normal retention.
+
+services:
+  demo-seed:                       # one-off: writes the metric history, then exits (skipped when already done)
+    build: ./demo
+    image: observa-demo:1.0
+    command: ["seed"]
+    environment:
+      DEMO_DAYS: ${DEMO_DAYS:-8}
+    volumes:
+      - demo-prom-data:/prometheus
+      - demo-state:/state
+    restart: "no"
+
+  demo:                            # live exporter for prometheus-demo + pushes logs to Loki and traces to Tempo
+    build: ./demo                  # same image as demo-seed (built once, cached)
+    image: observa-demo:1.0
+    command: ["serve"]
+    environment:
+      DEMO_ADDRESS: demo:9101
+      LOKI_URL: http://loki:3100
+      TEMPO_OTLP_URL: http://tempo:4318
+      DEMO_LOG_HOURS: ${DEMO_LOG_HOURS:-6}
+    volumes:
+      - demo-state:/state
+    depends_on:
+      demo-seed:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  prometheus-demo:
+    image: prom/prometheus:v3.15.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --web.external-url=https://${SERVER_NAME:-localhost}/prometheus/
+      - --web.enable-lifecycle
+    volumes:
+      - ./demo/prometheus:/etc/prometheus:ro
+      - ui-rules:/etc/prometheus-ui:ro
+      - demo-prom-data:/prometheus
+    depends_on:
+      demo-seed:
+        condition: service_completed_successfully
+      demo:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/prometheus/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  observa:                         # the UI reads metrics from the demo Prometheus
+    environment:
+      PROMETHEUS_URL: http://prometheus-demo:9090/prometheus
+      UI_DEMO_DATA: "true"
+    depends_on:
+      prometheus-demo:
+        condition: service_healthy
+
+volumes:
+  demo-prom-data:
+  demo-state:

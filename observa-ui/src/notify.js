@@ -1,0 +1,448 @@
+// Notification channels managed in ObservaOne: Email, Microsoft Teams, Slack, Webhook, PagerDuty.
+//
+// Alertmanager stays the notification engine (grouping, routing, silences, inhibition, retries). ObservaOne keeps the
+// channels (secrets encrypted with the app secret) and WRITES Alertmanager's configuration file:
+//   the base file (alertmanager/alertmanager.yml: routes, grouping, inhibition)  +  each channel added to its team's
+//   receiver ("<team>-team")  +  a route team="<team>" for a new team  +  the email server (SMTP) settings
+// then asks Alertmanager to reload. If Alertmanager refuses the new file, the previous one is put back.
+// "Send test" sends from ObservaOne itself with exactly the same settings, so it can say what went wrong.
+import fs from 'node:fs';
+import path from 'node:path';
+import YAML from 'yaml';
+import nodemailer from 'nodemailer';
+import { config } from './config.js';
+import { q, one } from './db.js';
+import { encrypt, decrypt } from './secrets.js';
+import { getSetting, setSetting } from './settings.js';
+import { ds } from './datasources.js';
+import { httpError } from './auth.js';
+import { listPolicies, ensurePolicies, matcherString, SELECT_LABEL } from './policies.js';
+
+export const TYPES = {
+  email: { name: 'Email', key: 'email_configs' },
+  teams: { name: 'Microsoft Teams', key: 'msteamsv2_configs' },
+  slack: { name: 'Slack', key: 'slack_configs' },
+  webhook: { name: 'Webhook', key: 'webhook_configs' },
+  pagerduty: { name: 'PagerDuty', key: 'pagerduty_configs' },
+};
+export const TEAM_RE = /^[a-z][a-z0-9-]{1,30}$/;
+const EMAIL_RE = /^[^\s@,;<>"]+@[^\s@,;<>"]+\.[^\s@,;<>"]+$/;
+const SMARTHOST_RE = /^[A-Za-z0-9.-]+:\d{1,5}$/;
+
+export const editable = () => !!config.alertmanagerConfigFile;
+
+// ---------------------------------------------------------------- input checks
+function httpsUrl(v, what, { allowHttp = false } = {}) {
+  let u;
+  try { u = new URL(String(v || '').trim()); } catch { throw httpError(400, `${what}: enter a full address, starting with https://`); }
+  if (u.protocol !== 'https:' && !(allowHttp && u.protocol === 'http:')) throw httpError(400, `${what}: must start with https://${allowHttp ? ' or http://' : ''}`);
+  if (u.username || u.password) throw httpError(400, `${what}: put credentials in the token field, not in the address`);
+  return u.toString();
+}
+const maskUrl = (url) => { try { const u = new URL(url); return `${u.origin}/…`; } catch { return '(address)'; } };
+
+/** Checks a channel from the UI. `old` = the stored row when editing (empty secret fields keep the stored ones). */
+export function cleanChannel(b = {}, old = null) {
+  const type = old ? old.type : String(b.type || '');
+  if (!TYPES[type]) throw httpError(400, 'Choose a channel type: Email, Microsoft Teams, Slack, Webhook or PagerDuty.');
+  const name = String(b.name ?? old?.name ?? '').trim();
+  if (!name || name.length > 60) throw httpError(400, 'Give the channel a name (up to 60 characters).');
+  // channels no longer belong to a team (policies choose them); a team given is still checked and kept
+  const team = String(b.team ?? old?.team ?? '').trim().toLowerCase() || null;
+  if (team !== null && !TEAM_RE.test(team)) throw httpError(400, 'Team: lower-case letters, digits and -, starting with a letter (e.g. platform, infra, payments-ops).');
+  const oldSecret = old?.secret ? JSON.parse(decrypt(old.secret)) : {};
+  const settings = {}, secret = {};
+  let display;
+  if (type === 'email') {
+    const to = String(b.to ?? old?.settings?.to ?? '').split(/[,;\s]+/).map((x) => x.trim()).filter(Boolean);
+    if (!to.length) throw httpError(400, 'Enter at least one email address.');
+    if (to.length > 20) throw httpError(400, 'Up to 20 email addresses per channel.');
+    const bad = to.filter((x) => !EMAIL_RE.test(x));
+    if (bad.length) throw httpError(400, `Not an email address: ${bad.join(', ')}`);
+    settings.to = to.join(', ');
+    display = settings.to;
+  } else if (type === 'teams') {
+    secret.url = b.webhookUrl ? httpsUrl(b.webhookUrl, 'Teams workflow URL') : oldSecret.url;
+    if (!secret.url) throw httpError(400, 'Paste the Teams workflow (webhook) URL.');
+    display = maskUrl(secret.url);
+  } else if (type === 'slack') {
+    secret.url = b.webhookUrl ? httpsUrl(b.webhookUrl, 'Slack webhook URL') : oldSecret.url;
+    if (!secret.url) throw httpError(400, 'Paste the Slack incoming-webhook URL.');
+    const channel = String(b.channel ?? old?.settings?.channel ?? '').trim();
+    if (channel && !/^[#@]?[\w.-]{1,80}$/.test(channel)) throw httpError(400, 'Slack channel: like #alerts');
+    if (channel) settings.channel = channel.startsWith('#') || channel.startsWith('@') ? channel : `#${channel}`;
+    display = settings.channel || maskUrl(secret.url);
+  } else if (type === 'webhook') {
+    secret.url = b.url ? httpsUrl(b.url, 'Webhook URL', { allowHttp: true }) : oldSecret.url;
+    if (!secret.url) throw httpError(400, 'Enter the webhook URL.');
+    const token = b.token === undefined || b.token === '' ? oldSecret.token : String(b.token).trim();
+    if (b.clearToken) delete secret.token; else if (token) secret.token = token;
+    if (secret.token && (secret.token.length > 4096 || /\s/.test(secret.token))) throw httpError(400, 'Token: no spaces, up to 4096 characters.');
+    display = maskUrl(secret.url);
+  } else if (type === 'pagerduty') {
+    secret.routingKey = b.routingKey ? String(b.routingKey).trim() : oldSecret.routingKey;
+    if (!secret.routingKey || !/^[A-Za-z0-9]{20,64}$/.test(secret.routingKey)) throw httpError(400, 'PagerDuty: paste the integration (routing) key of an Events API v2 integration.');
+    display = `routing key …${secret.routingKey.slice(-4)}`;
+  }
+  return {
+    name, type, team, settings, display,
+    secret: Object.keys(secret).length ? encrypt(JSON.stringify(secret)) : null,
+    sendResolved: b.sendResolved === undefined ? (old ? old.send_resolved : true) : !!b.sendResolved,
+    enabled: b.enabled === undefined ? (old ? old.enabled : true) : !!b.enabled,
+  };
+}
+
+// ---------------------------------------------------------------- email server (SMTP)
+export async function getSmtp({ withPassword = false } = {}) {
+  const s = (await getSetting('smtp')) || {};
+  const out = { configured: !!(s.smarthost && s.from), smarthost: s.smarthost || '', from: s.from || '', username: s.username || '', requireTls: s.requireTls !== false, hasPassword: !!s.passwordEnc };
+  if (withPassword) out.password = s.passwordEnc ? decrypt(s.passwordEnc) : '';
+  return out;
+}
+export async function saveSmtp(b = {}, by) {
+  const old = (await getSetting('smtp')) || {};
+  if (b.clear) { await setSetting('smtp', {}, by); return; }
+  const smarthost = String(b.smarthost || '').trim(), from = String(b.from || '').trim(), username = String(b.username || '').trim();
+  if (!SMARTHOST_RE.test(smarthost)) throw httpError(400, 'Mail server: host:port, e.g. smtp.office365.com:587 or mail.bank.local:25');
+  if (!EMAIL_RE.test(from.replace(/^.*<([^>]+)>\s*$/, '$1'))) throw httpError(400, 'From: an email address, e.g. monitoring@bank.local');
+  if (username.length > 200) throw httpError(400, 'Username: up to 200 characters.');
+  const passwordEnc = b.password ? encrypt(String(b.password)) : (b.clearPassword || !username ? undefined : old.passwordEnc);
+  await setSetting('smtp', { smarthost, from, username, requireTls: b.requireTls !== false, ...(passwordEnc ? { passwordEnc } : {}) }, by);
+}
+
+// ---------------------------------------------------------------- channels
+export async function listChannels() {
+  return (await q('SELECT * FROM notification_channels ORDER BY team, lower(name)')).rows;
+}
+export const publicChannel = (r) => ({
+  id: Number(r.id), name: r.name, type: r.type, typeName: TYPES[r.type]?.name || r.type, team: r.team, display: r.display,
+  to: r.settings?.to, channel: r.settings?.channel, sendResolved: r.send_resolved, enabled: r.enabled,
+  createdBy: r.created_by, updatedAt: r.updated_at,
+  lastTest: r.last_test_at ? { at: r.last_test_at, ok: r.last_test_ok, error: r.last_test_error } : null,
+});
+
+const secretOf = (r) => (r.secret ? JSON.parse(decrypt(r.secret)) : {});
+
+// ---------------------------------------------------------------- message layout (Alertmanager Go templates)
+// Slack: colour by severity; one line per server: what, since when (shown in each reader's own time zone), links to
+// the alert's details, the host and the runbook in ObservaOne; resolved ones with how long they lasted.
+// Links need PUBLIC_URL (ObservaOne's address as users open it); without it the messages have no links.
+const MAX_LINES = 10;
+/** Message time zone as a fixed offset (Alertmanager's image may have no time-zone data, and a failing template
+ *  would drop the notification). Zones with summer time are right for the offset of when the file was written. */
+export function zoneOf(name = 'UTC', at = new Date()) {
+  try {
+    const get = (locale, style) => new Intl.DateTimeFormat(locale, { timeZone: name, timeZoneName: style }).formatToParts(at).find((x) => x.type === 'timeZoneName')?.value || '';
+    const m = /GMT(?:([+-])(\d{1,2})(?::(\d{2}))?)?/.exec(get('en-US', 'shortOffset'));
+    const minutes = m && m[1] ? (m[1] === '-' ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3] || 0)) : 0;
+    const short = get('en-IN', 'short');
+    const hhmm = `${minutes < 0 ? '-' : '+'}${String(Math.floor(Math.abs(minutes) / 60)).padStart(2, '0')}:${String(Math.abs(minutes) % 60).padStart(2, '0')}`;
+    const label = minutes === 0 ? 'UTC' : (/^[A-Z]{2,5}$/.test(short) ? short : `UTC${hhmm}`);
+    return { minutes, label };
+  } catch {
+    console.warn(`[notify] unknown NOTIFY_TIMEZONE "${name}": using UTC`);
+    return { minutes: 0, label: 'UTC' };
+  }
+}
+const at = (field, fmt, z) => `{{ (${field}.UTC${z.minutes ? `.Add ${z.minutes * 60 * 1e9}` : ''}).Format "${fmt}" }} ${z.label}`;
+const who = '{{ or $a.Labels.host $a.Labels.instance $a.Labels.service $a.Labels.job "-" }}';
+const what = '{{ or $a.Annotations.summary $a.Labels.alertname }}';
+function links(oo, md) {
+  if (!oo) return '';
+  const l = (text, url) => (md === 'slack' ? `<${url}|${text}>` : `[${text}](${url})`);
+  return ` · ${l('Details', `${oo}/alerting/open?name={{ $a.Labels.alertname | urlquery }}&host={{ $a.Labels.host | urlquery }}&at={{ $a.StartsAt.Unix }}`)}`
+    + `{{ with $a.Labels.host }} · ${l('Host', `${oo}/metrics/host/{{ . | urlquery }}`)}{{ end }}`
+    + `{{ with $a.Annotations.runbook_url }} · ${l('Runbook', '{{ . }}')}{{ end }}`;
+}
+const listUrl = (oo) => `${oo}/alerting/active?tab={{ if eq .Status "firing" }}firing{{ else }}resolved{{ end }}&q={{ .CommonLabels.alertname | urlquery }}`;
+const TITLE = '{{ if eq .Status "firing" }}{{ if eq .CommonLabels.severity "critical" }}🔴{{ else if eq .CommonLabels.severity "warning" }}🟠{{ else }}🔵{{ end }} FIRING{{ else }}✅ RESOLVED{{ end }}: '
+  + '{{ .CommonLabels.alertname }}{{ with .CommonLabels.severity }} · {{ . }}{{ end }}{{ with .CommonLabels.env }} · {{ . }}{{ end }}'
+  + '{{ if gt (len .Alerts) 1 }} · {{ len .Alerts }} alerts{{ end }}';
+
+export function slackLayout(oo, z = zoneOf(config.notifyTimezone)) {
+  const since = `<!date^{{ $a.StartsAt.Unix }}^{date_short_pretty} {time}|${at('$a.StartsAt', '2006-01-02 15:04', z)}>`;
+  const firing = `{{ range $i, $a := .Alerts.Firing }}{{ if lt $i ${MAX_LINES} }}• *${who}*: ${what}\n      since ${since}${links(oo, 'slack')}\n{{ end }}{{ end }}`
+    + `{{ if gt (len .Alerts.Firing) ${MAX_LINES} }}…and {{ len .Alerts.Firing }} in total${oo ? ` · <${listUrl(oo)}|see all>` : ''}\n{{ end }}`;
+  const resolved = `{{ if .Alerts.Resolved }}{{ if .Alerts.Firing }}*Resolved:*\n{{ end }}{{ range $i, $a := .Alerts.Resolved }}{{ if lt $i ${MAX_LINES} }}`
+    + `✓ *${who}*: ${what}\n      lasted {{ printf "%.0f" ($a.EndsAt.Sub $a.StartsAt).Minutes }} min, resolved <!date^{{ $a.EndsAt.Unix }}^{time}|${at('$a.EndsAt', '15:04', z)}>${links(oo, 'slack')}\n{{ end }}{{ end }}{{ end }}`;
+  return {
+    color: '{{ if eq .Status "resolved" }}good{{ else if eq .CommonLabels.severity "critical" }}danger{{ else if eq .CommonLabels.severity "warning" }}warning{{ else }}#3b82f6{{ end }}',
+    title: TITLE,
+    ...(oo ? { title_link: listUrl(oo) } : {}),
+    text: firing + resolved,
+    fallback: '{{ if eq .Status "firing" }}FIRING{{ else }}RESOLVED{{ end }}: {{ .CommonLabels.alertname }}{{ with .CommonLabels.env }} ({{ . }}){{ end }} on {{ range $i, $a := .Alerts }}{{ if $i }}, {{ end }}' + who + '{{ end }}',
+    footer: 'ObservaOne{{ with .CommonLabels.team }} · team {{ . }}{{ end }}{{ with .CommonLabels.service }} · service {{ . }}{{ end }}',
+    ...(oo ? { actions: [{ type: 'button', text: 'Open in ObservaOne', url: listUrl(oo) }] } : {}),
+  };
+}
+
+// Teams (Workflows adaptive card): same content, markdown links, times in NOTIFY_TIMEZONE (a card cannot localise)
+export function teamsLayout(oo, z = zoneOf(config.notifyTimezone)) {
+  const line = (state) => (state === 'firing'
+    ? `- **${who}**: ${what} · since ${at('$a.StartsAt', 'Jan 2 15:04', z)}${links(oo, 'md')}`
+    : `- ✓ **${who}**: ${what} · lasted {{ printf "%.0f" ($a.EndsAt.Sub $a.StartsAt).Minutes }} min${links(oo, 'md')}`);
+  return {
+    title: TITLE,
+    text: `{{ range $i, $a := .Alerts.Firing }}{{ if lt $i ${MAX_LINES} }}${line('firing')}\n\n{{ end }}{{ end }}`
+      + `{{ if gt (len .Alerts.Firing) ${MAX_LINES} }}…and {{ len .Alerts.Firing }} in total${oo ? ` · [see all](${listUrl(oo)})` : ''}\n\n{{ end }}`
+      + `{{ if .Alerts.Resolved }}{{ if .Alerts.Firing }}**Resolved:**\n\n{{ end }}{{ range $i, $a := .Alerts.Resolved }}{{ if lt $i ${MAX_LINES} }}${line('resolved')}\n\n{{ end }}{{ end }}{{ end }}`
+      + `ObservaOne{{ with .CommonLabels.team }} · team {{ . }}{{ end }}${oo ? ` · [Open in ObservaOne](${listUrl(oo)})` : ''}`,
+  };
+}
+
+function amChannel(r) {
+  const s = secretOf(r), sr = r.send_resolved;
+  switch (r.type) {
+    case 'email': return { to: r.settings.to, send_resolved: sr };
+    case 'teams': return { webhook_url: s.url, send_resolved: sr, ...teamsLayout(config.publicUrl) };
+    case 'slack': return { api_url: s.url, ...(r.settings.channel ? { channel: r.settings.channel } : {}), send_resolved: sr, ...slackLayout(config.publicUrl) };
+    case 'webhook': return { url: s.url, send_resolved: sr, ...(s.token ? { http_config: { authorization: { type: 'Bearer', credentials: s.token } } } : {}) };
+    case 'pagerduty': return { routing_key: s.routingKey, send_resolved: sr };
+    default: return null;
+  }
+}
+
+/** Teams that exist: the base file's "<team>-team" receivers + the teams of the channels. */
+export function teamsOf(base, channels) {
+  const t = new Set((base?.receivers || []).map((r) => /^([a-z][a-z0-9-]*)-team$/.exec(r.name)?.[1]).filter(Boolean));
+  for (const c of channels) t.add(c.team);
+  return [...t].sort();
+}
+
+/** Alertmanager config = base (global, inhibition, time intervals) + SMTP + POLICIES (routes) + channels (receivers).
+ *  Pure: used by the writer and the tests. Without policies: the earlier team routing (only before the conversion). */
+export function renderConfig(base, channels, smtp, policies) {
+  if (policies?.length) return renderPolicies(base, channels, smtp, policies);
+  const cfg = structuredClone(base || {});
+  cfg.global ||= {};
+  if (smtp?.configured) {
+    cfg.global.smtp_smarthost = smtp.smarthost;
+    cfg.global.smtp_from = smtp.from;
+    cfg.global.smtp_require_tls = smtp.requireTls;
+    if (smtp.username) { cfg.global.smtp_auth_username = smtp.username; cfg.global.smtp_auth_password = smtp.password || ''; }
+  }
+  cfg.route ||= {};
+  cfg.route.receiver ||= 'platform-team';
+  cfg.receivers ||= [];
+  const receiver = (team) => {
+    const name = `${team}-team`;
+    let r = cfg.receivers.find((x) => x.name === name);
+    if (!r) { r = { name }; cfg.receivers.push(r); }
+    return r;
+  };
+  for (const c of channels) {
+    if (!c.enabled) continue;
+    if (c.type === 'email' && !smtp?.configured) continue; // Alertmanager refuses email without a mail server
+    const conf = amChannel(c);
+    if (!conf) continue;
+    const r = receiver(c.team);
+    (r[TYPES[c.type].key] ||= []).push(conf);
+  }
+  // a new team gets its route: alerts with team="<team>" -> "<team>-team" (before the severity routes, like the base)
+  const routes = cfg.route.routes || [];
+  const routed = new Set(routes.flatMap((r) => (r.matchers || []).map((m) => /^team\s*=\s*"?([a-z0-9-]+)"?$/.exec(String(m))?.[1]).filter(Boolean)));
+  const defaultTeam = String(cfg.route.receiver).replace(/-team$/, '');
+  const add = [...new Set(channels.map((c) => c.team))].filter((t) => !routed.has(t) && t !== defaultTeam).sort()
+    .map((t) => ({ matchers: [`team="${t}"`], receiver: `${t}-team` }));
+  for (const t of add) receiver(t.receiver.replace(/-team$/, ''));
+  if (add.length || routes.length) cfg.route.routes = [...add, ...routes];
+  return cfg;
+}
+
+function withSmtp(cfg, smtp) {
+  cfg.global ||= {};
+  if (smtp?.configured) {
+    cfg.global.smtp_smarthost = smtp.smarthost;
+    cfg.global.smtp_from = smtp.from;
+    cfg.global.smtp_require_tls = smtp.requireTls;
+    if (smtp.username) { cfg.global.smtp_auth_username = smtp.username; cfg.global.smtp_auth_password = smtp.password || ''; }
+  }
+  return cfg;
+}
+
+/** Each policy = one receiver (its channels) + its route(s); the Default policy = the root route. */
+function renderPolicies(base, channels, smtp, policies) {
+  const cfg = withSmtp(structuredClone(base || {}), smtp);
+  const byId = new Map(channels.map((c) => [Number(c.id), c]));
+  const receiver = (name, ids) => {
+    const r = { name };
+    for (const id of ids || []) {
+      const c = byId.get(Number(id));
+      if (!c || !c.enabled || (c.type === 'email' && !smtp?.configured)) continue; // Alertmanager refuses email without a mail server
+      const conf = amChannel(c);
+      if (conf) (r[TYPES[c.type].key] ||= []).push(conf);
+    }
+    return r;
+  };
+  const timing = (p) => ({
+    ...(p.groupBy?.length ? { group_by: p.groupBy } : {}), ...(p.groupWait ? { group_wait: p.groupWait } : {}),
+    ...(p.groupInterval ? { group_interval: p.groupInterval } : {}), ...(p.repeatInterval ? { repeat_interval: p.repeatInterval } : {}),
+  });
+  const def = policies.find((p) => p.isDefault) || { channels: [] };
+  const list = policies.filter((p) => !p.isDefault && p.enabled).sort((a, b) => a.position - b.position || a.id - b.id);
+  const root = base?.route || {};
+  cfg.receivers = [receiver('default', def.channels), ...list.map((p) => receiver(`policy-${p.id}`, p.channels))];
+  cfg.route = {
+    receiver: 'default',
+    group_by: def.groupBy?.length ? def.groupBy : (root.group_by || ['alertname', 'severity', 'env']),
+    group_wait: def.groupWait || root.group_wait || '30s',
+    group_interval: def.groupInterval || root.group_interval || '5m',
+    repeat_interval: def.repeatInterval || root.repeat_interval || '4h',
+  };
+  const routes = [
+    // a rule that names its policy (Create alert -> Notification policy) goes there, whatever its labels
+    ...list.map((p) => ({ matchers: [`${SELECT_LABEL}="p${p.id}"`], receiver: `policy-${p.id}`, ...timing(p) })),
+    ...list.map((p) => ({ ...(p.matchers.length ? { matchers: p.matchers.map(matcherString) } : {}), receiver: `policy-${p.id}`, ...timing(p), ...(p.continue ? { continue: true } : {}) })),
+  ];
+  if (routes.length) cfg.route.routes = routes;
+  return cfg;
+}
+
+export function readBase() {
+  return YAML.parse(fs.readFileSync(config.alertmanagerBaseConfig, 'utf8')) || {};
+}
+
+const HEADER = `# WRITTEN BY OBSERVAONE - do not edit here, changes are overwritten.
+# Routes = ObservaOne's notification policies, receivers = its channels (Alerting -> Notification policies / channels).
+# global, inhibit_rules and time intervals come from alertmanager/alertmanager.yml (the base): edit it, restart observa.
+`;
+
+function writeFile(file, text) {
+  const tmp = path.join(path.dirname(file), `.${path.basename(file)}.tmp`);
+  fs.writeFileSync(tmp, text, { mode: 0o640 }); // the folder's group (Alertmanager's user) can read it, nobody else
+  fs.renameSync(tmp, file);
+}
+
+async function reloadAlertmanager() {
+  const url = ds('alertmanager')?.url;
+  if (!url) return { reached: false, error: 'Alertmanager is not configured' };
+  try {
+    const r = await fetch(`${url}/-/reload`, { method: 'POST', signal: AbortSignal.timeout(10_000) });
+    if (r.ok) return { reached: true, ok: true };
+    return { reached: true, ok: false, error: (await r.text()).trim().slice(0, 500) || `HTTP ${r.status}` };
+  } catch (e) {
+    return { reached: false, error: e.cause?.code || e.message };
+  }
+}
+
+let status = { ok: null, at: null, error: null, pending: false };
+let chain = Promise.resolve();
+export const applyStatus = () => status;
+
+/** Writes the config and reloads Alertmanager. Serialized; `force` reloads even when the file did not change. */
+export function applyConfig({ force = false } = {}) {
+  const run = () => doApply(force);
+  chain = chain.then(run, run);
+  return chain;
+}
+
+async function doApply(force) {
+  if (!editable()) return status;
+  const file = config.alertmanagerConfigFile;
+  try {
+    await ensurePolicies(readBase, listChannels); // once: the team setup becomes policies
+    const cfg = renderConfig(readBase(), await listChannels(), await getSmtp({ withPassword: true }), await listPolicies());
+    const text = HEADER + YAML.stringify(cfg, { lineWidth: 0 });
+    const prev = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null;
+    if (prev === text && !force) { status = { ...status, ok: status.ok ?? true, at: status.at || new Date().toISOString() }; return status; }
+    writeFile(file, text);
+    const r = await reloadAlertmanager();
+    if (r.reached && !r.ok) {
+      if (prev !== null) { writeFile(file, prev); await reloadAlertmanager(); }
+      throw new Error(`Alertmanager refused the new configuration (the previous one is kept): ${r.error}`);
+    }
+    status = { ok: true, at: new Date().toISOString(), error: null, pending: !r.reached };
+    if (!r.reached) status.error = `Saved. Alertmanager could not be reached (${r.error}); it uses the new configuration when it is back.`;
+  } catch (e) {
+    status = { ok: false, at: new Date().toISOString(), error: e.message, pending: false };
+    console.error('[notify]', e.message);
+  }
+  return status;
+}
+
+// ---------------------------------------------------------------- test send (from ObservaOne, same settings)
+async function post(url, body, headers = {}) {
+  let r;
+  try {
+    r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body), signal: AbortSignal.timeout(15_000) });
+  } catch (e) {
+    const code = e.cause?.code || e.name;
+    throw new Error({ ENOTFOUND: `cannot resolve ${new URL(url).host} (DNS)`, ECONNREFUSED: `${new URL(url).host} refused the connection`,
+      TimeoutError: `no answer from ${new URL(url).host} within 15 s (firewall or proxy?)`, CERT_HAS_EXPIRED: 'the server certificate has expired',
+      UNABLE_TO_VERIFY_LEAF_SIGNATURE: 'the server certificate is not trusted', DEPTH_ZERO_SELF_SIGNED_CERT: 'the server certificate is self-signed (not trusted)',
+      SELF_SIGNED_CERT_IN_CHAIN: 'the server certificate is not trusted (self-signed CA)' }[code] || `${code}: ${e.cause?.message || e.message}`);
+  }
+  const text = await r.text().catch(() => '');
+  if (!r.ok) throw new Error(`HTTP ${r.status}${text ? `: ${text.slice(0, 300)}` : ''}`);
+  return text;
+}
+
+export async function sendTest(row, by) {
+  const s = secretOf(row);
+  const now = new Date().toISOString();
+  const title = '[TEST] ObservaOne test notification';
+  const text = `This is a test from ObservaOne, sent by ${by} to check the channel "${row.name}". Alerts of the policies that use this channel arrive here the same way. No action is needed.`;
+  const labels = { alertname: 'ObservaOneTestNotification', severity: 'info' };
+  switch (row.type) {
+    case 'email': {
+      const m = await getSmtp({ withPassword: true });
+      if (!m.configured) throw new Error('Set up the email server first (Alerting -> Notifications -> Email server).');
+      const [host, port] = m.smarthost.split(':');
+      const t = nodemailer.createTransport({
+        host, port: Number(port), secure: Number(port) === 465, requireTLS: m.requireTls && Number(port) !== 465, ignoreTLS: !m.requireTls && Number(port) !== 465,
+        auth: m.username ? { user: m.username, pass: m.password } : undefined,
+        connectionTimeout: 10_000, greetingTimeout: 10_000, socketTimeout: 20_000,
+      });
+      try {
+        await t.sendMail({ from: m.from, to: row.settings.to, subject: title, text,
+          html: `<h3 style="margin:0 0 8px">${title}</h3><p>${text.replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]))}</p>` });
+      } catch (e) {
+        throw new Error(e.responseCode ? `mail server answered ${e.responseCode}: ${String(e.response || e.message).slice(0, 300)}` : `${e.code || 'error'}: ${e.message}`);
+      } finally { t.close(); }
+      return;
+    }
+    case 'teams': {
+      const oo = config.publicUrl;
+      await post(s.url, { type: 'message', attachments: [{ contentType: 'application/vnd.microsoft.card.adaptive', content: {
+        $schema: 'http://adaptivecards.io/schemas/adaptive-card.json', type: 'AdaptiveCard', version: '1.2', msteams: { width: 'full' },
+        body: [
+          { type: 'TextBlock', text: `🔵 TEST: ObservaOneTestNotification · info`, weight: 'Bolder', size: 'Medium', wrap: true },
+          { type: 'TextBlock', text: `- **test-host**: ${text}${oo ? ` · [Open ObservaOne](${oo}/alerting)` : ''}`, wrap: true },
+          { type: 'TextBlock', text: `Real alerts look like this: a title with the state, alert, severity and environment; one line per server with its value, since when, and links to Details, Host and Runbook.${oo ? '' : ' (Set PUBLIC_URL to get links to ObservaOne.)'}`, wrap: true, isSubtle: true },
+        ],
+      } }] });
+      return;
+    }
+    case 'slack': {
+      const oo = config.publicUrl, ts = Math.floor(Date.now() / 1000);
+      const out = await post(s.url, { ...(row.settings.channel ? { channel: row.settings.channel } : {}), attachments: [{
+        color: '#3b82f6', title: '🔵 TEST: ObservaOneTestNotification · info', ...(oo ? { title_link: `${oo}/alerting` } : {}),
+        text: `• *test-host*: ${text}\n      since <!date^${ts}^{date_short_pretty} {time}|now>${oo ? ` · <${oo}/alerting|Open ObservaOne>` : ''}\n_Real alerts look like this: one line per server with its value, since when, and links to Details, Host and Runbook.${oo ? '' : ' (Set PUBLIC_URL to get links to ObservaOne.)'}_`,
+        footer: `ObservaOne · channel ${row.name}`, fallback: `TEST from ObservaOne (${row.name})`, mrkdwn_in: ['text'],
+        ...(oo ? { actions: [{ type: 'button', text: 'Open in ObservaOne', url: `${oo}/alerting` }] } : {}),
+      }] });
+      if (out && out.trim() !== 'ok' && /error|invalid/i.test(out)) throw new Error(out.slice(0, 300));
+      return;
+    }
+    case 'webhook':
+      await post(s.url, {
+        version: '4', groupKey: '{}:{alertname="ObservaOneTestNotification"}', truncatedAlerts: 0, status: 'firing', receiver: `channel-${row.id}`,
+        groupLabels: { alertname: labels.alertname }, commonLabels: labels, commonAnnotations: { summary: title, description: text },
+        externalURL: config.publicUrl || '', alerts: [{ status: 'firing', labels, annotations: { summary: title, description: text }, startsAt: now,
+          endsAt: '0001-01-01T00:00:00Z', generatorURL: '', fingerprint: '0000000000000000' }],
+      }, s.token ? { Authorization: `Bearer ${s.token}` } : {});
+      return;
+    case 'pagerduty': {
+      const key = `observaone-test-${Date.now()}`;
+      await post('https://events.pagerduty.com/v2/enqueue', { routing_key: s.routingKey, event_action: 'trigger', dedup_key: key, payload: { summary: title, source: 'ObservaOne', severity: 'info', custom_details: { message: text } } });
+      await post('https://events.pagerduty.com/v2/enqueue', { routing_key: s.routingKey, event_action: 'resolve', dedup_key: key }).catch(() => {});
+      return;
+    }
+    default: throw new Error('Unknown channel type');
+  }
+}
+
+export async function recordTest(id, ok, error) {
+  await q('UPDATE notification_channels SET last_test_at = now(), last_test_ok = $2, last_test_error = $3 WHERE id = $1', [id, ok, error || null]);
+}
+export const channelById = (id) => one('SELECT * FROM notification_channels WHERE id = $1', [id]);

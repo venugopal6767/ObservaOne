@@ -2,7 +2,7 @@
 import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Trash2 } from 'lucide-react';
+import { Copy, Trash2 } from 'lucide-react';
 import { api } from '@/lib/api';
 import { escapeLabel } from '@/lib/format';
 import { useApp } from '@/app/AppContext';
@@ -48,11 +48,21 @@ export default function DashboardView() {
   const editable = d.kind === 'custom' && can('dashboards.edit');
   const ready = (d.variables || []).every((v) => vars[v.name] !== undefined);
   const escVars = Object.fromEntries(Object.entries(vars).map(([k, v]) => [k, escapeLabel(v)]));
+  const cloneDash = async () => {
+    try {
+      const nd = await api<Dash>(`/dashboards/${encodeURIComponent(d.id)}/clone`, { method: 'POST', body: { title: `${d.title} (custom)`.slice(0, 60) } });
+      for (const [k, v] of Object.entries(vars)) sessionStorage.setItem(`oo.var.${nd.id}.${k}`, v); // keep the current selection
+      toast('Cloned to an editable custom dashboard');
+      qc.invalidateQueries({ queryKey: ['dashboards'] });
+      navigate(`/dashboards/${nd.id}`);
+    } catch (e) { toast((e as Error).message, 'err'); }
+  };
 
   return (
     <>
       <PageHead title={<>{d.title}<Pill tone={d.kind === 'system' ? 'blue' : 'purple'}>{d.kind === 'system' ? 'System' : 'Custom'}</Pill></>} sub={d.description}
         actions={<>
+          {can('dashboards.edit') && <button className="btn" onClick={cloneDash}><Copy size={14} />Clone to customise</button>}
           <Link to="/dashboards" className="btn">All dashboards</Link>
           {editable && <button className="btn btn-danger" onClick={async () => {
             if (!(await confirm('Delete dashboard', `Delete "${d.title}"? This cannot be undone.`, 'Delete'))) return;

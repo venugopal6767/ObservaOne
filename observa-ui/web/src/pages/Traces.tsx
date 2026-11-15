@@ -8,9 +8,11 @@ import { api } from '@/lib/api';
 import { fmt, dateTime, timeHeader, escapeLabel } from '@/lib/format';
 import { color, palette, readableOn } from '@/lib/theme';
 import { useApp, useRangeQuery, windowQuery } from '@/app/AppContext';
-import { ErrorState, PageHead, Pill, Select, StateView, Tabs, Time, TableWrap, copyText } from '@/components/ui';
+import { ErrorState, Modal, PageHead, Pill, Select, StateView, Tabs, Time, TableWrap, copyText } from '@/components/ui';
+import { TraceSetup } from './TraceSetup';
+import { buildTraceQuery, distinctServices, activeTraceFilters, FILTER_LABEL } from '@/lib/traces';
 
-interface TraceRow { traceId: string; rootService: string; rootName: string; startMs: number; durationMs: number; error: boolean | null; spanCount: number | null }
+interface TraceRow { traceId: string; rootService: string; rootName: string; startMs: number; durationMs: number; error: boolean | null; spanCount: number | null; namespace?: string | null; env?: string | null }
 interface Span { spanId: string; parentId: string | null; service: string; name: string; startMs: number; durationMs: number; error: boolean; statusMessage?: string }
 interface Trace { traceId: string; startMs: number; durationMs: number; error: boolean; spans: Span[] }
 
@@ -21,7 +23,11 @@ export default function Traces() {
   const [text, setText] = useState(initial);
   const [query, setQuery] = useState(initial);
   const [minDur, setMinDur] = useState(0);
+  const [fService, setFService] = useState('');
+  const [fNs, setFNs] = useState('');
+  const [fEnv, setFEnv] = useState('');
   const [selected, setSelected] = useState<string | null>(params.get('id'));
+  const [setup, setSetup] = useState(false);
 
   useEffect(() => {
     const q = params.get('q'); const id = params.get('id');
@@ -29,7 +35,7 @@ export default function Traces() {
     if (id && id !== selected) setSelected(id);
   }, [params]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const list = useRangeQuery(['traces', query, minDur], (r) => api<{ traces: TraceRow[] }>('/traces', { query: { query, ...r, limit: 25, minDurationMs: minDur || undefined } }), { autoRefresh: false });
+  const list = useRangeQuery(['traces', query, minDur, fNs, fEnv], (r) => api<{ traces: TraceRow[] }>('/traces', { query: { query: buildTraceQuery(query, { namespace: fNs, env: fEnv }), ...r, limit: 25, minDurationMs: minDur || undefined } }), { autoRefresh: false });
   useEffect(() => {
     if (list.isError) {
       const e = list.error as { state?: string; status?: number };
@@ -56,14 +62,22 @@ export default function Traces() {
   }
 
   const traces = list.data?.traces || [];
+  const services = distinctServices(traces);
+  const shown = fService ? traces.filter((x) => x.rootService === fService) : traces;
+  const chips = activeTraceFilters({ namespace: fNs, env: fEnv, service: fService });
+  const clearChip = (k: string) => (k === 'namespace' ? setFNs('') : k === 'env' ? setFEnv('') : setFService(''));
   return (
     <>
-      <PageHead title="Traces Explorer" sub="Search and analyze distributed traces" />
+      <PageHead title="Traces Explorer" sub="Search and analyze distributed traces" actions={<button className="btn btn-sm" onClick={() => setSetup(true)}>Send traces</button>} />
       <div className="query-bar">
         <div className="query-input"><input value={text} spellCheck={false} placeholder="All services, or e.g. service.name=checkout http.status_code=500" aria-label="Trace search" onChange={(e) => setText(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && run()} /></div>
         <Select className="select" label="Minimum duration" value={minDur} onChange={setMinDur} options={[[0, 'Any duration'], [100, '≥ 100 ms'], [500, '≥ 500 ms'], [1000, '≥ 1 s'], [5000, '≥ 5 s']]} style={{ height: 40 }} />
+        <Select className="select" label="Service" value={fService} onChange={setFService} options={[['', 'Service: all'] as [string, string], ...services.map((s) => [s, s] as [string, string])]} style={{ height: 40 }} />
+        <input className="input" style={{ height: 40, width: 150 }} placeholder="Namespace" aria-label="Namespace filter" value={fNs} onChange={(e) => setFNs(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && run()} />
+        <input className="input" style={{ height: 40, width: 140 }} placeholder="Environment" aria-label="Environment filter" value={fEnv} onChange={(e) => setFEnv(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && run()} />
         <button className="btn btn-primary" onClick={run}>Search</button>
       </div>
+      {chips.length > 0 && <div className="trace-chips">{chips.map(([k, v]) => (<button key={k} className="filter-chip" onClick={() => clearChip(k)}>{FILTER_LABEL[k]}: <b>{v}</b> <span aria-hidden>×</span></button>))}</div>}
       <div className="split">
         <div>
           {list.isPending ? <TableWrap label="Traces"><StateView kind="loading" skeleton="table" /></TableWrap>
@@ -72,13 +86,14 @@ export default function Traces() {
                 : (
                   <TableWrap label="Traces" style={{ maxHeight: 'calc(100vh - 230px)' }}>
                     <table className="tbl">
-                      <thead><tr><th>Trace ID</th><th className="num">Duration</th><th>Service</th><th>Operation</th><th>{timeHeader('Started')}</th></tr></thead>
+                      <thead><tr><th>Trace ID</th><th className="num">Duration</th><th>Service</th><th>Namespace</th><th>Operation</th><th>{timeHeader('Started')}</th></tr></thead>
                       <tbody>
-                        {traces.map((t) => (
+                        {shown.map((t) => (
                           <tr key={t.traceId} className={`clickable ${t.traceId === selected ? 'sel' : ''}`} tabIndex={0} onClick={() => pick(t.traceId)} onKeyDown={(e) => e.key === 'Enter' && pick(t.traceId)}>
                             <td className="mono trace-id">{t.traceId.slice(0, 12)}</td>
                             <td className={`num ${t.durationMs > 2000 ? 'c-red' : t.durationMs > 1000 ? 'c-orange' : ''}`}>{fmt(t.durationMs, 'ms')}</td>
                             <td>{t.rootService}</td>
+                            <td>{t.namespace ? <Pill tone="muted">{t.namespace}</Pill> : <span className="dim">—</span>}</td>
                             <td className="dim ell" style={{ maxWidth: 120, fontSize: 12 }} title={t.rootName}>{t.rootName}</td>
                             <td className="dim" style={{ fontSize: 12 }}><Time ms={t.startMs} text={dateTime(t.startMs).slice(11)} /></td>
                           </tr>
@@ -90,6 +105,7 @@ export default function Traces() {
         </div>
         <section className="panel">{selected ? <TraceDetail id={selected} /> : <StateView kind="empty" title="No trace selected" />}</section>
       </div>
+      {setup && <Modal title="Send traces to ObservaOne" wide onClose={() => setSetup(false)}><TraceSetup /></Modal>}
     </>
   );
 }

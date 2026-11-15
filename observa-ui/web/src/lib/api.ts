@@ -53,7 +53,7 @@ export interface User {
   permissions: string[]; authSource: string; mfaEnabled?: boolean; lastLogin?: string; restricted?: string;
 }
 export interface Me {
-  user: User; brand: string; sessionIdleMinutes: number; rulesEditable: boolean;
+  user: User; brand: string; sessionIdleMinutes: number; rulesEditable: boolean; demoData?: boolean;
   modules: string[]; prefs: Record<string, any>;
 }
 export type PromVector = { metric: Record<string, string>; value: [number, string] }[];

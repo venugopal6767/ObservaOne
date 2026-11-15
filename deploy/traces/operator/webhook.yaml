@@ -1,0 +1,86 @@
+# Mutating admission webhook that injects OTel instrumentation into annotated pods,
+# driven by the ObservaInstrumentation CR. Needs cert-manager for the webhook TLS cert.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: observaone-webhook, namespace: observaone }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: { name: observaone-webhook }
+rules:
+  - apiGroups: [observaone.io]
+    resources: [observainstrumentations]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: { name: observaone-webhook }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: observaone-webhook }
+subjects: [{ kind: ServiceAccount, name: observaone-webhook, namespace: observaone }]
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata: { name: observaone-webhook, namespace: observaone }
+spec: { selfSigned: {} }
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata: { name: observaone-webhook, namespace: observaone }
+spec:
+  secretName: observaone-webhook-tls
+  dnsNames: [observaone-webhook.observaone.svc]
+  issuerRef: { name: observaone-webhook, kind: Issuer }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: observaone-webhook, namespace: observaone }
+spec:
+  replicas: 2
+  selector: { matchLabels: { app: observaone-webhook } }
+  template:
+    metadata: { labels: { app: observaone-webhook } }
+    spec:
+      serviceAccountName: observaone-webhook
+      containers:
+        - name: webhook
+          image: REGISTRY/observaone-traces-webhook:dev   # built from main.go — see README
+          args: ["--tls-cert=/tls/tls.crt", "--tls-key=/tls/tls.key"]
+          ports: [{ containerPort: 8443 }]
+          volumeMounts: [{ name: tls, mountPath: /tls, readOnly: true }]
+      volumes:
+        - name: tls
+          secret: { secretName: observaone-webhook-tls }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: observaone-webhook, namespace: observaone }
+spec:
+  selector: { app: observaone-webhook }
+  ports: [{ port: 443, targetPort: 8443 }]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: observaone-traces
+  annotations:
+    cert-manager.io/inject-ca-from: observaone/observaone-webhook
+webhooks:
+  - name: instrument.observaone.io
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    failurePolicy: Ignore   # never block pod admission if the webhook is down
+    objectSelector:
+      matchExpressions:
+        - { key: observaone.io/traces, operator: In, values: ["true"] }
+    rules:
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [CREATE]
+        resources: [pods]
+        scope: Namespaced
+    clientConfig:
+      service: { name: observaone-webhook, namespace: observaone, path: /mutate }

@@ -8,10 +8,10 @@ global:
   external_labels:
     site: dc1            # change to your data-centre name
 
-# Agents push metrics; accept samples that arrive up to 30 min late (after a network outage)
+# Agents push metrics; accept samples that arrive up to 2 h late (after a network outage)
 storage:
   tsdb:
-    out_of_order_time_window: 30m
+    out_of_order_time_window: 2h      # late samples: agent buffers (memory 10 min, optional disk 2 h) and site gateways
 
 rule_files:
   - /etc/prometheus/rules/*.yml
@@ -48,10 +48,9 @@ scrape_configs:
 
   # ---- Linux servers (node_exporter on port 9100) ----
   - job_name: linux
-    static_configs:
-      - targets: ["node-exporter:9100"]   # the monitoring server itself
-        labels:
-          role: monitoring
+    # Only the servers you list in targets/linux*.yml. Servers with the ObservaOne Agent push their data and
+    # need no entry here. (To also watch the ObservaOne server itself: docker compose --profile self-monitoring up -d
+    # and add "node-exporter:9100" to targets/linux.yml.)
     file_sd_configs:
       - files: ["/etc/prometheus/targets/linux*.yml"]
         refresh_interval: 1m
@@ -66,6 +65,60 @@ scrape_configs:
         regex: "node-exporter:9100"
         target_label: host
         replacement: "monitoring-server"
+
+  # ---- ObservaOne Agents in pull mode (mode: pull in agent.yaml) ----
+  # The target list comes from ObservaOne (enrolled agents, their addresses and labels). HTTPS both ways:
+  # agents have certificates from the ObservaOne agent CA, and Prometheus shows its client certificate.
+  # The files in /etc/prometheus-agents are written by the observa container (volume agent-pull).
+  - job_name: observaone-agents
+    scrape_interval: 15s
+    scheme: https
+    http_sd_configs:
+      - url: http://observa:8080/api/v1/sd/agents?kind=pull
+        refresh_interval: 30s
+        authorization:
+          credentials_file: /etc/prometheus-agents/sd-token
+    tls_config:
+      ca_file: /etc/prometheus-agents/ca.crt
+      cert_file: /etc/prometheus-agents/prometheus.crt
+      key_file: /etc/prometheus-agents/prometheus.key
+
+  # ---- Reachability of agent hosts, for the Agents page diagnosis (blackbox exporter) ----
+  - job_name: observaone-agent-ping
+    scrape_interval: 30s
+    metrics_path: /probe
+    params:
+      module: [icmp]
+    http_sd_configs:
+      - url: http://observa:8080/api/v1/sd/agents?kind=ping
+        refresh_interval: 60s
+        authorization:
+          credentials_file: /etc/prometheus-agents/sd-token
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox:9115
+
+  - job_name: observaone-agent-port
+    scrape_interval: 30s
+    metrics_path: /probe
+    params:
+      module: [tcp_connect]
+    http_sd_configs:
+      - url: http://observa:8080/api/v1/sd/agents?kind=port
+        refresh_interval: 60s
+        authorization:
+          credentials_file: /etc/prometheus-agents/sd-token
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox:9115
 
   # ---- The monitoring stack watches itself ----
   - job_name: prometheus

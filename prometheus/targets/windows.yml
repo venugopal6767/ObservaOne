@@ -1,24 +1,9 @@
-# Windows servers to monitor. One entry per server: "name-or-ip:9182".
-# Prometheus re-reads this file every minute. No restart needed.
-# Labels are free text; they show in dashboards and alert emails.
-
-# LAB: windows_exporter running on the same PC as Docker Desktop
-- targets:
-    - "host.docker.internal:9182"
-  labels:
-    env: lab
-    role: test
-
-# REAL SERVERS: remove the "#" and put your server names
+# Windows servers scraped directly by Prometheus (windows_exporter on port 9182), without the ObservaOne Agent.
+# Prefer the agent (Agents > Windows). Prometheus re-reads this file every minute; no restart needed.
+# Example:
 # - targets:
-#     - "winapp01.example.local:9182"
-#     - "winapp02.example.local:9182"
+#     - "win-app-01.example.local:9182"
 #   labels:
 #     env: prod
 #     role: app
-#
-# - targets:
-#     - "winsql01.example.local:9182"
-#   labels:
-#     env: prod
-#     role: database
+[]

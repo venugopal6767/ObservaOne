@@ -376,3 +376,43 @@ export function AuditTab() {
     </>
   );
 }
+
+// ---------------- tenants (organisations that must not see each other's agents and series) ----------------
+interface TenantRow { id: string; name: string; users: number; agents: number; createdBy: string; createdAt: string; isDefault: boolean }
+export function TenantsTab() {
+  const q = useQuery({ queryKey: ['tenants'], queryFn: () => api<{ tenants: TenantRow[]; users: { username: string; tenant: string }[] }>('/tenants') });
+  const [name, setName] = useState('');
+  if (q.isPending) return <StateView kind="loading" skeleton="table" />;
+  if (q.isError) return <TableWrap label="Tenants"><ErrorState error={q.error} what="Tenants" /></TableWrap>;
+  const { tenants, users } = q.data;
+  const create = async () => { try { await api('/tenants', { method: 'POST', body: { name } }); toast(`Tenant ${name} created`); setName(''); q.refetch(); } catch (e) { errMsg(e); } };
+  const move = async (username: string, tenant: string) => { try { await api(`/users/${encodeURIComponent(username)}/tenant`, { method: 'PUT', body: { tenant } }); toast(`${username} moved`); q.refetch(); } catch (e) { errMsg(e); } };
+  return (
+    <>
+      <p className="muted" style={{ marginTop: 0 }}>
+        Users of the <b>Default</b> tenant run the platform and see every tenant. Users of any other tenant see only their own agents, tokens and targets,
+        and every metrics query they run is limited to their own servers. Agents belong to the tenant of the token they enrolled with.
+      </p>
+      <div className="toolbar">
+        <input className="input" placeholder="New tenant name, e.g. Acme Bank" aria-label="New tenant" style={{ width: 260 }} value={name} onChange={(e) => setName(e.target.value)} />
+        <button className="btn btn-primary" disabled={!name.trim()} onClick={create}><Plus size={15} />Add tenant</button>
+      </div>
+      <TableWrap label="Tenants">
+        <table className="tbl">
+          <thead><tr><th>Tenant</th><th>ID</th><th className="num">Users</th><th className="num">Agents</th><th>Created</th></tr></thead>
+          <tbody>{tenants.map((t) => <tr key={t.id}><td><b>{t.name}</b>{t.isDefault && <span className="dim"> (platform)</span>}</td><td className="mono">{t.id}</td><td className="num">{t.users}</td><td className="num">{t.agents}</td><td className="dim">{t.createdBy}</td></tr>)}</tbody>
+        </table>
+      </TableWrap>
+      <h3 style={{ margin: '18px 0 8px' }}>Users by tenant</h3>
+      <TableWrap label="Users by tenant">
+        <table className="tbl">
+          <thead><tr><th>User</th><th>Tenant</th></tr></thead>
+          <tbody>{users.map((u) => (
+            <tr key={u.username}><td>{u.username}</td>
+              <td><Select className="select" label={`Tenant of ${u.username}`} style={{ width: 240 }} value={u.tenant} onChange={(v) => move(u.username, v)} options={tenants.map((t) => [t.id, t.name] as [string, string])} /></td></tr>
+          ))}</tbody>
+        </table>
+      </TableWrap>
+    </>
+  );
+}

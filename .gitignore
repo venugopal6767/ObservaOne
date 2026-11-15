@@ -3,3 +3,17 @@ observa-ui/node_modules/
 observa-ui/data/
 nginx/certs/*.key
 nginx/certs/*.crt
+
+# built by scripts/build-agent.sh (agent-build service)
+agent/files/observaone-agent-*
+agent/files/SHA256SUMS
+
+# agent release signing key for manual builds (scripts/build-agent.sh creates it; keep it private and backed up)
+.agent-keys/
+__pycache__/
+*.pyc
+
+# Claude Code transfer artifacts (not part of the project)
+observaone-web-src.*
+observaone-dashboards.*
+.ecc-skills-vendor.tgz

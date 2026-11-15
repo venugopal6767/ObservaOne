@@ -19,6 +19,7 @@ function json(k, d) {
 export const config = {
   port: Number(env('PORT', 8080)),
   brand: env('UI_BRAND', 'ObservaOne'),
+  demoData: env('UI_DEMO_DATA', 'false') === 'true', // set by demo/docker-compose.demo.yml: shows a 'Demo data' chip (the data itself always comes from the real data sources)
   publicUrl: env('PUBLIC_URL', '').replace(/\/+$/, ''), // e.g. https://monitoring.example.local (SSO redirects, links in alerts)
 
   // ---- Single sign-on (each provider is on when its client id is set) ----
@@ -66,10 +67,24 @@ export const config = {
   // ObservaOne Agent: the HTTPS certificate agents must trust (shown as a SHA-256 fingerprint in the install command)
   agent: {
     serverCertFile: env('AGENT_SERVER_CERT', '/certs/server.crt'),
-    onlineSeconds: Number(env('AGENT_ONLINE_SECONDS', '150')),
+    onlineSeconds: Number(env('AGENT_ONLINE_SECONDS', '150')),   // no heartbeat for longer = "Not reporting"
+    offlineSeconds: Number(env('AGENT_OFFLINE_SECONDS', '900')), // no heartbeat for longer = "Offline"
+    heartbeatSeconds: Number(env('AGENT_HEARTBEAT_SECONDS', '30')), // told to agents at enrollment / every heartbeat
+    credentialDays: Number(env('AGENT_CREDENTIAL_DAYS', '90')),        // agents (1.3+) get a new credential after this many days; 0 = never
+    minVersion: env('AGENT_MIN_VERSION', '1.0.0'),                // older agents are flagged "Needs attention"
+    enrollPerIpPer10Min: Number(env('AGENT_ENROLL_RATE', '300')),          // all enrollments per address / 10 min
+    enrollFailuresPer10Min: Number(env('AGENT_ENROLL_FAILURES', '10')),
+    tokenPurgeMinutes: Number(env('AGENT_TOKEN_PURGE_MINUTES', '5')),     // revoked/expired tokens deleted after this; 0 = keep    // failed enrollments per address / 10 min
+    remoteWriteUrl: env('PROMETHEUS_REMOTE_WRITE_URL', ''),   // default: <Prometheus data source>/api/v1/write
+    pkiDir: env('AGENT_PKI_DIR', ''),                          // agent CA for pull mode (default <DATA_DIR>/agent-pki)
+    prometheusDir: env('AGENT_PROMETHEUS_DIR', ''),            // copy of CA + Prometheus client cert + SD token for Prometheus (empty = off)
   },
   dataDir: path.resolve(env('DATA_DIR', './data')),
   configDir: path.resolve(env('CONFIG_DIR', './config')),
+  // Notification channels: ObservaOne writes Alertmanager's config = the base file + the channels from the UI
+  alertmanagerConfigFile: env('AM_CONFIG_FILE', ''),          // e.g. /etc/alertmanager-ui/alertmanager.yml (empty = read-only)
+  notifyTimezone: env('NOTIFY_TIMEZONE', 'UTC'),                // times in Teams / email messages, e.g. Asia/Kolkata (Slack shows each reader's own)
+  alertmanagerBaseConfig: env('AM_BASE_CONFIG', '/etc/alertmanager-base/alertmanager.yml'),
   rulesFile: env('UI_RULES_FILE', ''), // e.g. /etc/prometheus/rules/ui-rules.yml (empty = UI rule editing off)
 
   // PostgreSQL: DATABASE_URL, or the separate DB_* settings

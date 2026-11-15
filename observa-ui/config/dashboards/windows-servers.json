@@ -18,7 +18,7 @@
     {
       "title": "Status",
       "type": "stat",
-      "query": "up{job=\"windows\",host=\"$host\"}",
+      "query": "max(last_over_time(up{job=\"windows\",host=\"$host\"}[120s]))",
       "unit": "none",
       "legend": "",
       "w": 3
@@ -26,7 +26,7 @@
     {
       "title": "CPU used",
       "type": "stat",
-      "query": "clamp(100 - (avg(rate(windows_cpu_time_total{host=\"$host\",mode=\"idle\"}[5m])) * 100), 0, 100)",
+      "query": "clamp(100 * (1 - sum(rate(windows_cpu_time_total{host=\"$host\",mode=\"idle\"}[5m])) / sum(rate(windows_cpu_time_total{host=\"$host\"}[5m]))), 0, 100)",
       "unit": "percent",
       "legend": "",
       "w": 3
@@ -34,7 +34,7 @@
     {
       "title": "Memory used",
       "type": "stat",
-      "query": "100 * (1 - windows_memory_available_bytes{host=\"$host\"} / windows_memory_physical_total_bytes{host=\"$host\"})",
+      "query": "100 * (1 - max(last_over_time(windows_memory_available_bytes{host=\"$host\"}[120s])) / max(last_over_time(windows_memory_physical_total_bytes{host=\"$host\"}[120s])))",
       "unit": "percent",
       "legend": "",
       "w": 3
@@ -50,7 +50,7 @@
     {
       "title": "CPU used %",
       "type": "line",
-      "query": "clamp(100 - (avg(rate(windows_cpu_time_total{host=\"$host\",mode=\"idle\"}[5m])) * 100), 0, 100)",
+      "query": "clamp(100 * (1 - sum(rate(windows_cpu_time_total{host=\"$host\",mode=\"idle\"}[5m])) / sum(rate(windows_cpu_time_total{host=\"$host\"}[5m]))), 0, 100)",
       "unit": "percent",
       "legend": "CPU",
       "w": 6

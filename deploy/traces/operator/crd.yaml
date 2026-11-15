@@ -1,0 +1,36 @@
+# ObservaOne custom auto-instrumentation CRD (Phase 3 — alternative to the upstream OTel Operator).
+# Declares HOW to instrument workloads; the mutating webhook (webhook.yaml) acts on it.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: observainstrumentations.observaone.io
+spec:
+  group: observaone.io
+  scope: Namespaced
+  names:
+    kind: ObservaInstrumentation
+    plural: observainstrumentations
+    singular: observainstrumentation
+    shortNames: [obsinstr]
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                language: { type: string, enum: [java, nodejs, python, dotnet] }
+                endpoint: { type: string, description: "OTLP/HTTP endpoint, e.g. http://$(NODE_IP):4318" }
+                sampler:
+                  type: object
+                  properties:
+                    ratio: { type: string }
+                selector:
+                  type: object
+                  properties:
+                    annotation: { type: string, description: "pod annotation that opts a workload in" }
+                    namespaces: { type: array, items: { type: string } }
