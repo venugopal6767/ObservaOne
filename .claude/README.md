@@ -15,6 +15,10 @@ Re-copy the folder from upstream at a newer commit and update the commit in
 `skills/THIRD_PARTY_SKILLS.md`. Sources are listed there.
 
 ## Optional: Everything Claude Code (ECC)
+**Update (2026-11-15):** a curated subset of 33 ECC skills (stack-relevant: React/TS/Vite,
+Node/Express/Postgres, Go, Docker/K8s, security) is now vendored directly under `skills/` —
+see `skills/ECC_VENDORED.md`. The rest of the full bundle is still left out, for the reasons below.
+
 Not installed, on purpose: ECC bundles its own ~48 agents + 180+ skills that would
 duplicate the agents in `agents/` and enlarge every session's context — which conflicts
 with this project's "avoid duplicates / don't load irrelevant skills / token economy"

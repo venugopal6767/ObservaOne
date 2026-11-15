@@ -39,9 +39,12 @@ Installed on: 2026-11-14 · Installed into branch: chore/claude-code-toolkit
   ObservaOne uses **Vite** (not Next.js) and is self-hosted via Docker (not deployed to Vercel);
   no React Native. Only the stack-general React/design skills were taken.
 - **Trail of Bits blockchain/smart-contract/fuzzing skills** (building-secure-contracts/*, testing-handbook-skills/*, trailmark/*, language reviews for c/cpp/rust, etc.): not applicable to a TS/Node/Go web app.
-- **Everything Claude Code (ECC)** full bundle: it ships its own 48 agents + 180+ skills that would
-  duplicate the agents in `.claude/agents/` and bloat context. Left as an opt-in marketplace —
-  see README "Optional: ECC". 
+- **Everything Claude Code (ECC)** full bundle: the plugin ships 71 agents + 314 skills. The full
+  bundle is still left out (would duplicate `.claude/agents/` and bloat context). A **curated subset
+  of 33 stack-relevant ECC skills is now vendored** — source github.com/affaan-m/everything-claude-code
+  (plugin `ecc` v2.2.3), pinned commit `d2ef2680594f9a17526a6e1a2e18b3d242c5d17b`, MIT. The list and
+  rationale are in `.claude/skills/ECC_VENDORED.md`. To swap to the self-updating full plugin instead,
+  see README "Optional: ECC" and delete the vendored copies.
 
 ## External tools some security skills expect (install only if/when you run them)
 - semgrep (`pipx install semgrep`), CodeQL CLI, SARIF tooling. The skills degrade to guidance without them.
